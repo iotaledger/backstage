@@ -1,5 +1,5 @@
 [package]
-name = "chronicle"
+name = "backstage"
 version = "0.3.0"
 authors = ["IOTA Stiftung"]
 edition = "2018"

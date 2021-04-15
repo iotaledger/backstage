@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 //////////////////////////////// HelloWorld App ////////////////////////////////////////////
 use async_trait::async_trait;
-use chronicle::*;
+use backstage::*;
 
 // App builder
 builder!(

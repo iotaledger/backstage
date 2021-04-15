@@ -797,7 +797,7 @@ macro_rules! launcher {
                 }
                 // update service to stopped
                 SERVICE.write().await.update_status(ServiceStatus::Stopped);
-                info!("Thank you for using Chronicle.rs, GoodBye");
+                info!("Thank you for using Backstage, GoodBye");
                 status
             }
         }

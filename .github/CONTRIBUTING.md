@@ -1,6 +1,6 @@
-# Contribute to Chronicle
+# Contribute to Backstage
 
-This document describes how to contribute to Chronicle.
+This document describes how to contribute to Backstage.
 
 We encourage everyone with knowledge of IOTA technology to contribute.
 
@@ -24,7 +24,7 @@ If you have a general or technical question, you can use one of the following re
 <summary>Ways to contribute :mag:</summary>
 <br>
 
-To contribute to Chronicle on GitHub, you can:
+To contribute to Backstage on GitHub, you can:
 
 - Report a bug
 - Suggest a new feature
@@ -45,13 +45,13 @@ This section guides you through reporting a bug. Following these guidelines help
 
 Please check the following list:
 
-- **Ensure the bug was not already reported** by searching on GitHub under [**Issues**](https://github.com/iotaledger/chronicle.rs/issues). If the bug has already been reported **and the issue is still open**, add a comment to the existing issue instead of opening a new one.
+- **Ensure the bug was not already reported** by searching on GitHub under [**Issues**](https://github.com/iotaledger/backstage.rs/issues). If the bug has already been reported **and the issue is still open**, add a comment to the existing issue instead of opening a new one.
 
 **Note:** If you find a **Closed** issue that seems similar to what you're experiencing, open a new issue and include a link to the original issue in the body of your new one.
 
 ### Submitting A Bug Report
 
-To report a bug, [open a new issue](https://github.com/iotaledger/chronicle.rs/issues/new), and be sure to include as many details as possible.
+To report a bug, [open a new issue](https://github.com/iotaledger/backstage.rs/issues/new), and be sure to include as many details as possible.
 
 **Note:** Minor changes such as fixing a typo can but do not need an open issue.
 
@@ -68,13 +68,13 @@ This section guides you through suggesting a new feature. Following these guidel
 
 ### Before suggesting a new feature
 
-**Ensure the feature has not already been suggested** by searching on GitHub under [**Issues**](https://github.com/iotaledger/chronicle.rs/issues).
+**Ensure the feature has not already been suggested** by searching on GitHub under [**Issues**](https://github.com/iotaledger/backstage.rs/issues).
 
 ### Suggesting a new feature
 
-To suggest a new feature, talk to the IOTA community and IOTA Foundation members in the #chronicle-discussion channel on [Discord](https://discord.iota.org/).
+To suggest a new feature, talk to the IOTA community and IOTA Foundation members in the #backstage-discussion channel on [Discord](https://discord.iota.org/).
 
-If the Chronicle team approves your feature, the team will create an issue for it.
+If the Backstage team approves your feature, the team will create an issue for it.
 </details>
 
 <br>
@@ -87,7 +87,7 @@ This section guides you through building a new feature. Following these guidelin
 
 ### Before building a new feature
 
-Make sure to discuss the feature in the #chronicle-discussion channel on [Discord](https://discord.iota.org/).
+Make sure to discuss the feature in the #backstage-discussion channel on [Discord](https://discord.iota.org/).
 
 Otherwise, your feature may not be approved at all.
 
@@ -102,7 +102,7 @@ To build a new feature, check out a new branch based on the `develop` branch.
 <summary>Contribute to the documentation :black_nib:</summary>
 <br>
 
-The Chronicle documentation is hosted on https://docs.iota.org, which is built from content in the [documentation](https://github.com/iotaledger/documentation) repository.
+The Backstage documentation is hosted on https://docs.iota.org, which is built from content in the [documentation](https://github.com/iotaledger/documentation) repository.
 
 Please see the [guidelines](https://github.com/iotaledger/documentation/CONTRIBUTING.md) on the documentation repository for information on how to contribute to the documentation.
 </details>

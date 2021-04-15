@@ -1,5 +1,5 @@
 ---
-name: Bug report for Chronicle
+name: Bug report for Backstage
 about: Create a report to help us improve
 title: ''
 labels: ''
@@ -13,7 +13,7 @@ Briefly describe the bug.
 
 ## Version
 
-Which version of Chronicle are you running? (Please provide the commit version).
+Which version of Backstage are you running? (Please provide the commit version).
 
 - Version:
 

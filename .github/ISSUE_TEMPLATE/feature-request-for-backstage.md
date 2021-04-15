@@ -1,5 +1,5 @@
 ---
-name: Feature request for Chronicle
+name: Feature request for Backstage
 about: Suggest an idea for this project
 title: ''
 labels: ''
