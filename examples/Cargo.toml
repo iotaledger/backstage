@@ -5,13 +5,13 @@ publish = false
 edition = "2018"
 
 [dev-dependencies]
-serde = { version = "1.0.114", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
 backstage = {path = "../"}
-tokio = { version = "1.0", features = ["full", "time", "signal"] }
+tokio = { version = "1.5", features = ["macros", "rt-multi-thread", "signal"] }
 futures = "0.3"
-env_logger = "0.7.1"
-log = "*"
-async-trait = "0.1.40"
+env_logger = "0.8"
+log = "0.4"
+async-trait = "0.1"
 serde_json = "1.0"
 
 [[example]]
