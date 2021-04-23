@@ -7,7 +7,7 @@ license-file = "LICENSE"
 homepage = "https://www.iota.org"
 repository = "https://github.com/iotaledger/backstage"
 description = "A framework for building data-driven distributed systems"
-keywords = ["iota", "tangle", "chronicle", "framework", "backstage", "actor", "actor-model"]
+keywords = ["iota", "distributed", "framework", "backstage", "actor"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
