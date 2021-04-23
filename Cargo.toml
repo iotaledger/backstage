@@ -22,3 +22,11 @@ serde_json = "1.0"
 tokio = { version = "1.5", features = ["macros", "rt-multi-thread", "signal"] }
 env_logger = "0.8"
 log = "0.4"
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+
+[[example]]
+name = "two_apps"
+path = "examples/two_apps.rs"
