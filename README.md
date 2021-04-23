@@ -81,4 +81,4 @@ If you want to get involved in the community, need help with getting set up, hav
 
 (c) 2021 - IOTA Stiftung
 
-IOTA Chronicle is distributed under the Apache License (Version 2.0).
+IOTA Backstage is distributed under the Apache License (Version 2.0).
