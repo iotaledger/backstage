@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::newactor::*;
+use backstage::newactor::{launcher::*, *};
 use backstage_macros::{build, launcher};
 use log::info;
 use serde::{Deserialize, Serialize};

@@ -1,150 +1,120 @@
-use std::borrow::Cow;
+use anyhow::anyhow;
+use async_trait::async_trait;
+use backstage::newactor::{launcher::*, *};
+use backstage_macros::{build, launcher};
+use log::info;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 //////////////////////////////// HelloWorld App ////////////////////////////////////////////
-use async_trait::async_trait;
-use backstage::*;
-
-// App builder
-builder!(
-    #[derive(Clone)]
-    HelloWorldBuilder {}
-);
-
-impl ThroughType for HelloWorldBuilder {
-    type Through = HelloWorldEvent;
+#[derive(Error, Debug)]
+pub enum HelloWorldError {
+    #[error("Something went wrong")]
+    SomeError,
 }
 
-impl Builder for HelloWorldBuilder {
-    type State = HelloWorld;
-    fn build(self) -> Self::State {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
-        HelloWorld {
-            tx,
-            rx,
-            service: Service::new(),
+impl Into<ActorError> for HelloWorldError {
+    fn into(self) -> ActorError {
+        ActorError::RuntimeError(ActorRequest::Finish)
+    }
+}
+
+#[build(HelloWorld)]
+pub fn build_hello_world(service: Service, name: String, num: u32) {
+    let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
+    HelloWorld {
+        inbox,
+        sender: HelloWorldSender(sender),
+        service,
+        name,
+        num,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HelloWorldSender(UnboundedSender<HelloWorldEvent>);
+
+impl EventHandle<HelloWorldEvent> for HelloWorldSender {
+    fn send(&mut self, message: HelloWorldEvent) -> anyhow::Result<()> {
+        self.0.send(message).map_err(|e| anyhow!(e.to_string()))
+    }
+
+    fn shutdown(mut self) -> Option<Self> {
+        if let Ok(()) = self.send(HelloWorldEvent::Shutdown) {
+            None
+        } else {
+            Some(self)
         }
-        .set_name()
+    }
+
+    fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
+        todo!()
     }
 }
 
-impl<H: LauncherSender<HelloWorldBuilder>> AppBuilder<H> for HelloWorldBuilder {}
-
-impl Name for HelloWorld {
-    fn get_name(&self) -> String {
-        self.service.get_name()
-    }
-    fn set_name(mut self) -> Self {
-        self.service.update_name("HelloWorld".to_string());
-        self
-    }
-}
-
-impl Passthrough<HelloWorldEvent> for HelloWorldSender {
-    fn passthrough(&mut self, _event: HelloWorldEvent, _from_app_name: String) {}
-    fn service(&mut self, _service: &Service) {}
-    fn launcher_status_change(&mut self, _service: &Service) {}
-    fn app_status_change(&mut self, _service: &Service) {}
-}
-
-impl Shutdown for HelloWorldSender {
-    fn shutdown(self) -> Option<Self> {
-        let _ = self.tx.send(HelloWorldEvent::Shutdown);
-        None
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<Self>> Starter<H> for HelloWorldBuilder {
-    type Ok = HelloWorldSender;
-    type Error = Cow<'static, str>;
-    // if application asked for Need::Restart or RescheduleAfter then the input will hold the prev app From::from(state)
-    type Input = HelloWorld;
-    async fn starter(mut self, handle: H, mut _input: Option<Self::Input>) -> Result<Self::Ok, Self::Error> {
-        let hello_world = self.build();
-        // create handle
-        let app_handle = HelloWorldSender {
-            tx: hello_world.tx.clone(),
-        };
-        // spawn and start HelloWorld
-        tokio::spawn(hello_world.start(Some(handle)));
-        // return app_handle
-        Ok(app_handle)
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HelloWorldBuilder>> Init<H> for HelloWorld {
-    async fn init(&mut self, status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Initializing
-        self.service.update_status(ServiceStatus::Initializing);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        status
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HelloWorldBuilder>> EventLoop<H> for HelloWorld {
-    async fn event_loop(&mut self, _status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Running
-        self.service.update_status(ServiceStatus::Running);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        // this scope is an example of how the application can make use of Appsthrough,
-        // it's meant to be used to dynamically re-configure the applications during runtime
-        {
-            let apps_through: Result<H::AppsEvents, _> = serde_json::from_str("{\"HelloWorld\": \"Shutdown\"}");
-            if let Ok(apps_events) = apps_through {
-                // check if the event meant to be sent to HelloWorld application
-                match apps_events.try_get_my_event() {
-                    // event belong to self application
-                    Ok(HelloWorldEvent::Shutdown) => {
-                        _supervisor.as_mut().unwrap().shutdown_app(&self.get_name());
-                    }
-                    // event belongs to other application, so we passthrough to the launcher in order to route it
-                    // to the corresponding application
-                    Err(other_app_event) => {
-                        _supervisor.as_mut().unwrap().passthrough(other_app_event, self.get_name());
-                    }
-                }
-            } else {
-                return Err(Need::Abort);
-            };
-        }
-        while let Some(HelloWorldEvent::Shutdown) = self.rx.recv().await {
-            // break the application event loop when it receives Shutdown event
-            self.rx.close();
-            // or break; NOTE: the application must make sure to shutdown all of its children
-        }
-        _status
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HelloWorldBuilder>> Terminating<H> for HelloWorld {
-    async fn terminating(&mut self, _status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Stopping
-        self.service.update_status(ServiceStatus::Stopping);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        _status
-    }
-}
-
-/// App starter state and also the root state
+#[derive(Debug)]
 pub struct HelloWorld {
-    tx: tokio::sync::mpsc::UnboundedSender<HelloWorldEvent>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<HelloWorldEvent>,
+    sender: HelloWorldSender,
+    inbox: UnboundedReceiver<HelloWorldEvent>,
     service: Service,
+    name: String,
+    num: u32,
 }
 
-/// Root handler
-#[allow(dead_code)]
-pub struct HelloWorldSender {
-    tx: tokio::sync::mpsc::UnboundedSender<HelloWorldEvent>,
+#[async_trait]
+impl Actor for HelloWorld {
+    type Error = HelloWorldError;
+    type Event = HelloWorldEvent;
+    type Handle = HelloWorldSender;
+
+    fn handle(&mut self) -> &mut Self::Handle {
+        &mut self.sender
+    }
+
+    fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        self.service.update_status(status);
+        supervisor.update_status(self.service.clone()).ok();
+    }
+
+    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Initializing {}!", self.service.name);
+        Ok(())
+    }
+
+    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Running {}!", self.service.name);
+        while let Some(evt) = self.inbox.recv().await {
+            match evt {
+                HelloWorldEvent::Shutdown => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Shutting down {}!", self.service.name);
+        match status {
+            std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
+            std::result::Result::Err(e) => Err(e.into()),
+        }
+    }
 }
 
-/// Through type
 #[derive(Serialize, Deserialize)]
 pub enum HelloWorldEvent {
     Shutdown,
@@ -152,169 +122,128 @@ pub enum HelloWorldEvent {
 
 //////////////////////////////// Howdy App ////////////////////////////////////////////
 
-// App builder
-builder!(
-    #[derive(Clone)]
-    HowdyBuilder {}
-);
-
-impl ThroughType for HowdyBuilder {
-    type Through = HowdyEvent;
+#[derive(Error, Debug)]
+pub enum HowdyError {
+    #[error("Something went wrong")]
+    SomeError,
 }
 
-impl Builder for HowdyBuilder {
-    type State = Howdy;
-    fn build(self) -> Self::State {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<HowdyEvent>();
-        Howdy {
-            tx,
-            rx,
-            service: Service::new(),
+impl Into<ActorError> for HowdyError {
+    fn into(self) -> ActorError {
+        ActorError::RuntimeError(ActorRequest::Finish)
+    }
+}
+
+#[build(Howdy)]
+pub fn build_howdy(service: Service) {
+    let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HowdyEvent>();
+    Howdy {
+        inbox,
+        sender: HowdySender(sender),
+        service,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HowdySender(UnboundedSender<HowdyEvent>);
+
+impl EventHandle<HowdyEvent> for HowdySender {
+    fn send(&mut self, message: HowdyEvent) -> anyhow::Result<()> {
+        self.0.send(message).map_err(|e| anyhow!(e.to_string()))
+    }
+
+    fn shutdown(mut self) -> Option<Self> {
+        if let Ok(()) = self.send(HowdyEvent::Shutdown) {
+            None
+        } else {
+            Some(self)
         }
-        .set_name()
+    }
+
+    fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
+        todo!()
     }
 }
 
-impl<H: LauncherSender<HowdyBuilder>> AppBuilder<H> for HowdyBuilder {}
-
-impl Name for Howdy {
-    fn get_name(&self) -> String {
-        self.service.get_name()
-    }
-    fn set_name(mut self) -> Self {
-        self.service.update_name("Howdy".to_string());
-        self
-    }
-}
-
-impl Passthrough<HowdyEvent> for HowdySender {
-    fn passthrough(&mut self, _event: HowdyEvent, _from_app_name: String) {}
-    fn service(&mut self, _service: &Service) {}
-    fn launcher_status_change(&mut self, _service: &Service) {}
-    fn app_status_change(&mut self, _service: &Service) {}
-}
-
-impl Shutdown for HowdySender {
-    fn shutdown(self) -> Option<Self> {
-        let _ = self.tx.send(HowdyEvent::Shutdown);
-        None
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HowdyBuilder>> Starter<H> for HowdyBuilder {
-    type Ok = HowdySender;
-    type Error = Cow<'static, str>;
-    // if application asked for Need::Restart or RescheduleAfter then the input will hold the prev app From::from(state)
-    type Input = Howdy;
-    async fn starter(mut self, handle: H, mut _input: Option<Self::Input>) -> Result<Self::Ok, Self::Error> {
-        let howdy = self.build();
-        // create handle
-        let app_handle = HowdySender { tx: howdy.tx.clone() };
-        // spawn and start Howdy
-        tokio::spawn(howdy.start(Some(handle)));
-        // return app_handle
-        Ok(app_handle)
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HowdyBuilder>> Init<H> for Howdy {
-    async fn init(&mut self, status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Initializing
-        self.service.update_status(ServiceStatus::Initializing);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        status
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HowdyBuilder>> EventLoop<H> for Howdy {
-    async fn event_loop(&mut self, _status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Running
-        self.service.update_status(ServiceStatus::Running);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        // this scope is an example of how the application can make use of Appsthrough,
-        // it's meant to be used to dynamically re-configure the applications during runtime
-        {
-            let apps_through: Result<H::AppsEvents, _> = serde_json::from_str("{\"Howdy\": \"Shutdown\"}");
-            if let Ok(apps_events) = apps_through {
-                // check if the event meant to be sent to Howdy application
-                match apps_events.try_get_my_event() {
-                    // event belong to self application
-                    Ok(HowdyEvent::Shutdown) => {
-                        _supervisor.as_mut().unwrap().shutdown_app(&self.get_name());
-                    }
-                    // event belong to other application, so we passthrough to the launcher in order to route it
-                    // to the corresponding application
-                    Err(other_app_event) => {
-                        _supervisor.as_mut().unwrap().passthrough(other_app_event, self.get_name());
-                    }
-                }
-            } else {
-                return Err(Need::Abort);
-            };
-        }
-        while let Some(HowdyEvent::Shutdown) = self.rx.recv().await {
-            // break the application event loop when it receives Shutdown event
-            self.rx.close();
-            // or break; NOTE: the application must make sure to shutdown all of its children
-        }
-        _status
-    }
-}
-
-#[async_trait]
-impl<H: LauncherSender<HowdyBuilder>> Terminating<H> for Howdy {
-    async fn terminating(&mut self, _status: Result<(), Need>, _supervisor: &mut Option<H>) -> Result<(), Need> {
-        // update service to be Stopping
-        self.service.update_status(ServiceStatus::Stopping);
-        // tell active apps
-        _supervisor.as_mut().unwrap().status_change(self.service.clone());
-        _status
-    }
-}
-
-/// App starter state and also the root state
+#[derive(Debug)]
 pub struct Howdy {
-    tx: tokio::sync::mpsc::UnboundedSender<HowdyEvent>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<HowdyEvent>,
+    sender: HowdySender,
+    inbox: UnboundedReceiver<HowdyEvent>,
     service: Service,
 }
 
-/// Root handler
-#[allow(dead_code)]
-pub struct HowdySender {
-    tx: tokio::sync::mpsc::UnboundedSender<HowdyEvent>,
+#[async_trait]
+impl Actor for Howdy {
+    type Error = HowdyError;
+    type Event = HowdyEvent;
+    type Handle = HowdySender;
+
+    fn handle(&mut self) -> &mut Self::Handle {
+        &mut self.sender
+    }
+
+    fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        self.service.update_status(status);
+        supervisor.update_status(self.service.clone()).ok();
+    }
+
+    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Initializing {}!", self.service.name);
+        Ok(())
+    }
+
+    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Running {}!", self.service.name);
+        while let Some(evt) = self.inbox.recv().await {
+            match evt {
+                HowdyEvent::Shutdown => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
+        info!("Shutting down {}!", self.service.name);
+        match status {
+            std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
+            std::result::Result::Err(e) => Err(e.into()),
+        }
+    }
 }
 
-/// Through type
 #[derive(Serialize, Deserialize)]
 pub enum HowdyEvent {
     Shutdown,
 }
 
-//////////////////////////////// Launcher (root of program) ////////////////////////////////////////////
-launcher!(builder: AppsBuilder {[] -> HelloWorld: HelloWorldBuilder, [] -> Howdy: HowdyBuilder}, state: Apps {});
-
-impl Builder for AppsBuilder {
-    type State = Apps;
-    fn build(self) -> Self::State {
-        // create apps
-        let hello_world_builder = HelloWorldBuilder::new();
-        let howdy_builder = HowdyBuilder::new();
-        // add it to launcher
-        self.HelloWorld(hello_world_builder).Howdy(howdy_builder).to_apps()
-    }
+#[launcher]
+pub struct Apps {
+    #[HelloWorld]
+    hello_world: HelloWorldBuilder,
+    #[Howdy("Howdy App", depends_on(hello_world))]
+    howdy: HowdyBuilder,
 }
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    // create apps_builder and build apps
-    let apps = AppsBuilder::new().build();
-    // start the launcher
-    apps.HelloWorld().await.Howdy().await.start(None).await;
+
+    Apps::new(HelloWorldBuilder::new().name(Apps::hello_world_name()).num(1), HowdyBuilder::new())
+        .launch()
+        .await
+        .unwrap();
 }

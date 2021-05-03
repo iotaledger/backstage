@@ -119,10 +119,12 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut deps = Vec::new();
     let mut spawns = Vec::new();
     let mut starts = Vec::new();
-    let mut name_matches = Vec::new();
+    let mut shutdown_matches = Vec::new();
+    let mut startup_matches = Vec::new();
+    let mut status_change_matches = Vec::new();
     let mut builder_struct_fields = Vec::new();
     let mut builder_param_fields = Vec::new();
-    let mut datas = Vec::new();
+    let mut shutdowns = Vec::new();
     let fields = fields
         .into_iter()
         .map(|mut field| {
@@ -231,11 +233,85 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         self.#field_ident.builder.clone().build(new_service)
                     }
                 });
-                name_matches.push(quote! {
-                    #name => Some(&mut self.#field_ident),
+                startup_matches.push(quote! {
+                    #name => {
+                        let new_service = SERVICE.write().await.spawn(name);
+                        let mut actor = self.#field_ident.builder.clone().build(new_service);
+                        self.#field_ident.event_handle.replace(actor.handle().clone());
+                        let join_handle = tokio::spawn(actor.start(self.sender.clone()));
+                        self.#field_ident.join_handle.replace(join_handle);
+                    }
                 });
-                datas.push(quote! {
-                    &mut self.#field_ident
+                shutdown_matches.push(quote! {
+                    #name => {
+                        if let Some(mut handle) = self.#field_ident.event_handle.take() {
+                            let mut retries = 2;
+                            while let Some(h) = handle.shutdown() {
+                                if retries == 0 {
+                                    break;
+                                } else {
+                                    log::error!("Failed to shutdown {}! Retrying {} more time(s)...", name, retries);
+                                    handle = h;
+                                    retries -= 1;
+                                }
+                            }
+                        } else {
+                            log::error!("No handle found for {}!", name);
+                        }
+                    }
+                });
+                status_change_matches.push(quote! {
+                    #name => {
+                        if let Some(mut handle) = self.#field_ident.join_handle.take() {
+                            let mut sender = self.sender.clone();
+                            tokio::spawn(async move {
+                                let join_res = handle.await;
+                                let request = match join_res {
+                                    Ok(res) => match res {
+                                        Ok(request) => request,
+                                        Err(e) => {
+                                            log::error!("{}", e.to_string());
+                                            e.request().clone()
+                                        }
+                                    },
+                                    Err(e) => {
+                                        log::error!("{}", e.to_string());
+                                        ActorRequest::Finish
+                                    }
+                                };
+                                match request {
+                                    ActorRequest::Restart => {
+                                        sender.send(LauncherEvent::StartApp(name)).ok();
+                                    }
+                                    ActorRequest::Reschedule(d) => {
+                                        log::info!("Rescheduling {} to be restarted after {} ms", name, d.as_millis());
+                                        tokio::time::sleep(d).await;
+                                        sender.send(LauncherEvent::StartApp(name)).ok();
+                                    }
+                                    ActorRequest::Finish => (),
+                                    ActorRequest::Panic => {
+                                        sender.send(LauncherEvent::ExitProgram { using_ctrl_c: false }).ok();
+                                    }
+                                }
+                            });
+                        } else {
+                            log::error!("No handle found for {}!", name);
+                        }
+                    }
+                });
+                shutdowns.push(quote! {
+                    if let Some(mut handle) = self.#field_ident.event_handle.take() {
+                        let mut retries = 2;
+                        while let Some(h) = handle.shutdown() {
+                            if retries == 0 {
+                                break;
+                            } else {
+                                log::error!("Failed to shutdown {}! Retrying {} more time(s)...", self.#field_ident.name, retries);
+                                handle = h;
+                                retries -= 1;
+                            }
+                        }
+                    }
                 });
                 starts.push(quote! {
                     let mut #field_ident = self.#spawn_fn_ident ().await;
@@ -281,20 +357,7 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#spawns)*
 
             fn shutdown_all(&mut self) {
-                for builder_data in vec![#(#datas),*].iter_mut() {
-                    if let Some(mut handle) = builder_data.event_handle.take() {
-                        let mut retries = 2;
-                        while let Some(h) = handle.shutdown() {
-                            if retries == 0 {
-                                break;
-                            } else {
-                                log::error!("Failed to shutdown {}! Retrying {} more time(s)...", builder_data.name, retries);
-                                handle = h;
-                                retries -= 1;
-                            }
-                        }
-                    }
-                }
+                #(#shutdowns)*
             }
 
             #vis fn new(#(#fields),*) -> Self {
@@ -359,88 +422,25 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     match evt {
                         LauncherEvent::StartApp(name) => {
                             log::info!("Starting app: {}", name);
-                            if let Some(builder_data) = match name.as_str() {
-                                #(#name_matches)*
-                                _ => None,
-                            } {
-                                let new_service = SERVICE.write().await.spawn(name);
-                                let mut actor = builder_data.builder.clone().build(new_service);
-                                builder_data.event_handle.replace(actor.handle().clone());
-                                let join_handle = tokio::spawn(actor.start(self.sender.clone()));
-                                builder_data.join_handle.replace(join_handle);
-                            } else {
-                                log::error!("No builder with name {}!", name);
+                            match name.as_str() {
+                                #(#startup_matches)*
+                                _ => log::error!("No builder with name {}!", name),
                             }
                         }
                         LauncherEvent::ShutdownApp(name) => {
                             log::info!("Shutting down app: {}", name);
-                            if let Some(builder_data) = match name.as_str() {
-                                #(#name_matches)*
-                                _ => None,
-                            } {
-                                if let Some(mut handle) = builder_data.event_handle.take() {
-                                    let mut retries = 2;
-                                    while let Some(h) = handle.shutdown() {
-                                        if retries == 0 {
-                                            break;
-                                        } else {
-                                            log::error!("Failed to shutdown {}! Retrying {} more time(s)...", name, retries);
-                                            handle = h;
-                                            retries -= 1;
-                                        }
-                                    }
-                                } else {
-                                    log::error!("No handle found for {}!", name);
-                                }
-                            } else {
-                                log::error!("No actor with name {}!", name);
+                            match name.as_str() {
+                                #(#shutdown_matches)*
+                                _ => log::error!("No actor with name {}!", name),
                             }
                         }
                         LauncherEvent::StatusChange(service) => {
                             let (status, name) = (service.status, service.name.clone());
-                            SERVICE.write().await.update_microservice(service.id, service);
+                            SERVICE.write().await.insert_or_update_microservice(service);
                             if status == ServiceStatus::Stopped {
-                                if let Some(builder_data) = match name.as_str() {
-                                    #(#name_matches)*
-                                    _ => None,
-                                } {
-                                    if let Some(mut handle) = builder_data.join_handle.take() {
-                                        let mut sender = self.sender.clone();
-                                        tokio::spawn(async move {
-                                            let join_res = handle.await;
-                                            let request = match join_res {
-                                                Ok(res) => match res {
-                                                    Ok(request) => request,
-                                                    Err(e) => {
-                                                        log::error!("{}", e.to_string());
-                                                        e.request().clone()
-                                                    }
-                                                },
-                                                Err(e) => {
-                                                    log::error!("{}", e.to_string());
-                                                    ActorRequest::Finish
-                                                }
-                                            };
-                                            match request {
-                                                ActorRequest::Restart => {
-                                                    sender.send(LauncherEvent::StartApp(name)).ok();
-                                                }
-                                                ActorRequest::Reschedule(d) => {
-                                                    log::info!("Rescheduling {} to be restarted after {} ms", name, d.as_millis());
-                                                    tokio::time::sleep(d).await;
-                                                    sender.send(LauncherEvent::StartApp(name)).ok();
-                                                }
-                                                ActorRequest::Finish => (),
-                                                ActorRequest::Panic => {
-                                                    sender.send(LauncherEvent::ExitProgram { using_ctrl_c: false }).ok();
-                                                }
-                                            }
-                                        });
-                                    } else {
-                                        log::error!("No handle found for {}!", name);
-                                    }
-                                } else {
-                                    log::error!("No actor with name {}!", name);
+                                match name.as_str() {
+                                    #(#status_change_matches)*
+                                    _ => log::error!("No actor with name {}!", name),
                                 }
                             }
                         }
