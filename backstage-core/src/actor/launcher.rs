@@ -7,9 +7,8 @@ use super::{
 };
 use anyhow::anyhow;
 pub use backstage_macros::launcher;
-use futures::Future;
 use log::error;
-use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle, time::Duration};
+use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle};
 
 /// Events used by the launcher to manage its child actors
 #[derive(Debug)]

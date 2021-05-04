@@ -1,5 +1,7 @@
+use daggy::{Dag, NodeIndex};
 use proc_macro::TokenStream;
 use quote::quote;
+use std::collections::HashMap;
 
 #[proc_macro_attribute]
 pub fn build(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -114,13 +116,15 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
         semi_token: _,
     } = syn::parse_macro_input!(item as syn::ItemStruct);
 
-    // TODO: Add DAG for dependency checking
+    let mut dependencies = HashMap::<String, (NodeIndex<u32>, Vec<String>)>::new();
+    let mut dag = Dag::<(), (), u32>::new();
     let mut names = Vec::new();
     let mut deps = Vec::new();
     let mut spawns = Vec::new();
     let mut starts = Vec::new();
     let mut shutdown_matches = Vec::new();
     let mut startup_matches = Vec::new();
+    let mut dependency_matches = Vec::new();
     let mut builder_struct_fields = Vec::new();
     let mut builder_param_fields = Vec::new();
     let mut shutdowns = Vec::new();
@@ -128,10 +132,12 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .into_iter()
         .map(|mut field| {
             let (mut named, mut depended, mut actor) = (None, None, None);
+            let field_ident = field.ident.as_ref().unwrap();
             field.attrs = field
                 .attrs
                 .into_iter()
                 .filter_map(|attr| {
+                    dependencies.insert(field_ident.to_string(), (dag.add_node(()), Vec::new()));
                     match attr.parse_meta().unwrap() {
                         syn::Meta::List(l) => {
                             if let Some(ident) = l.path.get_ident() {
@@ -144,12 +150,15 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                                     if depended.is_some() {
                                                         panic!("Already specified dependencies for this actor!");
                                                     }
+                                                    let dep_vec = &mut dependencies.get_mut(&field_ident.to_string()).unwrap().1;
                                                     let mut depends_on = Vec::new();
                                                     for m in list.nested.iter() {
                                                         match m {
                                                             syn::NestedMeta::Meta(m) => {
                                                                 if let syn::Meta::Path(p) = m {
-                                                                    depends_on.push(p.get_ident().unwrap().clone());
+                                                                    let id = p.get_ident().unwrap();
+                                                                    dep_vec.push(id.to_string());
+                                                                    depends_on.push(id.clone());
                                                                 } else {
                                                                     panic!("Dependencies must be a struct field!");
                                                                 }
@@ -187,6 +196,9 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                         }
                                     }
                                 }
+                                if named.is_none() {
+                                    named = Some(ident.to_string());
+                                }
                                 return None;
                             }
                         }
@@ -204,7 +216,6 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     Some(attr)
                 })
                 .collect();
-            let field_ident = field.ident.as_ref().unwrap();
             if let (Some(actor), Some(name)) = (actor, named) {
                 let builder_type = &field.ty;
                 let name_fn_ident = quote::format_ident!("{}_name", field_ident);
@@ -238,14 +249,26 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 shutdown_matches.push(quote! {
                     #name => self.#field_ident.shutdown(self.sender.clone()),
                 });
+                dependency_matches.push(quote! {
+                    #name => self.#deps_fn_ident,
+                });
                 shutdowns.push(quote! {
                     self.#field_ident.block_on_shutdown()
                 });
+                if let Some(parents) = depended.as_ref() {
+                    for parent in parents.iter() {
+                        starts.push(quote! {
+                            if self.#parent.join_handle.is_none() {
+                                log::info!("Starting {} as a dependency of {}...", self.#parent.name, self.#field_ident.name);
+                                self.#parent.startup(self.sender.clone()).await;
+                            }
+                        });
+                    }
+                }
                 starts.push(quote! {
-                    let mut #field_ident = self.#spawn_fn_ident ().await;
-                    self.#field_ident.event_handle.replace(#field_ident.handle().clone());
-                    let join_handle = tokio::spawn(#field_ident.start(self.sender.clone()));
-                    self.#field_ident.join_handle.replace(join_handle);
+                    if self.#field_ident.join_handle.is_none() {
+                        self.#field_ident.startup(self.sender.clone()).await;
+                    }
                 });
                 if let Some(depended) = depended {
                     let depended = depended.iter().map(|id| quote::format_ident!("{}_name", id)).collect::<Vec<_>>();
@@ -268,6 +291,21 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
             field
         })
         .collect::<Vec<_>>();
+    for (child, (child_node_id, parents)) in dependencies.iter() {
+        for parent in parents.iter() {
+            if parent == child {
+                panic!("{} is dependent on itself!", child);
+            } else {
+                if let Some((parent_node_id, _)) = dependencies.get(parent) {
+                    if let Err(_) = dag.add_edge(parent_node_id.clone(), child_node_id.clone(), ()) {
+                        panic!("Cyclical dependencies defined involving {} and {}!", child, parent);
+                    }
+                } else {
+                    panic!("{} is dependent on {}, but it does not exist!", child, parent);
+                }
+            }
+        }
+    }
 
     let res = quote! {
         #vis struct #struct_ident #generics {

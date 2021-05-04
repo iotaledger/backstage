@@ -265,9 +265,9 @@ impl Actor for Howdy {
 /// and oversee a set of actors.
 #[launcher]
 pub struct Apps {
-    #[HelloWorld]
+    #[HelloWorld(depends_on(howdy))]
     hello_world: HelloWorldBuilder,
-    #[Howdy("Howdy App", depends_on(hello_world))]
+    #[Howdy("Howdy App")]
     howdy: HowdyBuilder,
 }
 
