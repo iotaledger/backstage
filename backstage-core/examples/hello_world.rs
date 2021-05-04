@@ -126,6 +126,7 @@ pub struct Apps {
 
 #[tokio::main]
 async fn main() {
+    std::env::set_var("RUST_LOG", "info");
     env_logger::init();
 
     let builder = HelloWorldBuilder::new();

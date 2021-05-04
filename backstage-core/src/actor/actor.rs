@@ -5,9 +5,12 @@ use super::{
     NullSupervisor,
 };
 use async_trait::async_trait;
+use std::time::Duration;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor {
+    /// The actor's shutdown timeout
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
     /// The actor's error type. Must be convertable to an `ActorError`.
     type Error: Send + Into<ActorError>;
     /// The actor's event type. Can be anything so long as you can find

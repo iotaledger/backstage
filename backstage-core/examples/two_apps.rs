@@ -3,10 +3,11 @@ use async_trait::async_trait;
 use backstage::{launcher::*, *};
 use log::info;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-//////////////////////////////// HelloWorld App ////////////////////////////////////////////
+//////////////////////////////// HelloWorld Actor ////////////////////////////////////////////
 
 // The HelloWorld actor's event type
 #[derive(Serialize, Deserialize)]
@@ -146,10 +147,11 @@ impl Actor for HelloWorld {
     }
 }
 
-//////////////////////////////// Howdy App ////////////////////////////////////////////
+//////////////////////////////// Howdy Actor ////////////////////////////////////////////
 
 // Below is another actor type, which is identical is most ways to HelloWorld.
-// However, it uses the proc_macro `build` to define the HowdyBuilder.
+// However, it uses the proc_macro `build` to define the HowdyBuilder and it will
+// intentionally timeout while shutting down.
 
 #[derive(Serialize, Deserialize)]
 pub enum HowdyEvent {
@@ -211,6 +213,8 @@ impl Actor for Howdy {
     type Event = HowdyEvent;
     type Handle = HowdySender;
 
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
     fn handle(&mut self) -> &mut Self::Handle {
         &mut self.sender
     }
@@ -247,6 +251,8 @@ impl Actor for Howdy {
         S: 'static + Send + EventHandle<E>,
     {
         info!("Shutting down {}!", self.service.name);
+        // Some process that takes longer than the defined timeout
+        tokio::time::sleep(Duration::from_secs(4)).await;
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
             std::result::Result::Err(e) => Err(e.into()),
@@ -267,6 +273,7 @@ pub struct Apps {
 
 #[tokio::main]
 async fn main() {
+    std::env::set_var("RUST_LOG", "info");
     env_logger::init();
 
     Apps::new(HelloWorldBuilder::new(Apps::hello_world_name(), 1), HowdyBuilder::new())

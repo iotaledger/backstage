@@ -7,7 +7,9 @@ use super::{
 };
 use anyhow::anyhow;
 pub use backstage_macros::launcher;
-use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle};
+use futures::Future;
+use log::error;
+use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle, time::Duration};
 
 /// Events used by the launcher to manage its child actors
 #[derive(Debug)]
@@ -75,63 +77,91 @@ impl<A: 'static + Actor + Send, B: ActorBuilder<A>> BuilderData<A, B> {
         self.join_handle.replace(join_handle);
     }
 
-    /// Shutdown the actor by sending a shutdown event.
-    /// This does not confirm that the actor has successfully shutdown!
-    pub fn shutdown(&mut self) {
+    /// Shutdown the actor by sending a shutdown event. This fn will spawn a timeout thread
+    /// which will wait for the actor's thread to terminate and send the result to the launcher.
+    pub fn shutdown(&mut self, mut sender: LauncherSender) {
         if let Some(mut handle) = self.event_handle.take() {
             let mut retries = 2;
             while let Some(h) = handle.shutdown() {
                 if retries == 0 {
                     break;
                 } else {
-                    log::error!("Failed to shutdown {}! Retrying {} more time(s)...", self.name, retries);
+                    error!("Failed to shutdown {}! Retrying {} more time(s)...", self.name, retries);
                     handle = h;
                     retries -= 1;
                 }
             }
+            let name = self.name.clone();
+            if let Some(handle) = self.join_handle.take() {
+                tokio::spawn(async move {
+                    let timeout_res = tokio::time::timeout(A::SHUTDOWN_TIMEOUT, handle).await;
+                    let request = match timeout_res {
+                        Ok(join_res) => match join_res {
+                            Ok(res) => match res {
+                                Ok(request) => request,
+                                Err(e) => {
+                                    error!("{}", e.to_string());
+                                    e.request().clone()
+                                }
+                            },
+                            Err(e) => {
+                                error!("{}", e.to_string());
+                                ActorRequest::Finish
+                            }
+                        },
+                        Err(_) => {
+                            error!("Timeout shutting down {}!", name);
+                            ActorRequest::Finish
+                        }
+                    };
+                    match request {
+                        ActorRequest::Restart => {
+                            sender.send(LauncherEvent::StartActor(name)).ok();
+                        }
+                        ActorRequest::Reschedule(d) => {
+                            log::info!("Rescheduling {} to be restarted after {} ms", name, d.as_millis());
+                            tokio::time::sleep(d).await;
+                            sender.send(LauncherEvent::StartActor(name)).ok();
+                        }
+                        ActorRequest::Finish => (),
+                        ActorRequest::Panic => {
+                            sender.send(LauncherEvent::ExitProgram { using_ctrl_c: false }).ok();
+                        }
+                    }
+                });
+            } else {
+                error!("No join handle found for {}!", name);
+            }
         } else {
-            log::error!("No handle found for {}!", self.name);
+            error!("No event handle found for {}!", self.name);
         }
     }
 
-    /// Handle a terminating actor by awaiting its join handle, then performing
-    /// the ActorRequest returned by the thread.
-    pub fn handle_terminated(&mut self, mut sender: LauncherSender) {
-        let name = self.name.clone();
-        if let Some(handle) = self.join_handle.take() {
-            tokio::spawn(async move {
-                let join_res = handle.await;
-                let request = match join_res {
-                    Ok(res) => match res {
-                        Ok(request) => request,
-                        Err(e) => {
-                            log::error!("{}", e.to_string());
-                            e.request().clone()
-                        }
-                    },
-                    Err(e) => {
-                        log::error!("{}", e.to_string());
-                        ActorRequest::Finish
-                    }
-                };
-
-                match request {
-                    ActorRequest::Restart => {
-                        sender.send(LauncherEvent::StartActor(name)).ok();
-                    }
-                    ActorRequest::Reschedule(d) => {
-                        log::info!("Rescheduling {} to be restarted after {} ms", name, d.as_millis());
-                        tokio::time::sleep(d).await;
-                        sender.send(LauncherEvent::StartActor(name)).ok();
-                    }
-                    ActorRequest::Finish => (),
-                    ActorRequest::Panic => {
-                        sender.send(LauncherEvent::ExitProgram { using_ctrl_c: false }).ok();
-                    }
+    /// Shutdown the actor by sending a shutdown event. This fn will block awaiting the completion.
+    /// This is used by the launcher to terminate the application.
+    pub async fn block_on_shutdown(&mut self) {
+        if let Some(mut handle) = self.event_handle.take() {
+            let mut retries = 2;
+            while let Some(h) = handle.shutdown() {
+                if retries == 0 {
+                    break;
+                } else {
+                    error!("Failed to shutdown {}! Retrying {} more time(s)...", self.name, retries);
+                    handle = h;
+                    retries -= 1;
                 }
-            });
+            }
+            let name = self.name.clone();
+            if let Some(handle) = self.join_handle.take() {
+                match tokio::time::timeout(A::SHUTDOWN_TIMEOUT, handle).await {
+                    Ok(_) => (),
+                    Err(_) => error!("Timeout shutting down {}!", name),
+                }
+            } else {
+                error!("No join handle found for {}!", name);
+            }
         } else {
-            log::error!("No handle found for {}!", name);
+            error!("No event handle found for {}!", self.name);
         }
     }
 }

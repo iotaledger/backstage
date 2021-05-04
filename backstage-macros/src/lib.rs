@@ -121,7 +121,6 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut starts = Vec::new();
     let mut shutdown_matches = Vec::new();
     let mut startup_matches = Vec::new();
-    let mut status_change_matches = Vec::new();
     let mut builder_struct_fields = Vec::new();
     let mut builder_param_fields = Vec::new();
     let mut shutdowns = Vec::new();
@@ -143,7 +142,7 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                             syn::Meta::List(list) => match list.path.get_ident().unwrap().to_string().as_str() {
                                                 "depends_on" => {
                                                     if depended.is_some() {
-                                                        panic!("Already specified dependencies for this app!");
+                                                        panic!("Already specified dependencies for this actor!");
                                                     }
                                                     let mut depends_on = Vec::new();
                                                     for m in list.nested.iter() {
@@ -166,7 +165,7 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                                 if let Some(i) = nv.path.get_ident() {
                                                     if i.to_string() == "name" {
                                                         if named.is_some() {
-                                                            panic!("Already named this app!");
+                                                            panic!("Already named this actor!");
                                                         }
                                                         if let syn::Lit::Str(ref name) = nv.lit {
                                                             named = Some(name.value());
@@ -181,7 +180,7 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                         syn::NestedMeta::Lit(lit) => {
                                             if let syn::Lit::Str(s) = lit {
                                                 if named.is_some() {
-                                                    panic!("Already named this app!");
+                                                    panic!("Already named this actor!");
                                                 }
                                                 named = Some(s.value());
                                             }
@@ -237,24 +236,10 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     #name => self.#field_ident.startup(self.sender.clone()).await,
                 });
                 shutdown_matches.push(quote! {
-                    #name => self.#field_ident.shutdown(),
-                });
-                status_change_matches.push(quote! {
-                    #name => self.#field_ident.handle_terminated(self.sender.clone()),
+                    #name => self.#field_ident.shutdown(self.sender.clone()),
                 });
                 shutdowns.push(quote! {
-                    if let Some(mut handle) = self.#field_ident.event_handle.take() {
-                        let mut retries = 2;
-                        while let Some(h) = handle.shutdown() {
-                            if retries == 0 {
-                                break;
-                            } else {
-                                log::error!("Failed to shutdown {}! Retrying {} more time(s)...", self.#field_ident.name, retries);
-                                handle = h;
-                                retries -= 1;
-                            }
-                        }
-                    }
+                    self.#field_ident.block_on_shutdown()
                 });
                 starts.push(quote! {
                     let mut #field_ident = self.#spawn_fn_ident ().await;
@@ -299,8 +284,8 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
             #(#spawns)*
 
-            fn shutdown_all(&mut self) {
-                #(#shutdowns)*
+            async fn shutdown_all(&mut self) {
+                futures::join!(#(#shutdowns),*);
             }
 
             #vis fn new(#(#fields),*) -> Self {
@@ -368,14 +353,14 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 while let Some(evt) = self.inbox.recv().await {
                     match evt {
                         LauncherEvent::StartActor(name) => {
-                            log::info!("Starting app: {}", name);
+                            log::info!("Starting actor: {}", name);
                             match name.as_str() {
                                 #(#startup_matches)*
                                 _ => log::error!("No builder with name {}!", name),
                             }
                         }
                         LauncherEvent::ShutdownActor(name) => {
-                            log::info!("Shutting down app: {}", name);
+                            log::info!("Shutting down actor: {}", name);
                             match name.as_str() {
                                 #(#shutdown_matches)*
                                 _ => log::error!("No actor with name {}!", name),
@@ -384,12 +369,6 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         LauncherEvent::StatusChange(service) => {
                             let (status, name) = (service.status, service.name.clone());
                             SERVICE.write().await.insert_or_update_microservice(service);
-                            if status == ServiceStatus::Stopped {
-                                match name.as_str() {
-                                    #(#status_change_matches)*
-                                    _ => log::error!("No actor with name {}!", name),
-                                }
-                            }
                         }
                         LauncherEvent::ExitProgram { using_ctrl_c } => {
                             if using_ctrl_c && self.consumed_ctrl_c {
@@ -400,18 +379,10 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                 self.consumed_ctrl_c = true;
                             }
                             if !SERVICE.read().await.is_stopping() {
-                                log::info!("Shutting down the launcher and all sub-apps!");
+                                log::info!("Shutting down the launcher and all sub-actors!");
                                 SERVICE.write().await.update_status(ServiceStatus::Stopping);
-                                self.shutdown_all();
                                 log::info!("Waiting for all children to shut down...");
-                                let mut sender = self.sender.clone();
-                                tokio::spawn(async move {
-                                    while SERVICE.read().await.microservices.iter().any(|(_, s)| s.status != ServiceStatus::Stopped) {
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                    }
-                                    sender.send(LauncherEvent::ExitProgram { using_ctrl_c: false }).ok();
-                                });
-                            } else if !using_ctrl_c {
+                                self.shutdown_all().await;
                                 break;
                             }
                         }
