@@ -1,8 +1,14 @@
 [package]
 name = "backstage-macros"
 version = "0.1.0"
-authors = ["Alex Coats <alexandcoats@gmail.com>"]
+authors = ["IOTA Stiftung"]
 edition = "2018"
+license-file = "LICENSE"
+homepage = "https://www.iota.org"
+repository = "https://github.com/iotaledger/backstage"
+description = "Procedural macros for the Backstage framework"
+keywords = ["iota", "distributed", "framework", "backstage", "actor"]
+exclude = [".github/**/*"]
 
 [lib]
 proc-macro = true

@@ -1,4 +1,5 @@
 pub use actor::*;
+pub use backstage_macros::build;
 pub use builder::*;
 pub use event_handle::*;
 pub use result::*;

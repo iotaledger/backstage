@@ -6,7 +6,7 @@ use super::{
     service::{Service, SERVICE},
 };
 use anyhow::anyhow;
-pub use backstage_macros::*;
+pub use backstage_macros::launcher;
 use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle};
 
 /// Events used by the launcher to manage its child actors
