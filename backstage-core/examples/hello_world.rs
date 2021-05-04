@@ -61,7 +61,7 @@ pub struct HelloWorld {
 }
 
 #[async_trait]
-impl Actor for HelloWorld {
+impl ActorTypes for HelloWorld {
     type Error = HelloWorldError;
     type Event = HelloWorldEvent;
     type Handle = HelloWorldSender;
@@ -73,7 +73,10 @@ impl Actor for HelloWorld {
     fn service(&mut self) -> &mut Service {
         &mut self.service
     }
+}
 
+#[async_trait]
+impl Init for HelloWorld {
     async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
@@ -81,7 +84,10 @@ impl Actor for HelloWorld {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
+}
 
+#[async_trait]
+impl Run for HelloWorld {
     async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
@@ -96,7 +102,10 @@ impl Actor for HelloWorld {
         }
         Ok(())
     }
+}
 
+#[async_trait]
+impl Shutdown for HelloWorld {
     async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
     where
         S: 'static + Send + EventHandle<E>,
