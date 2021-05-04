@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::newactor::{launcher::*, *};
-use backstage_macros::{build, launcher};
+use backstage::{launcher::*, *};
 use log::info;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -71,7 +70,7 @@ impl Actor for HelloWorld {
         &mut self.sender
     }
 
-    fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
         S: 'static + Send + EventHandle<E>,
     {

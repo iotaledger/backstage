@@ -1,17 +1,28 @@
 use anyhow::anyhow;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Potential actor errors
 #[derive(Error, Debug)]
 pub enum ActorError {
+    /// Indicates that the data provided to the actor was bad
     #[error("Invalid data was given to the actor: {0}!")]
     InvalidData(String),
+    /// Indicates that a runtime error occurred
     #[error("The actor experienced a runtime error!")]
     RuntimeError(ActorRequest),
+    /// Anything else that can go wrong
     #[error("Actor Error: {source}")]
-    Other { source: anyhow::Error, request: ActorRequest },
+    Other {
+        /// The source of this error
+        source: anyhow::Error,
+        /// Indicates how the supervisor should handle this error
+        request: ActorRequest,
+    },
 }
 
 impl ActorError {
+    /// Get the request from the error
     pub fn request(&self) -> &ActorRequest {
         match self {
             ActorError::InvalidData(_) => &ActorRequest::Panic,

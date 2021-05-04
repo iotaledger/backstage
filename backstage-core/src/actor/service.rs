@@ -39,12 +39,14 @@ impl Default for ServiceStatus {
     }
 }
 
+/// A pool of unique IDs which can be assigned to services
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct IdPool {
     pool: Vec<u16>,
 }
 
 impl IdPool {
+    /// Get a new unique ID
     pub fn get_id(&mut self) -> u16 {
         if self.pool.len() == 0 {
             self.pool.push(2);
@@ -58,20 +60,30 @@ impl IdPool {
         }
     }
 
+    /// Return an unused id
     pub fn return_id(&mut self, id: u16) {
         self.pool.push(id);
     }
 }
 
+/// An actor's service metrics
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
+    /// The status of the actor
     pub status: ServiceStatus,
+    /// The name of the actor
     pub name: String,
+    /// The unique ID of the actor
     pub id: u16,
+    /// The start timestamp, used to calculated uptime
     pub up_since: SystemTime,
+    /// Accumulated downtime
     pub downtime_ms: u64,
+    /// Child services by id
     pub microservices: HashMap<u16, Service>,
+    /// Optional logging path
     pub log_path: Option<String>,
+    /// A pool of unique ids
     pub id_pool: IdPool,
 }
 

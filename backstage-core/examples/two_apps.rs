@@ -1,37 +1,67 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::newactor::{launcher::*, *};
-use backstage_macros::{build, launcher};
+use backstage::{launcher::*, *};
 use log::info;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 //////////////////////////////// HelloWorld App ////////////////////////////////////////////
+
+// The HelloWorld actor's event type
+#[derive(Serialize, Deserialize)]
+pub enum HelloWorldEvent {
+    Shutdown,
+}
+
+// The possible errors that a HelloWorld actor can have
 #[derive(Error, Debug)]
 pub enum HelloWorldError {
     #[error("Something went wrong")]
     SomeError,
 }
 
+// In order for an actor to make use of a custom error type,
+// it should be convertable to an `ActorError` with an
+// associated `ActorRequest` specifying how the supervisor
+// should handle the error.
 impl Into<ActorError> for HelloWorldError {
     fn into(self) -> ActorError {
         ActorError::RuntimeError(ActorRequest::Finish)
     }
 }
 
-#[build(HelloWorld)]
-pub fn build_hello_world(service: Service, name: String, num: u32) {
-    let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
-    HelloWorld {
-        inbox,
-        sender: HelloWorldSender(sender),
-        service,
-        name,
-        num,
+// This is an example of a manual builder implementation.
+// See the `build_howdy` fn below for a proc_macro implementation.
+#[derive(Debug, Default, Clone)]
+pub struct HelloWorldBuilder {
+    name: String,
+    num: u32,
+}
+
+impl HelloWorldBuilder {
+    pub fn new(name: String, num: u32) -> Self {
+        Self { name, num }
     }
 }
 
+impl ActorBuilder<HelloWorld> for HelloWorldBuilder {
+    fn build(self, service: Service) -> HelloWorld {
+        let (name, num) = (self.name, self.num);
+        let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
+        HelloWorld {
+            inbox,
+            sender: HelloWorldSender(sender),
+            service,
+            name_num: format!("{}-{}", name, num),
+        }
+    }
+}
+
+// A wrapper type for a simple tokio channel which is used to pass
+// events to the actor. This implements EventHandle so it can be used
+// by other actors without knowing details about how this actor
+// implements event handling.
 #[derive(Debug, Clone)]
 pub struct HelloWorldSender(UnboundedSender<HelloWorldEvent>);
 
@@ -53,15 +83,19 @@ impl EventHandle<HelloWorldEvent> for HelloWorldSender {
     }
 }
 
+// The HelloWorld actor's state, which holds
+// data created by a builder when the actor
+// is spawned.
 #[derive(Debug)]
 pub struct HelloWorld {
     sender: HelloWorldSender,
     inbox: UnboundedReceiver<HelloWorldEvent>,
     service: Service,
-    name: String,
-    num: u32,
+    name_num: String,
 }
 
+// The Actor implementation, which defines how this actor will
+// behave.
 #[async_trait]
 impl Actor for HelloWorld {
     type Error = HelloWorldError;
@@ -72,7 +106,9 @@ impl Actor for HelloWorld {
         &mut self.sender
     }
 
-    fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    // The actor must define how it updates its service and sends it to
+    // its supervisor. This will be called before each lifetime fn.
+    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -80,7 +116,7 @@ impl Actor for HelloWorld {
         supervisor.update_status(self.service.clone()).ok();
     }
 
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -88,7 +124,8 @@ impl Actor for HelloWorld {
         Ok(())
     }
 
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    // This actor simply waits for a shutdown signal and then exits
+    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -103,7 +140,7 @@ impl Actor for HelloWorld {
         Ok(())
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -115,13 +152,15 @@ impl Actor for HelloWorld {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum HelloWorldEvent {
-    Shutdown,
-}
-
 //////////////////////////////// Howdy App ////////////////////////////////////////////
 
+// Below is another actor type, which is identical is most ways to HelloWorld.
+// However, it uses the proc_macro `build` to define the HowdyBuilder.
+
+#[derive(Serialize, Deserialize)]
+pub enum HowdyEvent {
+    Shutdown,
+}
 #[derive(Error, Debug)]
 pub enum HowdyError {
     #[error("Something went wrong")]
@@ -182,7 +221,7 @@ impl Actor for Howdy {
         &mut self.sender
     }
 
-    fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -190,7 +229,7 @@ impl Actor for Howdy {
         supervisor.update_status(self.service.clone()).ok();
     }
 
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -198,7 +237,7 @@ impl Actor for Howdy {
         Ok(())
     }
 
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -213,7 +252,7 @@ impl Actor for Howdy {
         Ok(())
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -225,11 +264,9 @@ impl Actor for Howdy {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub enum HowdyEvent {
-    Shutdown,
-}
-
+/// The launcher actor, defined using the `launcher` proc_macro.
+/// This will construct an actor whose sole purpose is to launch
+/// and oversee a set of actors.
 #[launcher]
 pub struct Apps {
     #[HelloWorld]
@@ -242,7 +279,7 @@ pub struct Apps {
 async fn main() {
     env_logger::init();
 
-    Apps::new(HelloWorldBuilder::new().name(Apps::hello_world_name()).num(1), HowdyBuilder::new())
+    Apps::new(HelloWorldBuilder::new(Apps::hello_world_name(), 1), HowdyBuilder::new())
         .launch()
         .await
         .unwrap();
