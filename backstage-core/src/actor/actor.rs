@@ -22,11 +22,10 @@ pub trait Actor {
     /// Get the actor's service
     fn service(&mut self) -> &mut Service;
 
-    /// Update the actor's status
-    /// This function does not assume that the service has been stored locally in the
-    /// actor's state, thus it does not return a reference to it. The service may, for
-    /// instance, be stored globally in an `Arc`, in which case it can be accessed via
-    /// this fn definition safely.
+    /// Update the actor's status.
+    /// This function assumes the service is stored locally in the actor's state.
+    /// If this is not the case (for instance, it is stored globally in an `Arc`),
+    /// this fn definition should be overridden so that it does not use the local fn.
     async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
         S: 'static + Send + EventHandle<E>,
