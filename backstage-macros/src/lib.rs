@@ -337,6 +337,10 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 &mut self.sender
             }
 
+            fn service(&mut self) -> &mut Service {
+                panic!("Cannot access launcher service via a reference!");
+            }
+
             async fn update_status<E, S>(&mut self, status: ServiceStatus, _supervisor: &mut S)
             where
                 S: 'static + Send + EventHandle<E>,

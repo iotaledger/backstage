@@ -70,15 +70,11 @@ impl Actor for HelloWorld {
         &mut self.sender
     }
 
-    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
-        self.service.update_status(status);
-        supervisor.update_status(self.service.clone()).ok();
+    fn service(&mut self) -> &mut Service {
+        &mut self.service
     }
 
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -86,7 +82,7 @@ impl Actor for HelloWorld {
         Ok(())
     }
 
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -101,7 +97,7 @@ impl Actor for HelloWorld {
         Ok(())
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
     where
         S: 'static + Send + EventHandle<E>,
     {

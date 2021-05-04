@@ -106,14 +106,8 @@ impl Actor for HelloWorld {
         &mut self.sender
     }
 
-    // The actor must define how it updates its service and sends it to
-    // its supervisor. This will be called before each lifetime fn.
-    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
-        self.service.update_status(status);
-        supervisor.update_status(self.service.clone()).ok();
+    fn service(&mut self) -> &mut Service {
+        &mut self.service
     }
 
     async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
@@ -221,12 +215,8 @@ impl Actor for Howdy {
         &mut self.sender
     }
 
-    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
-        self.service.update_status(status);
-        supervisor.update_status(self.service.clone()).ok();
+    fn service(&mut self) -> &mut Service {
+        &mut self.service
     }
 
     async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>

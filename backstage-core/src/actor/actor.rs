@@ -1,4 +1,9 @@
-use super::{event_handle::EventHandle, result::*, service::ServiceStatus, NullSupervisor};
+use super::{
+    event_handle::EventHandle,
+    result::*,
+    service::{Service, ServiceStatus},
+    NullSupervisor,
+};
 use async_trait::async_trait;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
@@ -14,6 +19,9 @@ pub trait Actor {
     /// Get the actor's event handle
     fn handle(&mut self) -> &mut Self::Handle;
 
+    /// Get the actor's service
+    fn service(&mut self) -> &mut Service;
+
     /// Update the actor's status
     /// This function does not assume that the service has been stored locally in the
     /// actor's state, thus it does not return a reference to it. The service may, for
@@ -21,7 +29,12 @@ pub trait Actor {
     /// this fn definition safely.
     async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
-        S: 'static + Send + EventHandle<E>;
+        S: 'static + Send + EventHandle<E>,
+    {
+        let service = self.service();
+        service.update_status(status);
+        supervisor.update_status(service.clone()).ok();
+    }
 
     /// Initialize the actor
     async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
