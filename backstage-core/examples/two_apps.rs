@@ -106,12 +106,6 @@ where
     S: 'static + Send + EventHandle<E>,
 {
     type Error = HelloWorldError;
-    type Event = HelloWorldEvent;
-    type Handle = HelloWorldSender;
-
-    fn handle(&mut self) -> &mut Self::Handle {
-        &mut self.sender
-    }
 
     fn service(&mut self) -> &mut Service {
         &mut self.service
@@ -141,6 +135,18 @@ where
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
             std::result::Result::Err(e) => Err(e.into()),
         }
+    }
+}
+
+impl<E, S> EventActor<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    type Event = HelloWorldEvent;
+    type Handle = HelloWorldSender;
+
+    fn handle(&mut self) -> &mut Self::Handle {
+        &mut self.sender
     }
 }
 
@@ -210,15 +216,8 @@ impl<E, S> Actor<E, S> for Howdy
 where
     S: 'static + Send + EventHandle<E>,
 {
-    type Error = HowdyError;
-    type Event = HowdyEvent;
-    type Handle = HowdySender;
-
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-
-    fn handle(&mut self) -> &mut Self::Handle {
-        &mut self.sender
-    }
+    type Error = HowdyError;
 
     fn service(&mut self) -> &mut Service {
         &mut self.service
@@ -249,6 +248,18 @@ where
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
             std::result::Result::Err(e) => Err(e.into()),
         }
+    }
+}
+
+impl<E, S> EventActor<E, S> for Howdy
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    type Event = HowdyEvent;
+    type Handle = HowdySender;
+
+    fn handle(&mut self) -> &mut Self::Handle {
+        &mut self.sender
     }
 }
 

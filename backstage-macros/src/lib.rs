@@ -362,12 +362,6 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[async_trait::async_trait]
         impl Actor<(), NullSupervisor> for #struct_ident {
             type Error = std::borrow::Cow<'static, str>;
-            type Event = LauncherEvent;
-            type Handle = LauncherSender;
-
-            fn handle(&mut self) -> &mut Self::Handle {
-                &mut self.sender
-            }
 
             fn service(&mut self) -> &mut Service {
                 panic!("Cannot access launcher service via a reference!");
@@ -435,6 +429,15 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
             {
                 log::info!("Shutting down Launcher!");
                 Ok(ActorRequest::Finish)
+            }
+        }
+
+        impl EventActor<(), NullSupervisor> for #struct_ident {
+            type Event = LauncherEvent;
+            type Handle = LauncherSender;
+
+            fn handle(&mut self) -> &mut Self::Handle {
+                &mut self.sender
             }
         }
     };

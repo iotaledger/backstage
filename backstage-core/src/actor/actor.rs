@@ -2,7 +2,6 @@ use super::{
     event_handle::EventHandle,
     result::*,
     service::{Service, ServiceStatus},
-    NullSupervisor,
 };
 use async_trait::async_trait;
 use std::time::Duration;
@@ -16,14 +15,6 @@ where
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
     /// The actor's error type. Must be convertable to an `ActorError`.
     type Error: Send + Into<ActorError>;
-    /// The actor's event type. Can be anything so long as you can find
-    /// a way to send it between actors.
-    type Event;
-    /// The actor's event handle type
-    type Handle: EventHandle<Self::Event> + Clone;
-
-    /// Get the actor's event handle
-    fn handle(&mut self) -> &mut Self::Handle;
 
     /// Get the actor's service
     fn service(&mut self) -> &mut Service;
@@ -79,14 +70,6 @@ pub trait ActorTypes {
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
     /// The actor's error type. Must be convertable to an `ActorError`.
     type Error: Send + Into<ActorError>;
-    /// The actor's event type. Can be anything so long as you can find
-    /// a way to send it between actors.
-    type Event;
-    /// The actor's event handle type
-    type Handle: EventHandle<Self::Event> + Clone;
-
-    /// Get the actor's event handle
-    fn handle(&mut self) -> &mut Self::Handle;
 
     /// Get the actor's service
     fn service(&mut self) -> &mut Service;
@@ -135,14 +118,6 @@ where
 
     type Error = <Self as ActorTypes>::Error;
 
-    type Event = <Self as ActorTypes>::Event;
-
-    type Handle = <Self as ActorTypes>::Handle;
-
-    fn handle(&mut self) -> &mut Self::Handle {
-        <Self as ActorTypes>::handle(self)
-    }
-
     fn service(&mut self) -> &mut Service {
         <Self as ActorTypes>::service(self)
     }
@@ -172,3 +147,17 @@ where
 trait SplitMarker {}
 
 impl<T> SplitMarker for T where T: ActorTypes {}
+
+pub trait EventActor<E, S>: Actor<E, S>
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    /// The actor's event type. Can be anything so long as you can find
+    /// a way to send it between actors.
+    type Event;
+    /// The actor's event handle type
+    type Handle: EventHandle<Self::Event> + Clone;
+
+    /// Get the actor's event handle
+    fn handle(&mut self) -> &mut Self::Handle;
+}

@@ -64,15 +64,21 @@ pub struct HelloWorld {
 #[async_trait]
 impl ActorTypes for HelloWorld {
     type Error = HelloWorldError;
+
+    fn service(&mut self) -> &mut Service {
+        &mut self.service
+    }
+}
+
+impl<E, S> EventActor<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
     type Event = HelloWorldEvent;
     type Handle = HelloWorldSender;
 
     fn handle(&mut self) -> &mut Self::Handle {
         &mut self.sender
-    }
-
-    fn service(&mut self) -> &mut Service {
-        &mut self.service
     }
 }
 

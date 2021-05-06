@@ -1,5 +1,5 @@
 use super::{
-    actor::Actor,
+    actor::{Actor, EventActor},
     builder::ActorBuilder,
     event_handle::EventHandle,
     result::*,
@@ -56,7 +56,7 @@ impl EventHandle<LauncherEvent> for LauncherSender {
 /// Defines resources needed to spawn an actor and manage it
 pub struct BuilderData<A, B, E, S>
 where
-    A: Actor<E, S>,
+    A: EventActor<E, S>,
     B: ActorBuilder<A, E, S> + Clone,
     S: 'static + Send + EventHandle<E>,
 {
@@ -73,7 +73,7 @@ where
 
 impl<A, B, E, S> BuilderData<A, B, E, S>
 where
-    A: Actor<E, S>,
+    A: EventActor<E, S>,
     B: ActorBuilder<A, E, S> + Clone,
     S: 'static + Send + EventHandle<E>,
 {
@@ -90,7 +90,7 @@ where
 
 impl<A, B> BuilderData<A, B, LauncherEvent, LauncherSender>
 where
-    A: 'static + Actor<LauncherEvent, LauncherSender> + Send,
+    A: 'static + EventActor<LauncherEvent, LauncherSender> + Send,
     B: ActorBuilder<A, LauncherEvent, LauncherSender> + Clone,
 {
     /// Spawn and start an actor on a new thread, storing its handles
