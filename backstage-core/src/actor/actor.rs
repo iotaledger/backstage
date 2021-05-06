@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use std::time::Duration;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor {
+pub trait Actor<E, S>
+where
+    S: 'static + Send + EventHandle<E>,
+{
     /// The actor's shutdown timeout
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
     /// The actor's error type. Must be convertable to an `ActorError`.
@@ -29,7 +32,7 @@ pub trait Actor {
     /// This function assumes the service is stored locally in the actor's state.
     /// If this is not the case (for instance, it is stored globally in an `Arc`),
     /// this fn definition should be overridden so that it does not use the local fn.
-    async fn update_status<E, S>(&mut self, status: ServiceStatus, supervisor: &mut S)
+    async fn update_status(&mut self, status: ServiceStatus, supervisor: &mut S)
     where
         S: 'static + Send + EventHandle<E>,
     {
@@ -39,25 +42,18 @@ pub trait Actor {
     }
 
     /// Initialize the actor
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn init(&mut self, supervisor: &mut S) -> Result<(), Self::Error>;
 
     /// The main function for the actor
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn run(&mut self, supervisor: &mut S) -> Result<(), Self::Error>;
 
     /// Handle the actor shutting down
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>;
 
     /// Start the actor
-    async fn start<E, S>(mut self, mut supervisor: S) -> Result<ActorRequest, ActorError>
+    async fn start(mut self, mut supervisor: S) -> Result<ActorRequest, ActorError>
     where
         Self: Send + Sized,
-        S: 'static + Send + EventHandle<E>,
     {
         self.update_status(ServiceStatus::Starting, &mut supervisor).await;
         let mut res = self.init(&mut supervisor).await;
@@ -73,14 +69,6 @@ pub trait Actor {
             self.update_status(ServiceStatus::Stopped, &mut supervisor).await;
             res
         }
-    }
-
-    /// Start the actor unsupervised
-    async fn start_unsupervised(mut self) -> Result<ActorRequest, ActorError>
-    where
-        Self: Send + Sized,
-    {
-        self.start(NullSupervisor).await
     }
 }
 
@@ -107,38 +95,41 @@ pub trait ActorTypes {
 /// A split-trait version of the `Actor` init definition. Implementors of
 /// this trait along with `Run` and `Shutdown` will blanket impl `Actor`.
 #[async_trait]
-pub trait Init: ActorTypes {
+pub trait Init<E, S>: ActorTypes
+where
+    S: 'static + Send + EventHandle<E>,
+{
     /// Initialize the actor
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), <Self as ActorTypes>::Error>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn init(&mut self, supervisor: &mut S) -> Result<(), <Self as ActorTypes>::Error>;
 }
 
 /// A split-trait version of the `Actor` run definition. Implementors of
 /// this trait along with `Init` and `Shutdown` will blanket impl `Actor`.
 #[async_trait]
-pub trait Run: ActorTypes {
+pub trait Run<E, S>: ActorTypes
+where
+    S: 'static + Send + EventHandle<E>,
+{
     /// The main function for the actor
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn run(&mut self, supervisor: &mut S) -> Result<(), Self::Error>;
 }
 
 /// A split-trait version of the `Actor` run definition. Implementors of
 /// this trait along with `Init` and `Run` will blanket impl `Actor`.
 #[async_trait]
-pub trait Shutdown: ActorTypes {
+pub trait Shutdown<E, S>: ActorTypes
+where
+    S: 'static + Send + EventHandle<E>,
+{
     /// Handle the actor shutting down
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
-    where
-        S: 'static + Send + EventHandle<E>;
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>;
 }
 
 #[async_trait]
-impl<T> Actor for T
+impl<T, E, S> Actor<E, S> for T
 where
-    T: Init + Run + Shutdown,
-    Self: Send,
+    T: SplitMarker + Init<E, S> + Run<E, S> + Shutdown<E, S> + Send,
+    S: 'static + Send + EventHandle<E>,
 {
     const SHUTDOWN_TIMEOUT: Duration = <Self as ActorTypes>::SHUTDOWN_TIMEOUT;
 
@@ -156,24 +147,28 @@ where
         <Self as ActorTypes>::service(self)
     }
 
-    async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn init(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
-        <Self as Init>::init(&mut self, supervisor).await
+        <Self as Init<E, S>>::init(&mut self, supervisor).await
     }
 
-    async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
+    async fn run(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
     where
         S: 'static + Send + EventHandle<E>,
     {
-        <Self as Run>::run(&mut self, supervisor).await
+        <Self as Run<E, S>>::run(&mut self, supervisor).await
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
     where
         S: 'static + Send + EventHandle<E>,
     {
-        <Self as Shutdown>::shutdown(&mut self, status, supervisor).await
+        <Self as Shutdown<E, S>>::shutdown(&mut self, status, supervisor).await
     }
 }
+
+trait SplitMarker {}
+
+impl<T> SplitMarker for T where T: ActorTypes {}

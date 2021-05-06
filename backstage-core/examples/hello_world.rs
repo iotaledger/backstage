@@ -76,22 +76,22 @@ impl ActorTypes for HelloWorld {
 }
 
 #[async_trait]
-impl Init for HelloWorld {
-    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+impl<E, S> Init<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
 }
 
 #[async_trait]
-impl Run for HelloWorld {
-    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+impl<E, S> Run<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -105,11 +105,11 @@ impl Run for HelloWorld {
 }
 
 #[async_trait]
-impl Shutdown for HelloWorld {
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+impl<E, S> Shutdown<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
@@ -125,11 +125,11 @@ pub enum HelloWorldEvent {
 
 #[launcher]
 pub struct Apps {
-    #[HelloWorld]
+    #[HelloWorld(depends_on(hello_world3))]
     hello_world: HelloWorldBuilder,
-    #[HelloWorld("HelloWorld 2", depends_on(hello_world))]
+    #[HelloWorld("HelloWorld 2")]
     hello_world2: HelloWorldBuilder,
-    #[HelloWorld(name = "Hello World 3", depends_on(hello_world, hello_world2))]
+    #[HelloWorld(name = "Hello World 3", depends_on(hello_world2))]
     hello_world3: HelloWorldBuilder,
 }
 

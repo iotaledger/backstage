@@ -86,7 +86,9 @@ pub fn build(attr: TokenStream, item: TokenStream) -> TokenStream {
                         #(#add_fns)*
                     }
 
-                    impl ActorBuilder<#actor> for #builder
+                    impl<E, S> ActorBuilder<#actor, E, S> for #builder
+                    where
+                        S: 'static + Send + EventHandle<E>,
                     {
                         fn build(self, service: Service) -> #actor #block
                     }
@@ -222,10 +224,10 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let deps_fn_ident = quote::format_ident!("{}_deps", field_ident);
                 let spawn_fn_ident = quote::format_ident!("spawn_{}", field_ident);
                 builder_param_fields.push(quote! {
-                    #field_ident: BuilderData<#actor, #builder_type>
+                    #field_ident: BuilderData<#actor, #builder_type, LauncherEvent, LauncherSender>
                 });
                 builder_struct_fields.push(quote! {
-                    #field_ident: BuilderData {
+                    #field_ident: BuilderData::<_, _, LauncherEvent, LauncherSender> {
                         name: #name.into(),
                         builder: #field_ident,
                         event_handle: None,
@@ -240,7 +242,7 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 spawns.push(quote! {
                     #vis async fn #spawn_fn_ident (&self) -> #actor {
                         let new_service = SERVICE.write().await.spawn(#name);
-                        self.#field_ident.builder.clone().build(new_service)
+                        ActorBuilder::<_, LauncherEvent, LauncherSender>::build(self.#field_ident.builder.clone(), new_service)
                     }
                 });
                 startup_matches.push(quote! {
@@ -346,12 +348,12 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             #vis async fn launch(self) -> Result<ActorRequest, ActorError> {
-                self.start_unsupervised().await
+                self.start(NullSupervisor).await
             }
         }
 
         #[async_trait::async_trait]
-        impl Actor for #struct_ident {
+        impl Actor<(), NullSupervisor> for #struct_ident {
             type Error = std::borrow::Cow<'static, str>;
             type Event = LauncherEvent;
             type Handle = LauncherSender;
@@ -364,29 +366,21 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 panic!("Cannot access launcher service via a reference!");
             }
 
-            async fn update_status<E, S>(&mut self, status: ServiceStatus, _supervisor: &mut S)
-            where
-                S: 'static + Send + EventHandle<E>,
+            async fn update_status(&mut self, status: ServiceStatus, _supervisor: &mut NullSupervisor)
             {
                 SERVICE.write().await.update_status(status);
             }
 
-            async fn init<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
-            where
-                S: 'static + Send + EventHandle<E>,
+            async fn init(&mut self, supervisor: &mut NullSupervisor) -> Result<(), Self::Error>
             {
                 log::info!("Initializing Launcher!");
                 tokio::spawn(ctrl_c(self.sender.clone()));
-                SERVICE.write().await.update_status(ServiceStatus::Initializing);
                 Ok(())
             }
 
-            async fn run<E, S>(&mut self, supervisor: &mut S) -> Result<(), Self::Error>
-            where
-                S: 'static + Send + EventHandle<E>,
+            async fn run(&mut self, supervisor: &mut NullSupervisor) -> Result<(), Self::Error>
             {
                 log::info!("Running Launcher!");
-                SERVICE.write().await.update_status(ServiceStatus::Running);
                 #(#starts)*
                 while let Some(evt) = self.inbox.recv().await {
                     match evt {
@@ -430,12 +424,9 @@ pub fn launcher(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 Ok(())
             }
 
-            async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, supervisor: &mut S) -> Result<ActorRequest, ActorError>
-            where
-                S: 'static + Send + EventHandle<E>,
+            async fn shutdown(&mut self, status: Result<(), Self::Error>, supervisor: &mut NullSupervisor) -> Result<ActorRequest, ActorError>
             {
                 log::info!("Shutting down Launcher!");
-                SERVICE.write().await.update_status(ServiceStatus::Stopping);
                 Ok(ActorRequest::Finish)
             }
         }

@@ -54,7 +54,12 @@ impl EventHandle<LauncherEvent> for LauncherSender {
 }
 
 /// Defines resources needed to spawn an actor and manage it
-pub struct BuilderData<A: Actor, B: ActorBuilder<A>> {
+pub struct BuilderData<A, B, E, S>
+where
+    A: Actor<E, S>,
+    B: ActorBuilder<A, E, S>,
+    S: 'static + Send + EventHandle<E>,
+{
     /// The name of the actor
     pub name: String,
     /// The actor's builder, used to spawn new `Actor`s
@@ -66,7 +71,28 @@ pub struct BuilderData<A: Actor, B: ActorBuilder<A>> {
     pub join_handle: Option<JoinHandle<Result<ActorRequest, ActorError>>>,
 }
 
-impl<A: 'static + Actor + Send, B: ActorBuilder<A>> BuilderData<A, B> {
+impl<A, B, E, S> BuilderData<A, B, E, S>
+where
+    A: Actor<E, S>,
+    B: ActorBuilder<A, E, S>,
+    S: 'static + Send + EventHandle<E>,
+{
+    /// Create a new builder data struct from a name and builder
+    pub fn new(name: String, builder: B) -> Self {
+        Self {
+            name,
+            builder,
+            event_handle: None,
+            join_handle: None,
+        }
+    }
+}
+
+impl<A, B> BuilderData<A, B, LauncherEvent, LauncherSender>
+where
+    A: 'static + Actor<LauncherEvent, LauncherSender> + Send,
+    B: ActorBuilder<A, LauncherEvent, LauncherSender>,
+{
     /// Spawn and start an actor on a new thread, storing its handles
     pub async fn startup(&mut self, sender: LauncherSender) {
         let new_service = SERVICE.write().await.spawn(self.name.clone());

@@ -41,6 +41,24 @@ impl From<std::borrow::Cow<'static, str>> for ActorError {
     }
 }
 
+impl From<()> for ActorError {
+    fn from(_: ()) -> Self {
+        ActorError::Other {
+            source: anyhow!("Error!"),
+            request: ActorRequest::Finish,
+        }
+    }
+}
+
+impl From<anyhow::Error> for ActorError {
+    fn from(e: anyhow::Error) -> Self {
+        ActorError::Other {
+            source: e,
+            request: ActorRequest::Panic,
+        }
+    }
+}
+
 /// Possible requests an actor can make to its supervisor
 #[derive(Debug, Clone)]
 pub enum ActorRequest {

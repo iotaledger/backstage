@@ -46,7 +46,10 @@ impl HelloWorldBuilder {
     }
 }
 
-impl ActorBuilder<HelloWorld> for HelloWorldBuilder {
+impl<E, S> ActorBuilder<HelloWorld, E, S> for HelloWorldBuilder
+where
+    S: 'static + Send + EventHandle<E>,
+{
     fn build(self, service: Service) -> HelloWorld {
         let (name, num) = (self.name, self.num);
         let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
@@ -98,7 +101,10 @@ pub struct HelloWorld {
 // The Actor implementation, which defines how this actor will
 // behave.
 #[async_trait]
-impl Actor for HelloWorld {
+impl<E, S> Actor<E, S> for HelloWorld
+where
+    S: 'static + Send + EventHandle<E>,
+{
     type Error = HelloWorldError;
     type Event = HelloWorldEvent;
     type Handle = HelloWorldSender;
@@ -111,19 +117,13 @@ impl Actor for HelloWorld {
         &mut self.service
     }
 
-    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
 
     // This actor simply waits for a shutdown signal and then exits
-    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -135,10 +135,7 @@ impl Actor for HelloWorld {
         Ok(())
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
@@ -208,7 +205,10 @@ pub struct Howdy {
 }
 
 #[async_trait]
-impl Actor for Howdy {
+impl<E, S> Actor<E, S> for Howdy
+where
+    S: 'static + Send + EventHandle<E>,
+{
     type Error = HowdyError;
     type Event = HowdyEvent;
     type Handle = HowdySender;
@@ -223,18 +223,12 @@ impl Actor for Howdy {
         &mut self.service
     }
 
-    async fn init<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
 
-    async fn run<E, S>(&mut self, _supervisor: &mut S) -> Result<(), Self::Error>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -246,10 +240,7 @@ impl Actor for Howdy {
         Ok(())
     }
 
-    async fn shutdown<E, S>(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError>
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         // Some process that takes longer than the defined timeout
         tokio::time::sleep(Duration::from_secs(4)).await;
