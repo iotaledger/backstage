@@ -3,7 +3,7 @@ use crate::EventHandle;
 
 /// An actor builder, which defines how you take some
 /// input data and create an `Actor` with it.
-pub trait ActorBuilder<A, E, S>: Clone
+pub trait ActorBuilder<A, E, S>
 where
     A: Actor<E, S>,
     S: 'static + Send + EventHandle<E>,

@@ -57,7 +57,7 @@ impl EventHandle<LauncherEvent> for LauncherSender {
 pub struct BuilderData<A, B, E, S>
 where
     A: Actor<E, S>,
-    B: ActorBuilder<A, E, S>,
+    B: ActorBuilder<A, E, S> + Clone,
     S: 'static + Send + EventHandle<E>,
 {
     /// The name of the actor
@@ -74,7 +74,7 @@ where
 impl<A, B, E, S> BuilderData<A, B, E, S>
 where
     A: Actor<E, S>,
-    B: ActorBuilder<A, E, S>,
+    B: ActorBuilder<A, E, S> + Clone,
     S: 'static + Send + EventHandle<E>,
 {
     /// Create a new builder data struct from a name and builder
@@ -91,7 +91,7 @@ where
 impl<A, B> BuilderData<A, B, LauncherEvent, LauncherSender>
 where
     A: 'static + Actor<LauncherEvent, LauncherSender> + Send,
-    B: ActorBuilder<A, LauncherEvent, LauncherSender>,
+    B: ActorBuilder<A, LauncherEvent, LauncherSender> + Clone,
 {
     /// Spawn and start an actor on a new thread, storing its handles
     pub async fn startup(&mut self, sender: LauncherSender) {

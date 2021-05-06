@@ -19,6 +19,7 @@ impl Into<ActorError> for HelloWorldError {
 }
 
 #[build]
+#[derive(Default, Debug, Clone)]
 pub fn build_hello_world(service: Service, name: String, num: u32) -> HelloWorld {
     let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
     HelloWorld {
