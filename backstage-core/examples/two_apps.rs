@@ -166,8 +166,8 @@ impl Into<ActorError> for HowdyError {
     }
 }
 
-#[build(Howdy)]
-pub fn build_howdy(service: Service) {
+#[build]
+pub fn build_howdy<LauncherEvent, LauncherSender>(service: Service) -> Howdy {
     let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HowdyEvent>();
     Howdy {
         inbox,

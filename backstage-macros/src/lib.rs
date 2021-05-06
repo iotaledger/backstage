@@ -4,105 +4,109 @@ use quote::quote;
 use std::collections::HashMap;
 
 #[proc_macro_attribute]
-pub fn build(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(attr as syn::AttributeArgs);
-    let actor = args[0].clone();
-    match actor {
-        syn::NestedMeta::Meta(ref m) => match m {
-            syn::Meta::Path(ref path) => {
-                let actor = path.get_ident().unwrap().clone();
-                let syn::ItemFn {
-                    attrs: _,
-                    vis,
-                    sig,
-                    mut block,
-                } = syn::parse_macro_input!(item as syn::ItemFn);
+pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // let args = syn::parse_macro_input!(attr as syn::AttributeArgs);
 
-                if let syn::ReturnType::Type(_, _) = sig.output {
-                    panic!("Build function should not specify its return type!");
-                }
+    let syn::ItemFn {
+        attrs: _,
+        vis,
+        sig,
+        mut block,
+    } = syn::parse_macro_input!(item as syn::ItemFn);
 
-                let syn::Signature { inputs: fn_inputs, .. } = sig;
+    let actor = match sig.output {
+        syn::ReturnType::Type(_, ref ty) => {
+            if let syn::Type::Path(p) = ty.as_ref() {
+                p.path.get_ident().unwrap()
+            } else {
+                panic!("Build function should specify an actor as its return type!");
+            }
+        }
+        syn::ReturnType::Default => panic!("Build function should specify an actor as its return type!"),
+    };
 
-                let builder = quote::format_ident!("{}Builder", actor);
+    let syn::Signature {
+        generics,
+        inputs: fn_inputs,
+        ..
+    } = sig;
 
-                let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-                let mut found_service = false;
-                for input in fn_inputs {
-                    match input {
-                        syn::FnArg::Typed(mut t) => {
-                            let name = &t.pat;
-                            let ty = &t.ty;
-                            if let syn::Type::Path(p) = ty.as_ref() {
-                                if p.path.is_ident("Service") {
-                                    if found_service {
-                                        panic!("Duplicate Service in build signature!");
-                                    }
-                                    found_service = true;
-                                } else {
-                                    let add_fn = quote! {
-                                        #vis fn #name (mut self, val: #ty) -> Self {
-                                            self.#name.replace(val);
-                                            self
-                                        }
-                                    };
-                                    add_fns.push(add_fn);
+    let (generics, gen_list, bounds) = if !generics.params.is_empty() {
+        let params = generics.params;
+        (quote! {}, quote! {#params}, quote! {})
+    } else {
+        (quote! {<E, S>}, quote! {E, S}, quote! {where S: 'static + Send + EventHandle<E>,})
+    };
 
-                                    input_names.push(name.clone());
+    let builder = quote::format_ident!("{}Builder", actor);
 
-                                    input_unwraps.push(quote! {self.#name.expect("Config param #name was not provided!")});
-
-                                    let prev_type = t.ty.clone();
-                                    t.ty = syn::parse_quote! {Option<#prev_type>};
-                                    inputs.push(t);
-                                }
+    let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut found_service = false;
+    for input in fn_inputs {
+        match input {
+            syn::FnArg::Typed(mut t) => {
+                let name = &t.pat;
+                let ty = &t.ty;
+                if let syn::Type::Path(p) = ty.as_ref() {
+                    if p.path.is_ident("Service") {
+                        if found_service {
+                            panic!("Duplicate Service in build signature!");
+                        }
+                        found_service = true;
+                    } else {
+                        let add_fn = quote! {
+                            #vis fn #name (mut self, val: #ty) -> Self {
+                                self.#name.replace(val);
+                                self
                             }
-                        }
-                        _ => (),
+                        };
+                        add_fns.push(add_fn);
+
+                        input_names.push(name.clone());
+
+                        input_unwraps.push(quote! {self.#name.expect("Config param #name was not provided!")});
+
+                        let prev_type = t.ty.clone();
+                        t.ty = syn::parse_quote! {Option<#prev_type>};
+                        inputs.push(t);
                     }
                 }
-                if !found_service {
-                    panic!("Build function must contain a Service parameter (ex. service: Service)!");
-                }
-
-                block.stmts.insert(
-                    0,
-                    syn::parse_quote! {
-                        let (#(#input_names),*) = (#(#input_unwraps),*);
-                    },
-                );
-
-                let res = quote! {
-                    #[derive(Debug, Default, Clone)]
-                    #vis struct #builder {
-                        #(#inputs),*
-                    }
-
-                    impl #builder {
-                        #vis fn new() -> Self {
-                            Self::default()
-                        }
-
-                        #(#add_fns)*
-                    }
-
-                    impl<E, S> ActorBuilder<#actor, E, S> for #builder
-                    where
-                        S: 'static + Send + EventHandle<E>,
-                    {
-                        fn build(self, service: Service) -> #actor #block
-                    }
-                };
-                res.into()
             }
-            _ => {
-                panic!("Invalid actor meta type!");
-            }
-        },
-        syn::NestedMeta::Lit(_) => {
-            panic!("Invalid actor specified!");
+            _ => (),
         }
     }
+    if !found_service {
+        panic!("Build function must contain a Service parameter (ex. service: Service)!");
+    }
+
+    block.stmts.insert(
+        0,
+        syn::parse_quote! {
+            let (#(#input_names),*) = (#(#input_unwraps),*);
+        },
+    );
+
+    let res = quote! {
+        #[derive(Debug, Default, Clone)]
+        #vis struct #builder {
+            #(#inputs),*
+        }
+
+        impl #builder {
+            #vis fn new() -> Self {
+                Self::default()
+            }
+
+            #(#add_fns)*
+        }
+
+        impl #generics ActorBuilder<#actor, #gen_list> for #builder
+        #bounds
+        {
+            fn build(self, service: Service) -> #actor #block
+        }
+    };
+    res.into()
 }
 
 #[proc_macro_attribute]
