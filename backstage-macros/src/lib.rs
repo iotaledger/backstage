@@ -40,7 +40,8 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let builder = quote::format_ident!("{}Builder", actor);
 
-    let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut add_fns, mut inputs, mut input_names, mut input_unwraps, mut clone_bounds, mut clone_fields) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut found_service = false;
     for input in fn_inputs {
         match input {
@@ -66,6 +67,9 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
                         input_unwraps.push(quote! {self.#name.expect("Config param #name was not provided!")});
 
+                        clone_bounds.push(quote! {#ty: Clone});
+                        clone_fields.push(quote! {#name: self.#name.clone()});
+
                         let prev_type = t.ty.clone();
                         t.ty = syn::parse_quote! {Option<#prev_type>};
                         inputs.push(t);
@@ -87,7 +91,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     let res = quote! {
-        #[derive(Debug, Default, Clone)]
+        #[derive(Debug, Default)]
         #vis struct #builder {
             #(#inputs),*
         }
@@ -98,6 +102,17 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             #(#add_fns)*
+        }
+
+        impl Clone for #builder
+        where
+            #(#clone_bounds),*
+        {
+            fn clone(&self) -> Self {
+                Self {
+                    #(#clone_fields),*
+                }
+            }
         }
 
         impl #generics ActorBuilder<#actor, #gen_list> for #builder
