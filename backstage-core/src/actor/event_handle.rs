@@ -19,3 +19,27 @@ where
     where
         Self: Sized;
 }
+
+/// An event handle that does nothing, intended for actors
+/// which do not expect to receive events.
+pub type NullHandle = ();
+
+impl EventHandle<()> for () {
+    fn send(&mut self, _message: ()) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown(self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
+    fn update_status(&mut self, _service: Service) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        Ok(())
+    }
+}
