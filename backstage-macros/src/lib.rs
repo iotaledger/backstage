@@ -90,6 +90,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let res = quote! {
         #(#attrs)*
+        #[derive(Default)]
         #vis struct #builder {
             #(#inputs),*
         }
