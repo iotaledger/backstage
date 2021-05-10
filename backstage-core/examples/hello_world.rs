@@ -148,7 +148,7 @@ async fn main() {
     let builder = HelloWorldBuilder::new();
     Apps::new(
         builder.clone().name(Apps::hello_world_name()).num(1),
-        builder.clone().name(Apps::hello_world2_name()).num(2),
+        builder.clone().name(Apps::hello_world2_name()).num(Some(2)),
         builder.name(Apps::hello_world3_name()),
     )
     .execute(|_launcher| {

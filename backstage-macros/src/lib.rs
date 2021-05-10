@@ -62,8 +62,8 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                     if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
                                         let ty = args.args.first().unwrap();
                                         let add_fn = quote! {
-                                            #vis fn #name (mut self, val: #ty) -> Self {
-                                                self.#name.replace(val);
+                                            #vis fn #name<I: Into<Option<#ty>>> (mut self, val: I) -> Self {
+                                                self.#name = val.into();
                                                 self
                                             }
                                         };
