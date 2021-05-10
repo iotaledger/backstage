@@ -54,22 +54,43 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                         found_service = true;
                     } else {
-                        let add_fn = quote! {
-                            #vis fn #name (mut self, val: #ty) -> Self {
-                                self.#name.replace(val);
-                                self
-                            }
-                        };
-                        add_fns.push(add_fn);
-
                         input_names.push(name.clone());
 
-                        input_unwraps.push(
-                            quote! {self.#name.unwrap_or_else(|| panic!("Config param {} was not provided!", stringify!(self.#name)))},
-                        );
+                        if let syn::Type::Path(prev_type) = t.ty.as_ref() {
+                            if let Some(seg) = p.path.segments.last() {
+                                if seg.ident.to_string() == "Option" {
+                                    if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
+                                        let ty = args.args.first().unwrap();
+                                        let add_fn = quote! {
+                                            #vis fn #name (mut self, val: #ty) -> Self {
+                                                self.#name.replace(val);
+                                                self
+                                            }
+                                        };
+                                        add_fns.push(add_fn);
 
-                        let prev_type = t.ty.clone();
-                        t.ty = syn::parse_quote! {Option<#prev_type>};
+                                        input_unwraps.push(quote! {self.#name});
+                                    } else {
+                                        panic!("Invalid Option arg!");
+                                    }
+                                } else {
+                                    let add_fn = quote! {
+                                        #vis fn #name (mut self, val: #ty) -> Self {
+                                            self.#name.replace(val);
+                                            self
+                                        }
+                                    };
+                                    add_fns.push(add_fn);
+
+                                    input_unwraps.push(
+                                        quote! {self.#name.unwrap_or_else(|| panic!("Config param {} was not provided!", stringify!(self.#name)))},
+                                    );
+
+                                    t.ty = syn::parse_quote! {Option<#prev_type>};
+                                }
+                            }
+                        }
+
                         inputs.push(t);
                     }
                 }

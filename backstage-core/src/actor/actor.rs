@@ -24,8 +24,6 @@ where
     /// If this is not the case (for instance, it is stored globally in an `Arc`),
     /// this fn definition should be overridden so that it does not use the local fn.
     async fn update_status(&mut self, status: ServiceStatus, supervisor: &mut S)
-    where
-        S: 'static + Send + EventHandle<E>,
     {
         let service = self.service();
         service.update_status(status);

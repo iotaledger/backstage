@@ -20,14 +20,14 @@ impl Into<ActorError> for HelloWorldError {
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build_hello_world(service: Service, name: String, num: u32) -> HelloWorld {
+pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> HelloWorld {
     let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
     HelloWorld {
         inbox,
         sender: HelloWorldSender(sender),
         service,
         name,
-        num,
+        num: num.unwrap_or_default(),
     }
 }
 
@@ -149,7 +149,7 @@ async fn main() {
     Apps::new(
         builder.clone().name(Apps::hello_world_name()).num(1),
         builder.clone().name(Apps::hello_world2_name()).num(2),
-        builder.name(Apps::hello_world3_name()).num(3),
+        builder.name(Apps::hello_world3_name()),
     )
     .execute(|_launcher| {
         info!("Executing with launcher");
