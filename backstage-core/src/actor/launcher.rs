@@ -1,6 +1,5 @@
 use super::{
     actor::{Actor, EventActor},
-    builder::ActorBuilder,
     event_handle::EventHandle,
     result::*,
     service::{Service, SERVICE},
@@ -260,6 +259,8 @@ where
     B: Bridge<A, M, H> + Clone + Send + Sync,
     M: Send,
 {
+    type Error = anyhow::Error;
+
     fn service(&mut self) -> &mut Service {
         panic!("Cannot access launcher service via a reference!");
     }
@@ -271,13 +272,13 @@ where
         SERVICE.write().await.update_status(status);
     }
 
-    async fn init(&mut self, _supervisor: &mut NullSupervisor) -> Result<(), ActorError> {
+    async fn init(&mut self, _supervisor: &mut NullSupervisor) -> Result<(), Self::Error> {
         info!("Initializing Launcher!");
         tokio::spawn(ctrl_c(self.sender.clone()));
         Ok(())
     }
 
-    async fn run(&mut self, _supervisor: &mut NullSupervisor) -> Result<(), ActorError> {
+    async fn run(&mut self, _supervisor: &mut NullSupervisor) -> Result<(), Self::Error> {
         info!("Running Launcher!");
         let mut dag = Dag::<(), (), u32>::new();
         let mut no_deps = Vec::new();
@@ -366,7 +367,7 @@ where
         Ok(())
     }
 
-    async fn shutdown(&mut self, status: Result<(), ActorError>, _supervisor: &mut NullSupervisor) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut NullSupervisor) -> Result<ActorRequest, ActorError> {
         log::info!("Shutting down Launcher!");
         status?;
         Ok(ActorRequest::Finish)
@@ -393,13 +394,17 @@ where
     }
 }
 
-impl<B, A, M, H> EventActor<LauncherEvent, LauncherSender, (), NullSupervisor> for Launcher<B, A, M, H>
+impl<B, A, M, H> EventActor<(), NullSupervisor> for Launcher<B, A, M, H>
 where
     A: 'static + ActorHandle<M, H> + Send,
     H: EventHandle<M>,
     B: Bridge<A, M, H> + Clone + Send + Sync,
     M: Send,
 {
+    type Event = LauncherEvent;
+
+    type Handle = LauncherSender;
+
     fn handle(&self) -> LauncherSender {
         self.sender.clone()
     }
@@ -456,30 +461,30 @@ pub async fn ctrl_c(mut sender: LauncherSender) {
 pub mod macros {
     #[macro_export]
     macro_rules! launcher {
-        ($($builder:ty => $actor:ident[$event:ty, $handle:ty]),+) => {
+        ($($builder:ident),+) => {
             {
                 #[derive(Clone)]
                 enum Builders {
-                    $($actor($builder)),+
+                    $($builder($builder)),+
                 }
 
                 enum Actors {
-                    $($actor($actor)),+
+                    $($builder(<$builder as ActorBuilder>::BuiltActor)),+
                 }
 
                 #[derive(Clone)]
                 enum Handles {
-                    $($actor($handle)),+
+                    $($builder(<<$builder as ActorBuilder>::BuiltActor as EventActor<LauncherEvent, LauncherSender>>::Handle)),+
                 }
 
                 enum Events {
-                    $($actor($event)),+
+                    $($builder(<<$builder as ActorBuilder>::BuiltActor as EventActor<LauncherEvent, LauncherSender>>::Event)),+
                 }
 
                 $(
                     impl From<$builder> for Builders {
                         fn from(b: $builder) -> Self {
-                            Builders::$actor(b)
+                            Builders::$builder(b)
                         }
                     }
                 )+
@@ -489,13 +494,13 @@ pub mod macros {
                 {
                     fn handle(&self) -> Handles {
                         match self {
-                            $(Actors::$actor(actor) => Handles::$actor(<EventActor<_,_,_,LauncherSender>>::handle(actor))),+
+                            $(Actors::$builder(actor) => Handles::$builder(EventActor::<_, LauncherSender>::handle(actor))),+
                         }
                     }
 
                     async fn start(self, supervisor: LauncherSender) -> Result<ActorRequest, ActorError> {
                         match self {
-                            $(Actors::$actor(actor) => actor.start(supervisor).await),+
+                            $(Actors::$builder(actor) => actor.start(supervisor).await),+
                         }
                     }
                 }
@@ -503,20 +508,20 @@ pub mod macros {
                 impl EventHandle<Events> for Handles {
                     fn send(&mut self, message: Events) -> anyhow::Result<()> {
                         match (self, message) {
-                            $((Handles::$actor(handle), Events::$actor(message)) => handle.send(message),)+
+                            $((Handles::$builder(handle), Events::$builder(message)) => handle.send(message),)+
                             _ => anyhow::bail!("Mismatching event and handle"),
                         }
                     }
 
                     fn shutdown(&mut self) -> anyhow::Result<()> {
                         match self {
-                            $(Handles::$actor(handle) => handle.shutdown()),+
+                            $(Handles::$builder(handle) => handle.shutdown()),+
                         }
                     }
 
                     fn update_status(&mut self, service: Service) -> anyhow::Result<()> {
                         match self {
-                            $(Handles::$actor(handle) => handle.update_status(service)),+
+                            $(Handles::$builder(handle) => handle.update_status(service)),+
                         }
                     }
                 }
@@ -525,7 +530,7 @@ pub mod macros {
                 {
                     fn bridge(self, service: Service) -> Actors {
                         match self {
-                            $(Builders::$actor(builder) => Actors::$actor(builder.build::<_, LauncherSender>(service))),+
+                            $(Builders::$builder(builder) => Actors::$builder(builder.build::<_, LauncherSender>(service))),+
                         }
                     }
                 }

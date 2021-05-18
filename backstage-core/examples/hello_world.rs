@@ -59,15 +59,21 @@ pub struct HelloWorld {
 
 #[async_trait]
 impl ActorTypes for HelloWorld {
+    type Error = HelloWorldError;
+
     fn service(&mut self) -> &mut Service {
         &mut self.service
     }
 }
 
-impl<E, S> EventActor<HelloWorldEvent, HelloWorldSender, E, S> for HelloWorld
+impl<E, S> EventActor<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
+    type Event = HelloWorldEvent;
+
+    type Handle = HelloWorldSender;
+
     fn handle(&self) -> HelloWorldSender {
         self.sender.clone()
     }
@@ -78,7 +84,7 @@ impl<E, S> Init<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn init(&mut self, _supervisor: &mut S) -> Result<(), ActorError> {
+    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
@@ -89,7 +95,7 @@ impl<E, S> Run<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn run(&mut self, _supervisor: &mut S) -> Result<(), ActorError> {
+    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -107,7 +113,7 @@ impl<E, S> Shutdown<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn shutdown(&mut self, status: Result<(), ActorError>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
@@ -131,7 +137,7 @@ async fn main() {
 
 async fn startup() -> anyhow::Result<()> {
     let builder = HelloWorldBuilder::new();
-    launcher!(HelloWorldBuilder => HelloWorld[HelloWorldEvent, HelloWorldSender])
+    launcher!(HelloWorldBuilder)
         .add(
             "HelloWorld",
             builder.clone().name("HelloWorld".to_owned()).num(1),

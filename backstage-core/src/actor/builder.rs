@@ -3,11 +3,13 @@ use crate::EventHandle;
 
 /// An actor builder, which defines how you take some
 /// input data and create an `Actor` with it.
-pub trait ActorBuilder<A> {
+pub trait ActorBuilder {
+    type BuiltActor;
+
     /// Create the `Actor` with the builder data and a service
     /// provided by the supervisor.
-    fn build<E, S>(self, service: Service) -> A
+    fn build<E, S>(self, service: Service) -> Self::BuiltActor
     where
         S: 'static + Send + EventHandle<E>,
-        A: Actor<E, S>;
+        Self::BuiltActor: Actor<E, S>;
 }
