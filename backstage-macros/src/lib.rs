@@ -124,10 +124,11 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#add_fns)*
         }
 
-        impl #generics ActorBuilder<#actor, #gen_list> for #builder
-        #bounds
+        impl ActorBuilder<#actor> for #builder
         {
-            fn build(self, service: Service) -> #actor #block
+            fn build<#gen_list>(self, service: Service) -> #actor
+                #block
+
         }
     };
     res.into()

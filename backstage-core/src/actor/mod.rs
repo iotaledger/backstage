@@ -16,6 +16,7 @@ mod service;
 pub mod launcher;
 
 /// A null supervisor, to be used for unsupervised actors
+#[derive(Clone)]
 pub struct NullSupervisor;
 
 impl EventHandle<()> for NullSupervisor {
@@ -23,8 +24,8 @@ impl EventHandle<()> for NullSupervisor {
         Ok(())
     }
 
-    fn shutdown(self) -> Option<Self> {
-        None
+    fn shutdown(&mut self) -> anyhow::Result<()> {
+        Ok(())
     }
 
     fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {

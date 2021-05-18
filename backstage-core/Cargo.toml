@@ -22,6 +22,7 @@ anyhow = "1.0"
 anymap = "0.12"
 thiserror = "1.0"
 log = { version = "0.4", optional = true }
+daggy = "0.7"
 
 [dev-dependencies]
 serde_json = "1.0"

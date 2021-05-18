@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::{launcher::*, *};
+use backstage::{launcher, launcher::*, *};
 use log::info;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,12 +39,8 @@ impl EventHandle<HelloWorldEvent> for HelloWorldSender {
         self.0.send(message).map_err(|e| anyhow!(e.to_string()))
     }
 
-    fn shutdown(mut self) -> Option<Self> {
-        if let Ok(()) = self.send(HelloWorldEvent::Shutdown) {
-            None
-        } else {
-            Some(self)
-        }
+    fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.send(HelloWorldEvent::Shutdown)
     }
 
     fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
@@ -63,22 +59,17 @@ pub struct HelloWorld {
 
 #[async_trait]
 impl ActorTypes for HelloWorld {
-    type Error = HelloWorldError;
-
     fn service(&mut self) -> &mut Service {
         &mut self.service
     }
 }
 
-impl<E, S> EventActor<E, S> for HelloWorld
+impl<E, S> EventActor<HelloWorldEvent, HelloWorldSender, E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    type Event = HelloWorldEvent;
-    type Handle = HelloWorldSender;
-
-    fn handle(&mut self) -> &mut Self::Handle {
-        &mut self.sender
+    fn handle(&self) -> HelloWorldSender {
+        self.sender.clone()
     }
 }
 
@@ -87,7 +78,7 @@ impl<E, S> Init<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn init(&mut self, _supervisor: &mut S) -> Result<(), ActorError> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
@@ -98,7 +89,7 @@ impl<E, S> Run<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn run(&mut self, _supervisor: &mut S) -> Result<(), ActorError> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -116,7 +107,7 @@ impl<E, S> Shutdown<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(&mut self, status: Result<(), ActorError>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
@@ -130,36 +121,33 @@ pub enum HelloWorldEvent {
     Shutdown,
 }
 
-#[launcher]
-pub struct Apps {
-    #[HelloWorld(depends_on(hello_world3))]
-    hello_world: HelloWorldBuilder,
-    #[HelloWorld("HelloWorld 2")]
-    hello_world2: HelloWorldBuilder,
-    #[HelloWorld(name = "Hello World 3", depends_on(hello_world2))]
-    hello_world3: HelloWorldBuilder,
-}
-
 #[tokio::main]
 async fn main() {
     std::env::set_var("RUST_LOG", "info");
     env_logger::init();
 
+    startup().await.unwrap();
+}
+
+async fn startup() -> anyhow::Result<()> {
     let builder = HelloWorldBuilder::new();
-    Apps::new(
-        builder.clone().name(Apps::hello_world_name()).num(1),
-        builder.clone().name(Apps::hello_world2_name()).num(Some(2)),
-        builder.name(Apps::hello_world3_name()),
-    )
-    .execute(|_launcher| {
-        info!("Executing with launcher");
-    })
-    .execute_async(|launcher| async {
-        info!("Executing async with launcher");
-        launcher
-    })
-    .await
-    .launch()
-    .await
-    .unwrap();
+    launcher!(HelloWorldBuilder => HelloWorld[HelloWorldEvent, HelloWorldSender])
+        .add(
+            "HelloWorld",
+            builder.clone().name("HelloWorld".to_owned()).num(1),
+            &["HelloWorld 3"],
+        )?
+        .add("HelloWorld 2", builder.clone().name("HelloWorld 2".to_owned()).num(Some(2)), &[])?
+        .add("HelloWorld 3", builder.name("HelloWorld 3".to_owned()), &["HelloWorld 2"])?
+        .execute(|_launcher| {
+            info!("Executing with launcher");
+        })
+        .execute_async(|launcher| async {
+            info!("Executing async with launcher");
+            launcher
+        })
+        .await
+        .launch()
+        .await?;
+    Ok(())
 }

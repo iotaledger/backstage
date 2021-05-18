@@ -46,11 +46,11 @@ impl HelloWorldBuilder {
     }
 }
 
-impl<E, S> ActorBuilder<HelloWorld, E, S> for HelloWorldBuilder
-where
-    S: 'static + Send + EventHandle<E>,
-{
-    fn build(self, service: Service) -> HelloWorld {
+impl ActorBuilder<HelloWorld> for HelloWorldBuilder {
+    fn build<E, S>(self, service: Service) -> HelloWorld
+    where
+        S: 'static + Send + EventHandle<E>,
+    {
         let (name, num) = (self.name, self.num);
         let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
         HelloWorld {
