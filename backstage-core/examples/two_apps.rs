@@ -1,6 +1,6 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::{launcher::*, *};
+use backstage::{launcher, launcher::*, *};
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -46,7 +46,9 @@ impl HelloWorldBuilder {
     }
 }
 
-impl ActorBuilder<HelloWorld> for HelloWorldBuilder {
+impl ActorBuilder for HelloWorldBuilder {
+    type BuiltActor = HelloWorld;
+
     fn build<E, S>(self, service: Service) -> HelloWorld
     where
         S: 'static + Send + EventHandle<E>,
@@ -74,12 +76,8 @@ impl EventHandle<HelloWorldEvent> for HelloWorldSender {
         self.0.send(message).map_err(|e| anyhow!(e.to_string()))
     }
 
-    fn shutdown(mut self) -> Option<Self> {
-        if let Ok(()) = self.send(HelloWorldEvent::Shutdown) {
-            None
-        } else {
-            Some(self)
-        }
+    fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.send(HelloWorldEvent::Shutdown)
     }
 
     fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
@@ -145,8 +143,8 @@ where
     type Event = HelloWorldEvent;
     type Handle = HelloWorldSender;
 
-    fn handle(&mut self) -> &mut Self::Handle {
-        &mut self.sender
+    fn handle(&self) -> Self::Handle {
+        self.sender.clone()
     }
 }
 
@@ -191,12 +189,8 @@ impl EventHandle<HowdyEvent> for HowdySender {
         self.0.send(message).map_err(|e| anyhow!(e.to_string()))
     }
 
-    fn shutdown(mut self) -> Option<Self> {
-        if let Ok(()) = self.send(HowdyEvent::Shutdown) {
-            None
-        } else {
-            Some(self)
-        }
+    fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.send(HowdyEvent::Shutdown)
     }
 
     fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
@@ -216,7 +210,6 @@ impl<E, S> Actor<E, S> for Howdy
 where
     S: 'static + Send + EventHandle<E>,
 {
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
     type Error = HowdyError;
 
     fn service(&mut self) -> &mut Service {
@@ -258,20 +251,9 @@ where
     type Event = HowdyEvent;
     type Handle = HowdySender;
 
-    fn handle(&mut self) -> &mut Self::Handle {
-        &mut self.sender
+    fn handle(&self) -> Self::Handle {
+        self.sender.clone()
     }
-}
-
-/// The launcher actor, defined using the `launcher` proc_macro.
-/// This will construct an actor whose sole purpose is to launch
-/// and oversee a set of actors.
-#[launcher]
-pub struct Apps {
-    #[HelloWorld(depends_on(howdy))]
-    hello_world: HelloWorldBuilder,
-    #[Howdy("Howdy App")]
-    howdy: HowdyBuilder,
 }
 
 #[tokio::main]
@@ -279,8 +261,22 @@ async fn main() {
     std::env::set_var("RUST_LOG", "info");
     env_logger::init();
 
-    Apps::new(HelloWorldBuilder::new(Apps::hello_world_name(), 1), HowdyBuilder::new())
-        .launch()
+    startup().await.unwrap();
+}
+
+async fn startup() -> anyhow::Result<()> {
+    launcher!(HelloWorldBuilder, HowdyBuilder)
+        .add("HelloWorld", HelloWorldBuilder::new("HelloWorld".to_owned(), 1), &["Howdy"])?
+        .add("Howdy", HowdyBuilder::new(), &[])?
+        .execute(|_launcher| {
+            info!("Executing with launcher");
+        })
+        .execute_async(|launcher| async {
+            info!("Executing async with launcher");
+            launcher
+        })
         .await
-        .unwrap();
+        .launch()
+        .await?;
+    Ok(())
 }
