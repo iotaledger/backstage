@@ -20,26 +20,31 @@ use tokio::{
     task::JoinHandle,
 };
 
+/// Bridge between `ActorBuilder` and `EventActor` which enables
+/// types enumerating both to statically convert
 pub trait Bridge<A, M, H>
 where
     A: ActorHandle<M, H>,
     H: EventHandle<M>,
 {
-    fn shutdown_timeout(&self) -> Duration {
-        Duration::from_secs(10)
-    }
+    /// Get the actor enum variant which is built by this builder enum variant
     fn bridge(self, service: Service) -> A;
 }
 
+/// Allows access to underlying (enumerated) actors handle and start fn
 #[async_trait]
 pub trait ActorHandle<M, H>
 where
     H: EventHandle<M>,
 {
+    /// Get the handle from the underlying actor
     fn handle(&self) -> H;
+    /// Start the underlying actor
     async fn start(self, supervisor: LauncherSender) -> Result<ActorRequest, ActorError>;
 }
 
+/// Possible launcher errors
+#[allow(missing_docs)]
 #[derive(Debug, Error)]
 pub enum LauncherError {
     #[error("No app found with name \"{0}\"")]
@@ -63,8 +68,30 @@ impl Into<ActorError> for LauncherError {
     }
 }
 
+/// Alias for a launcher specific result
 pub type LauncherResult = Result<(), LauncherError>;
 
+/// A launcher and manager actor. Maintains a group of `ActorBuilder`s,
+/// starts them, and awaits their completion while responding to events.
+///
+/// # Example
+/// Launchers are constructed via the `launcher!` macro. This macro
+/// enumerates the possible types of actors, which can then be added
+/// to the launcher with `add` or using the builder syntax beginning
+/// with `name`.
+///
+/// ```no_run
+/// launcher!(ActorBuilder1, ActorBuilder2)
+///     .add("Actor1", ActorBuilder1, &[], None)?
+///     .name("Actor2a")
+///     .dep("Actor1")
+///     .timeout(Duration::from_secs(2))
+///     .builder(ActorBuilder2)?
+///     .name("Actor2b")
+///     .builder(ActorBuilder2)?
+///     .launch()
+///     .await?;
+/// ```
 pub struct Launcher<B, A, M, H>
 where
     B: Bridge<A, M, H>,
@@ -75,10 +102,69 @@ where
     event_handles: HashMap<String, H>,
     join_handles: HashMap<String, JoinHandle<Result<ActorRequest, ActorError>>>,
     dependencies: HashMap<String, Vec<String>>,
+    shutdown_timeouts: HashMap<String, Duration>,
     inbox: UnboundedReceiver<LauncherEvent>,
     sender: LauncherSender,
     consumed_ctrl_c: bool,
     _phantom: PhantomData<(A, M)>,
+}
+
+/// Builder style accumulator for actors added to the launcher
+pub struct LauncherConstructor<B, A, M, H>
+where
+    B: Bridge<A, M, H>,
+    A: ActorHandle<M, H>,
+    H: EventHandle<M>,
+{
+    launcher: Launcher<B, A, M, H>,
+    name: String,
+    deps: Option<Vec<String>>,
+    timeout: Option<Duration>,
+}
+
+impl<B, A, M, H> LauncherConstructor<B, A, M, H>
+where
+    B: Bridge<A, M, H> + Clone + Send + Sync,
+    A: 'static + ActorHandle<M, H> + Send,
+    H: EventHandle<M>,
+    M: Send,
+{
+    fn new(launcher: Launcher<B, A, M, H>, name: String) -> Self {
+        Self {
+            launcher,
+            name,
+            deps: None,
+            timeout: None,
+        }
+    }
+
+    /// Specify a list of dependencies for this actor
+    pub fn deps<S: Into<String> + Clone>(mut self, dependencies: &[S]) -> Self {
+        self.deps = Some(dependencies.iter().cloned().map(Into::into).collect());
+        self
+    }
+
+    /// Specify a single dependency for this actor (accumulated with multiple calls)
+    pub fn dep<S: Into<String> + Clone>(mut self, dependency: S) -> Self {
+        if let Some(v) = self.deps.as_mut() {
+            v.push(dependency.into())
+        } else {
+            self.deps = Some(vec![dependency.into()])
+        }
+        self
+    }
+
+    /// Specify a shutdown timeout for this actor
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Specify the builder for this actor, and add the completed data to the launcher
+    pub fn builder<I: Into<B>>(self, builder: I) -> Result<Launcher<B, A, M, H>, LauncherError> {
+        self.launcher
+            .add_all(self.name, builder.into(), self.deps.unwrap_or_default(), self.timeout)
+    }
 }
 
 impl<B, A, M, H> Default for Launcher<B, A, M, H>
@@ -94,6 +180,7 @@ where
             event_handles: Default::default(),
             join_handles: Default::default(),
             dependencies: Default::default(),
+            shutdown_timeouts: Default::default(),
             inbox,
             sender: LauncherSender(sender),
             consumed_ctrl_c: false,
@@ -109,36 +196,60 @@ where
     B: Bridge<A, M, H> + Clone + Send + Sync,
     M: Send,
 {
+    /// Create a new launcher
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn add<I: Into<B>, S: Into<String> + Clone>(mut self, name: S, builder: I, dependencies: &[S]) -> Result<Self, LauncherError> {
-        match self.builders.entry(name.into()) {
+    /// Add a complete actor to the launcher by specifying the name, builder, dependencies, and optional shutdown timeout
+    pub fn add<I: Into<B>, S: Into<String> + Clone>(
+        self,
+        name: S,
+        builder: I,
+        dependencies: &[S],
+        timeout: Option<Duration>,
+    ) -> Result<Self, LauncherError> {
+        self.add_all(
+            name.into(),
+            builder.into(),
+            dependencies.iter().cloned().map(Into::into).collect::<Vec<_>>(),
+            timeout,
+        )
+    }
+
+    fn add_all(mut self, name: String, builder: B, dependencies: Vec<String>, timeout: Option<Duration>) -> Result<Self, LauncherError> {
+        match self.builders.entry(name) {
             Entry::Occupied(e) => {
                 return Err(LauncherError::DuplicateApp(e.key().clone()));
             }
             Entry::Vacant(e) => {
                 let name = e.key().clone();
-                e.insert(builder.into());
-                self.dependencies
-                    .insert(name, dependencies.iter().cloned().map(Into::into).collect::<Vec<_>>());
+                e.insert(builder);
+                self.dependencies.insert(name.clone(), dependencies);
+                timeout.and_then(|timeout| self.shutdown_timeouts.insert(name, timeout));
             }
         }
         Ok(self)
     }
 
+    /// Start building the parts of an actor with the name
+    pub fn name<S: Into<String> + Clone>(self, name: S) -> LauncherConstructor<B, A, M, H> {
+        LauncherConstructor::new(self, name.into())
+    }
+
+    /// Execute a function with the current state of the launcher
     pub fn execute<F: FnMut(&mut Self)>(mut self, mut f: F) -> Self {
         f(&mut self);
         self
     }
 
+    /// Execute an async function with the current state of the launcher
     pub async fn execute_async<F: FnOnce(Self) -> O, O: std::future::Future<Output = Self>>(self, f: F) -> Self {
         f(self).await
     }
 
     /// Spawn and start an actor on a new thread, storing its handles
-    pub async fn startup_app(&mut self, name: &String) -> LauncherResult {
+    async fn startup_app(&mut self, name: &String) -> LauncherResult {
         let new_service = SERVICE.write().await.spawn(name.clone());
         if let Some(actor) = self.builders.get(name).cloned().map(|b| b.bridge(new_service)) {
             self.event_handles.insert(name.clone(), actor.handle());
@@ -152,7 +263,7 @@ where
 
     /// Shutdown the actor by sending a shutdown event. This fn will spawn a timeout thread
     /// which will wait for the actor's thread to terminate and send the result to the launcher.
-    pub fn shutdown_app(&mut self, name: &String) -> LauncherResult {
+    fn shutdown_app(&mut self, name: &String) -> LauncherResult {
         if let Some(mut handle) = self.event_handles.remove(name) {
             let mut retries = 2;
             while let Err(_) = handle.shutdown() {
@@ -163,14 +274,32 @@ where
                     retries -= 1;
                 }
             }
-            if let (Some(handle), Some(builder)) = (self.join_handles.remove(name), self.builders.get(name)) {
+            if let (Some(handle), timeout) = (self.join_handles.remove(name), self.shutdown_timeouts.get(name).cloned()) {
                 let mut sender = self.sender.clone();
                 let name = name.clone();
-                let timeout = builder.shutdown_timeout();
                 tokio::spawn(async move {
-                    let timeout_res = tokio::time::timeout(timeout, handle).await;
-                    let request = match timeout_res {
-                        Ok(join_res) => match join_res {
+                    let request = if let Some(timeout) = timeout {
+                        match tokio::time::timeout(timeout, handle).await {
+                            Ok(join_res) => match join_res {
+                                Ok(res) => match res {
+                                    Ok(request) => request,
+                                    Err(e) => {
+                                        error!("{}", e.to_string());
+                                        e.request().clone()
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("{}", e.to_string());
+                                    ActorRequest::Finish
+                                }
+                            },
+                            Err(_) => {
+                                error!("Timeout shutting down {}!", name);
+                                ActorRequest::Finish
+                            }
+                        }
+                    } else {
+                        match handle.await {
                             Ok(res) => match res {
                                 Ok(request) => request,
                                 Err(e) => {
@@ -182,10 +311,6 @@ where
                                 error!("{}", e.to_string());
                                 ActorRequest::Finish
                             }
-                        },
-                        Err(_) => {
-                            error!("Timeout shutting down {}!", name);
-                            ActorRequest::Finish
                         }
                     };
                     match request {
@@ -212,7 +337,8 @@ where
         }
     }
 
-    pub async fn shutdown_all(&mut self) {
+    /// Shutdown all actors
+    async fn shutdown_all(&mut self) {
         let names = self.builders.keys().cloned().collect::<Vec<_>>();
         for name in names.iter() {
             self.block_on_shutdown(name).await;
@@ -221,7 +347,7 @@ where
 
     /// Shutdown the actor by sending a shutdown event. This fn will block awaiting the completion.
     /// This is used by the launcher to terminate the application.
-    pub async fn block_on_shutdown(&mut self, name: &String) {
+    async fn block_on_shutdown(&mut self, name: &String) {
         if let Some(mut handle) = self.event_handles.remove(name) {
             let mut retries = 2;
             while let Err(_) = handle.shutdown() {
@@ -232,10 +358,17 @@ where
                     retries -= 1;
                 }
             }
-            if let (Some(handle), Some(builder)) = (self.join_handles.remove(name), self.builders.get(name)) {
-                match tokio::time::timeout(builder.shutdown_timeout(), handle).await {
-                    Ok(_) => (),
-                    Err(_) => error!("Timeout shutting down {}!", name),
+            if let (Some(handle), timeout) = (self.join_handles.remove(name), self.shutdown_timeouts.get(name).cloned()) {
+                if let Some(timeout) = timeout {
+                    match tokio::time::timeout(timeout, handle).await {
+                        Ok(_) => (),
+                        Err(_) => error!("Timeout shutting down {}!", name),
+                    }
+                } else {
+                    match handle.await {
+                        Ok(_) => {}
+                        Err(_) => error!("Error shutting down {}!", name),
+                    }
                 }
             } else {
                 error!("No join handle found for {}!", name);
@@ -245,6 +378,9 @@ where
         }
     }
 
+    /// Start the launcher. This will begin the Actor lifecycle,
+    /// sort out dependencies, build and start each child, and then
+    /// wait for incoming events.
     pub async fn launch(self) -> Result<ActorRequest, ActorError> {
         self.start(NullSupervisor).await
     }
@@ -457,7 +593,10 @@ pub async fn ctrl_c(mut sender: LauncherSender) {
     sender.send(exit_program_event).ok();
 }
 
-pub mod macros {
+mod macros {
+
+    /// Create a new launcher by enumerating actor builder associated types.
+    /// These builders can then be added with `Launcher::add()`.
     #[macro_export]
     macro_rules! launcher {
         ($($builder:ident),+) => {

@@ -266,8 +266,10 @@ async fn main() {
 
 async fn startup() -> anyhow::Result<()> {
     launcher!(HelloWorldBuilder, HowdyBuilder)
-        .add("HelloWorld", HelloWorldBuilder::new("HelloWorld".to_owned(), 1), &["Howdy"])?
-        .add("Howdy", HowdyBuilder::new(), &[])?
+        .add("HelloWorld", HelloWorldBuilder::new("HelloWorld".to_owned(), 1), &["Howdy"], None)?
+        .name("Howdy")
+        .timeout(Duration::from_secs(2))
+        .builder(HowdyBuilder::new())?
         .execute(|_launcher| {
             info!("Executing with launcher");
         })

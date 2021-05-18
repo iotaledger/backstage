@@ -4,6 +4,7 @@ use crate::EventHandle;
 /// An actor builder, which defines how you take some
 /// input data and create an `Actor` with it.
 pub trait ActorBuilder {
+    /// The type of actor this builder will create
     type BuiltActor;
 
     /// Create the `Actor` with the builder data and a service

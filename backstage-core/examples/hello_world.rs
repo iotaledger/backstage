@@ -142,9 +142,13 @@ async fn startup() -> anyhow::Result<()> {
             "HelloWorld",
             builder.clone().name("HelloWorld".to_owned()).num(1),
             &["HelloWorld 3"],
+            None,
         )?
-        .add("HelloWorld 2", builder.clone().name("HelloWorld 2".to_owned()).num(Some(2)), &[])?
-        .add("HelloWorld 3", builder.name("HelloWorld 3".to_owned()), &["HelloWorld 2"])?
+        .name("HelloWorld 2")
+        .builder(builder.clone().name("HelloWorld 2".to_owned()).num(Some(2)))?
+        .name("HelloWorld 3")
+        .dep("HelloWorld 2")
+        .builder(builder.name("HelloWorld 3".to_owned()))?
         .execute(|_launcher| {
             info!("Executing with launcher");
         })

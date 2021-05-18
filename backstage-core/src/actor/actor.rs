@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::{
     event_handle::EventHandle,
     result::*,
@@ -10,6 +12,8 @@ pub trait Actor<E, S>
 where
     S: 'static + Send + EventHandle<E>,
 {
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// The actor's error type. Must be convertable to an `ActorError`.
     type Error: Send + Into<ActorError>;
 
@@ -134,10 +138,13 @@ where
     }
 }
 
-trait SplitMarker {}
+/// Marker trait that allows dividing Actors into parts.
+/// This is not intended to be manually implemented.
+pub trait SplitMarker {}
 
 impl<T> SplitMarker for T where T: ActorTypes {}
 
+/// An actor which receives events
 pub trait EventActor<E, S>: Actor<E, S>
 where
     S: 'static + Send + EventHandle<E>,
