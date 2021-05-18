@@ -7,7 +7,6 @@ use super::{
 use crate::{NullSupervisor, ServiceStatus};
 use anyhow::anyhow;
 use async_trait::async_trait;
-pub use backstage_macros::launcher;
 use daggy::{Dag, Walker};
 use log::{error, info};
 use std::{
