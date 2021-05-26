@@ -84,7 +84,7 @@ impl<E, S> Init<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn init(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
@@ -95,7 +95,7 @@ impl<E, S> Run<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn run(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -113,7 +113,12 @@ impl<E, S> Shutdown<E, S> for HelloWorld
 where
     S: 'static + Send + EventHandle<E>,
 {
-    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(
+        &mut self,
+        status: Result<(), Self::Error>,
+        _supervisor: &mut S,
+        rt: &mut BackstageRuntime,
+    ) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),

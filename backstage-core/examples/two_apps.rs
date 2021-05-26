@@ -109,13 +109,13 @@ where
         &mut self.service
     }
 
-    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn init(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
 
     // This actor simply waits for a shutdown signal and then exits
-    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn run(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -127,7 +127,12 @@ where
         Ok(())
     }
 
-    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(
+        &mut self,
+        status: Result<(), Self::Error>,
+        _supervisor: &mut S,
+        rt: &mut BackstageRuntime,
+    ) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         match status {
             std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
@@ -216,12 +221,12 @@ where
         &mut self.service
     }
 
-    async fn init(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn init(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Initializing {}!", self.service.name);
         Ok(())
     }
 
-    async fn run(&mut self, _supervisor: &mut S) -> Result<(), Self::Error> {
+    async fn run(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
         info!("Running {}!", self.service.name);
         while let Some(evt) = self.inbox.recv().await {
             match evt {
@@ -233,7 +238,12 @@ where
         Ok(())
     }
 
-    async fn shutdown(&mut self, status: Result<(), Self::Error>, _supervisor: &mut S) -> Result<ActorRequest, ActorError> {
+    async fn shutdown(
+        &mut self,
+        status: Result<(), Self::Error>,
+        _supervisor: &mut S,
+        rt: &mut BackstageRuntime,
+    ) -> Result<ActorRequest, ActorError> {
         info!("Shutting down {}!", self.service.name);
         // Some process that takes longer than the defined timeout
         tokio::time::sleep(Duration::from_secs(4)).await;
