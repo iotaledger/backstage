@@ -1,8 +1,8 @@
-use crate::{Actor, ActorError, Channel, System};
+use crate::{Actor, ActorError, Channel, Receiver, System};
 use anymap::{any::CloneAny, Map};
+use futures::Future;
 use lru::LruCache;
 use std::{
-    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -21,21 +21,15 @@ pub struct BackstageRuntime {
 pub struct ActorRuntime<A: Actor> {
     runtime: BackstageRuntime,
     receiver: <A::Channel as Channel<A::Event>>::Receiver,
-    _data: PhantomData<A>,
 }
 
 impl<A: Actor> ActorRuntime<A> {
     pub fn new(runtime: BackstageRuntime, receiver: <A::Channel as Channel<A::Event>>::Receiver) -> Self {
-        Self {
-            runtime,
-            receiver,
-            _data: PhantomData,
-        }
+        Self { runtime, receiver }
     }
 
     pub async fn next_event(&mut self) -> Option<A::Event> {
-        todo!()
-        // self.receiver.recv().await
+        Receiver::<A::Event>::recv(&mut self.receiver).await
     }
 }
 
@@ -53,25 +47,62 @@ impl<A: Actor> DerefMut for ActorRuntime<A> {
     }
 }
 
+pub struct SystemRuntime<S: System> {
+    runtime: BackstageRuntime,
+    receiver: <S::Channel as Channel<S::Event>>::Receiver,
+}
+
+impl<S: System> SystemRuntime<S> {
+    pub fn new(runtime: BackstageRuntime, receiver: <S::Channel as Channel<S::Event>>::Receiver) -> Self {
+        Self { runtime, receiver }
+    }
+
+    pub async fn next_event(&mut self) -> Option<S::Event> {
+        Receiver::<S::Event>::recv(&mut self.receiver).await
+    }
+}
+
+impl<S: System> Deref for SystemRuntime<S> {
+    type Target = BackstageRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl<S: System> DerefMut for SystemRuntime<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
 pub struct RuntimeScope<'a>(&'a mut BackstageRuntime);
 
 impl<'a> RuntimeScope<'a> {
-    pub fn spawn_actor<A: 'static + Actor>(&mut self, actor: A) {
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        let child_rt = ActorRuntime::new(self.0.child(), receiver);
-        self.0.senders.insert(sender);
-        let child_task = tokio::spawn(actor.run(child_rt));
-
+    pub fn spawn_task<F: FnOnce(BackstageRuntime) -> O, O: 'static + Send + Future<Output = Result<(), ActorError>>>(&mut self, f: F) {
+        let child_rt = self.0.child();
+        let child_task = tokio::spawn(f(child_rt));
         self.0.child_handles.push(child_task);
     }
 
-    pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) {
-        let child_rt = self.0.child();
+    pub fn spawn_actor<A: 'static + Actor>(&mut self, actor: A) -> <A::Channel as Channel<A::Event>>::Sender {
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let child_rt = ActorRuntime::new(self.0.child(), receiver);
+        self.0.senders.insert(sender.clone());
+        let child_task = tokio::spawn(actor.run(child_rt));
+        self.0.child_handles.push(child_task);
+        sender
+    }
+
+    pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) -> <S::Channel as Channel<S::Event>>::Sender {
+        let (sender, receiver) = <S::Channel as Channel<S::Event>>::new();
+        let child_rt = SystemRuntime::new(self.0.child(), receiver);
         let system = Arc::new(RwLock::new(system));
+        self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
         let child_task = tokio::spawn(S::run(system, child_rt));
-
         self.0.child_handles.push(child_task);
+        sender
     }
 
     pub fn add_resource<R: 'static + Send + Sync>(&mut self, resource: R) -> Res<R> {
@@ -80,7 +111,7 @@ impl<'a> RuntimeScope<'a> {
         Res(res)
     }
 
-    pub fn pool<H: 'static + Send + Sync, O, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
+    pub fn pool<H: 'static + Send + Sync, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
         let mut pool = Pool::default();
         f(&mut pool);
         self.0.pools.insert(Arc::new(RwLock::new(pool)));
@@ -242,7 +273,7 @@ mod test {
         let mut rt = BackstageRuntime::new();
         rt.scope(|scope| {
             let res = scope.add_resource(MyResource { n: 0 });
-            scope.spawn_actor(MyActor);
+            let actor_handle = scope.spawn_actor(MyActor);
         })
         .await
         .unwrap();

@@ -1,7 +1,6 @@
-use std::sync::Arc;
-
-use crate::{ActorError, BackstageRuntime, Channel};
+use crate::{ActorError, Channel, SystemRuntime};
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[async_trait]
@@ -12,7 +11,9 @@ pub trait System {
     type Channel: Channel<Self::Event> + Send;
 
     /// The main function for the system
-    async fn run(this: Arc<RwLock<Self>>, rt: BackstageRuntime) -> Result<(), ActorError>;
+    async fn run(this: Arc<RwLock<Self>>, rt: SystemRuntime<Self>) -> Result<(), ActorError>
+    where
+        Self: Sized;
 
     fn route(event: Self::ChildEvents);
 }
