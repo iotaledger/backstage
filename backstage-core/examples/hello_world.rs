@@ -61,17 +61,8 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(event: HelloWorldEvent, rt: &mut SystemRuntime<Self>) -> anyhow::Result<()> {
-        Self::route(LauncherChildren::HelloWorld(event), rt).await
-    }
-
-    async fn init(&mut self, scope: &mut RuntimeScope<'_>, inbox: &mut TokioReceiver<LauncherChildren>) -> Result<(), ActorError> {
-        let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-        scope.spawn_actor(builder.build(self.service.spawn("Hello World")));
-        while let Some(evt) = inbox.recv().await {
-            Self::route(evt, scope.0).await.ok();
-        }
-        Ok(())
+    pub async fn send_to_hello_world(event: HelloWorldEvent) -> anyhow::Result<()> {
+        Self::route(LauncherChildren::HelloWorld(event)).await
     }
 }
 
@@ -88,29 +79,28 @@ impl System for Launcher {
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<Self>) -> Result<(), ActorError>
+    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
     where
         Self: Sized,
     {
-        async fn foo<'a>(mut scope: RuntimeScope<'a>, inbox: &'a mut <<Launcher as System>::Channel as Channel<LauncherChildren>>::Receiver) {
-            let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-            scope.spawn_actor(builder.build(todo!() /*this.write().await.service.spawn("Hello World")*/));
-            while let Some(evt) = inbox.recv().await {
-                Launcher::route(evt, scope.0).await.ok();
-            }
+        let builder = HelloWorldBuilder::new().name("Hello World".to_string());
+        let service = this.write().await.service.spawn("Hello World");
+        rt.spawn_actor(builder.build(service));
+        while let Some(evt) = rt.next_event().await {
+            Launcher::route(evt).await.ok();
         }
 
-        rt.system_scope(foo).await;
         Ok(())
     }
 
-    async fn route(event: Self::ChildEvents, rt: &mut BackstageRuntime) -> anyhow::Result<()>
+    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
     where
         Self: Sized,
     {
-        match event {
-            LauncherChildren::HelloWorld(event) => rt.send_event::<HelloWorld>(event).await,
-        }
+        // match event {
+        //    LauncherChildren::HelloWorld(event) => rt.send_event::<HelloWorld>(event).await,
+        //}
+        Ok(())
     }
 }
 

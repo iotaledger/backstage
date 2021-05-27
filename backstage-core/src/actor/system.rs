@@ -10,11 +10,11 @@ pub trait System {
     type Channel: Channel<Self::ChildEvents> + Send;
 
     /// The main function for the system
-    async fn run(this: Arc<RwLock<Self>>, rt: SystemRuntime<Self>) -> Result<(), ActorError>
+    async fn run<'a>(this: Arc<RwLock<Self>>, rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
     where
         Self: Sized;
 
-    async fn route(event: Self::ChildEvents, rt: &mut BackstageRuntime) -> anyhow::Result<()>
+    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
     where
         Self: Sized;
 }

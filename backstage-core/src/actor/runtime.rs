@@ -3,6 +3,7 @@ use anymap::{any::CloneAny, Map};
 use futures::Future;
 use lru::LruCache;
 use std::{
+    borrow::Cow,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -36,7 +37,7 @@ impl<A: Actor> ActorRuntime<A> {
         &mut self,
         f: F,
     ) -> anyhow::Result<O> {
-        let res = f(&mut RuntimeScope(&mut self.runtime), &mut self.receiver);
+        let res = f(&mut RuntimeScope((&mut self.runtime).into()), &mut self.receiver);
         self.join().await?;
         Ok(res)
     }
@@ -56,86 +57,73 @@ impl<A: Actor> DerefMut for ActorRuntime<A> {
     }
 }
 
-pub struct SystemRuntime<S: System> {
-    runtime: BackstageRuntime,
+pub struct SystemRuntime<'a, S: System> {
+    runtime: RuntimeScope<'a>,
     receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
 }
 
-impl<S: System> SystemRuntime<S> {
-    pub fn new(runtime: BackstageRuntime, receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self {
+impl<'a, S: System> SystemRuntime<'a, S> {
+    pub fn new(runtime: RuntimeScope<'a>, receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self {
         Self { runtime, receiver }
     }
 
     pub async fn next_event(&mut self) -> Option<S::ChildEvents> {
         Receiver::<S::ChildEvents>::recv(&mut self.receiver).await
     }
-
-    pub async fn system_scope<F, Fut>(&mut self, f: F) -> anyhow::Result<<<F as FnHelper<'_, S>>::Fut as Future>::Output>
-    where
-        // F: for<'a> FnOnce(RuntimeScope<'a>, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Fut,
-        F: for<'a> FnHelper<'a, S, Fut = Fut>,
-        Fut: Future,
-        // Fut: Future,
-        // Ideally, we'd do this, but Rust doesn't support this yet.
-        // for<'a> (
-        //     F: FnOnce(RuntimeScope, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> O + 'a,
-        //     O: 'a,
-        // )
-    {
-        let res = f.call(RuntimeScope(&mut self.runtime), &mut self.receiver).await;
-        self.runtime.join().await?;
-        Ok(res)
-    }
 }
 
-pub trait FnHelper<'a, S: System> {
-    type Fut: Future + 'a;
-    fn call(self, scope: RuntimeScope<'a>, recv: &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self::Fut;
-}
-
-// pub trait FnHelper<'a, T> {
-//     type Fut: Future + 'a;
-//     fn call(self, scope: RuntimeScope<'a>, recv: &'a mut T) -> Self::Fut;
-// }
-
-impl<'a, D: 'a, F, S: System> FnHelper<'a, S> for F
-where
-    F: FnOnce(RuntimeScope<'a>, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> D,
-    D: Future + 'a,
-    <S::Channel as Channel<S::ChildEvents>>::Receiver: 'a,
-{
-    type Fut = D;
-    fn call(self, scope: RuntimeScope<'a>, recv: &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self::Fut {
-        self(scope, recv)
-    }
-}
-
-// impl<'a, D: 'a, T> FnHelper<'a, T> for fn(RuntimeScope<'a>, &'a mut T) -> D
-// where
-//     D: Future,
-//     T: 'a,
-// {
-//     type Fut = D;
-//     fn call(self, scope: RuntimeScope<'a>, recv: &'a mut T) -> Self::Fut {
-//         self(scope, recv)
-//     }
-// }
-
-impl<S: System> Deref for SystemRuntime<S> {
-    type Target = BackstageRuntime;
+impl<'a, S: System> Deref for SystemRuntime<'a, S> {
+    type Target = RuntimeScope<'a>;
 
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }
 }
 
-impl<S: System> DerefMut for SystemRuntime<S> {
+impl<'a, S: System> DerefMut for SystemRuntime<'a, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.runtime
     }
 }
 
-pub struct RuntimeScope<'a>(pub &'a mut BackstageRuntime);
+pub enum Boo<'a, B: 'a> {
+    Borrowed(&'a mut B),
+    Owned(B),
+}
+
+impl<'a, B: 'a> Deref for Boo<'a, B> {
+    type Target = B;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Boo::Borrowed(b) => *b,
+            Boo::Owned(o) => o,
+        }
+    }
+}
+
+impl<'a, B: 'a> DerefMut for Boo<'a, B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Boo::Borrowed(b) => *b,
+            Boo::Owned(ref mut o) => o,
+        }
+    }
+}
+
+impl<'a, O: 'a> From<O> for Boo<'a, O> {
+    fn from(owned: O) -> Self {
+        Self::Owned(owned)
+    }
+}
+
+impl<'a, B: 'a> From<&'a mut B> for Boo<'a, B> {
+    fn from(borrowed: &'a mut B) -> Self {
+        Self::Borrowed(borrowed)
+    }
+}
+
+pub struct RuntimeScope<'a>(pub Boo<'a, BackstageRuntime>);
 
 impl<'a> RuntimeScope<'a> {
     pub fn spawn_task<F: FnOnce(BackstageRuntime) -> O, O: 'static + Send + Future<Output = Result<(), ActorError>>>(&mut self, f: F) {
@@ -155,7 +143,7 @@ impl<'a> RuntimeScope<'a> {
 
     pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let child_rt = SystemRuntime::new(self.0.child(), receiver);
+        let child_rt = SystemRuntime::new(RuntimeScope(self.0.child().into()), receiver);
         let system = Arc::new(RwLock::new(system));
         self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
@@ -199,7 +187,7 @@ impl BackstageRuntime {
     }
 
     pub async fn scope<O, F: FnOnce(&mut RuntimeScope) -> O>(&mut self, f: F) -> anyhow::Result<O> {
-        let res = f(&mut RuntimeScope(self));
+        let res = f(&mut RuntimeScope(self.into()));
         self.join().await?;
         Ok(res)
     }
