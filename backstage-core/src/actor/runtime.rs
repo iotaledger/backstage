@@ -143,11 +143,16 @@ impl<'a> RuntimeScope<'a> {
 
     pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let child_rt = SystemRuntime::new(RuntimeScope(self.0.child().into()), receiver);
+        let mut child_rt = self.0.child();
         let system = Arc::new(RwLock::new(system));
         self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
-        let child_task = tokio::spawn(S::run(system, child_rt));
+        let child_task = tokio::spawn(async move {
+            let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver);
+            let res = S::run(system, system_rt).await;
+            child_rt.join().await;
+            res
+        });
         self.0.child_handles.push(child_task);
         sender
     }
