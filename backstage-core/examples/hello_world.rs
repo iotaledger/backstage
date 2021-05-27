@@ -92,14 +92,15 @@ impl System for Launcher {
     where
         Self: Sized,
     {
-        rt.system_scope(|mut scope, inbox| async move {
+        async fn foo<'a>(mut scope: RuntimeScope<'a>, inbox: &'a mut <<Launcher as System>::Channel as Channel<LauncherChildren>>::Receiver) {
             let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-            scope.spawn_actor(builder.build(this.write().await.service.spawn("Hello World")));
+            scope.spawn_actor(builder.build(todo!() /*this.write().await.service.spawn("Hello World")*/));
             while let Some(evt) = inbox.recv().await {
-                Self::route(evt, scope.0).await.ok();
+                Launcher::route(evt, scope.0).await.ok();
             }
-        })
-        .await;
+        }
+
+        rt.system_scope(foo).await;
         Ok(())
     }
 

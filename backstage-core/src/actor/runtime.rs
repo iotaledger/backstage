@@ -70,15 +70,56 @@ impl<S: System> SystemRuntime<S> {
         Receiver::<S::ChildEvents>::recv(&mut self.receiver).await
     }
 
-    pub async fn system_scope<O, F>(&mut self, f: F) -> anyhow::Result<O>
+    pub async fn system_scope<F, Fut>(&mut self, f: F) -> anyhow::Result<<<F as FnHelper<'_, S>>::Fut as Future>::Output>
     where
-        F: FnOnce(RuntimeScope, &mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> O,
+        // F: for<'a> FnOnce(RuntimeScope<'a>, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Fut,
+        F: for<'a> FnHelper<'a, S, Fut = Fut>,
+        Fut: Future,
+        // Fut: Future,
+        // Ideally, we'd do this, but Rust doesn't support this yet.
+        // for<'a> (
+        //     F: FnOnce(RuntimeScope, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> O + 'a,
+        //     O: 'a,
+        // )
     {
-        let res = f(RuntimeScope(&mut self.runtime), &mut self.receiver);
-        self.join().await?;
+        let res = f.call(RuntimeScope(&mut self.runtime), &mut self.receiver).await;
+        self.runtime.join().await?;
         Ok(res)
     }
 }
+
+pub trait FnHelper<'a, S: System> {
+    type Fut: Future + 'a;
+    fn call(self, scope: RuntimeScope<'a>, recv: &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self::Fut;
+}
+
+// pub trait FnHelper<'a, T> {
+//     type Fut: Future + 'a;
+//     fn call(self, scope: RuntimeScope<'a>, recv: &'a mut T) -> Self::Fut;
+// }
+
+impl<'a, D: 'a, F, S: System> FnHelper<'a, S> for F
+where
+    F: FnOnce(RuntimeScope<'a>, &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> D,
+    D: Future + 'a,
+    <S::Channel as Channel<S::ChildEvents>>::Receiver: 'a,
+{
+    type Fut = D;
+    fn call(self, scope: RuntimeScope<'a>, recv: &'a mut <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self::Fut {
+        self(scope, recv)
+    }
+}
+
+// impl<'a, D: 'a, T> FnHelper<'a, T> for fn(RuntimeScope<'a>, &'a mut T) -> D
+// where
+//     D: Future,
+//     T: 'a,
+// {
+//     type Fut = D;
+//     fn call(self, scope: RuntimeScope<'a>, recv: &'a mut T) -> Self::Fut {
+//         self(scope, recv)
+//     }
+// }
 
 impl<S: System> Deref for SystemRuntime<S> {
     type Target = BackstageRuntime;
