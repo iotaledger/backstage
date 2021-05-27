@@ -1,16 +1,15 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
-use backstage::{launcher, launcher::*, *};
-use log::info;
+use backstage::*;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 //////////////////////////////// HelloWorld Actor ////////////////////////////////////////////
 
 // The HelloWorld actor's event type
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
     Shutdown,
 }
@@ -49,39 +48,11 @@ impl HelloWorldBuilder {
 impl ActorBuilder for HelloWorldBuilder {
     type BuiltActor = HelloWorld;
 
-    fn build<E, S>(self, service: Service) -> HelloWorld
-    where
-        S: 'static + Send + EventHandle<E>,
-    {
-        let (name, num) = (self.name, self.num);
-        let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HelloWorldEvent>();
+    fn build(self, service: Service) -> HelloWorld {
         HelloWorld {
-            inbox,
-            sender: HelloWorldSender(sender),
             service,
-            name_num: format!("{}-{}", name, num),
+            name_num: format!("{}-{}", self.name, self.num),
         }
-    }
-}
-
-// A wrapper type for a simple tokio channel which is used to pass
-// events to the actor. This implements EventHandle so it can be used
-// by other actors without knowing details about how this actor
-// implements event handling.
-#[derive(Debug, Clone)]
-pub struct HelloWorldSender(UnboundedSender<HelloWorldEvent>);
-
-impl EventHandle<HelloWorldEvent> for HelloWorldSender {
-    fn send(&mut self, message: HelloWorldEvent) -> anyhow::Result<()> {
-        self.0.send(message).map_err(|e| anyhow!(e.to_string()))
-    }
-
-    fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.send(HelloWorldEvent::Shutdown)
-    }
-
-    fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
-        todo!()
     }
 }
 
@@ -90,66 +61,26 @@ impl EventHandle<HelloWorldEvent> for HelloWorldSender {
 // is spawned.
 #[derive(Debug)]
 pub struct HelloWorld {
-    sender: HelloWorldSender,
-    inbox: UnboundedReceiver<HelloWorldEvent>,
     service: Service,
     name_num: String,
 }
 
-// The Actor implementation, which defines how this actor will
-// behave.
 #[async_trait]
-impl<E, S> Actor<E, S> for HelloWorld
-where
-    S: 'static + Send + EventHandle<E>,
-{
-    type Error = HelloWorldError;
+impl Actor for HelloWorld {
+    type Dependencies = ();
+    type Event = HelloWorldEvent;
+    type Channel = TokioChannel<Self::Event>;
 
-    fn service(&mut self) -> &mut Service {
-        &mut self.service
-    }
-
-    async fn init(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
-        info!("Initializing {}!", self.service.name);
-        Ok(())
-    }
-
-    // This actor simply waits for a shutdown signal and then exits
-    async fn run(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
-        info!("Running {}!", self.service.name);
-        while let Some(evt) = self.inbox.recv().await {
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    where
+        Self: Sized,
+    {
+        while let Some(evt) = rt.next_event().await {
             match evt {
-                HelloWorldEvent::Shutdown => {
-                    break;
-                }
+                HelloWorldEvent::Shutdown => break,
             }
         }
         Ok(())
-    }
-
-    async fn shutdown(
-        &mut self,
-        status: Result<(), Self::Error>,
-        _supervisor: &mut S,
-        rt: &mut BackstageRuntime,
-    ) -> Result<ActorRequest, ActorError> {
-        info!("Shutting down {}!", self.service.name);
-        match status {
-            std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
-            std::result::Result::Err(e) => Err(e.into()),
-        }
-    }
-}
-
-impl<E, S> EventActor<E, S> for HelloWorld
-where
-    S: 'static + Send + EventHandle<E>,
-{
-    type Event = HelloWorldEvent;
-    type Handle = HelloWorldSender;
-
-    fn handle(&self) -> Self::Handle {
-        self.sender.clone()
     }
 }
 
@@ -159,7 +90,7 @@ where
 // However, it uses the proc_macro `build` to define the HowdyBuilder and it will
 // intentionally timeout while shutting down.
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HowdyEvent {
     Shutdown,
 }
@@ -178,117 +109,120 @@ impl Into<ActorError> for HowdyError {
 #[build]
 #[derive(Debug, Clone)]
 pub fn build_howdy<LauncherEvent, LauncherSender>(service: Service) -> Howdy {
-    let (sender, inbox) = tokio::sync::mpsc::unbounded_channel::<HowdyEvent>();
-    Howdy {
-        inbox,
-        sender: HowdySender(sender),
-        service,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct HowdySender(UnboundedSender<HowdyEvent>);
-
-impl EventHandle<HowdyEvent> for HowdySender {
-    fn send(&mut self, message: HowdyEvent) -> anyhow::Result<()> {
-        self.0.send(message).map_err(|e| anyhow!(e.to_string()))
-    }
-
-    fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.send(HowdyEvent::Shutdown)
-    }
-
-    fn update_status(&mut self, _service: Service) -> anyhow::Result<()> {
-        todo!()
-    }
+    Howdy { service }
 }
 
 #[derive(Debug)]
 pub struct Howdy {
-    sender: HowdySender,
-    inbox: UnboundedReceiver<HowdyEvent>,
     service: Service,
 }
 
 #[async_trait]
-impl<E, S> Actor<E, S> for Howdy
-where
-    S: 'static + Send + EventHandle<E>,
-{
-    type Error = HowdyError;
+impl Actor for Howdy {
+    type Dependencies = ();
+    type Event = HowdyEvent;
+    type Channel = TokioChannel<Self::Event>;
 
-    fn service(&mut self) -> &mut Service {
-        &mut self.service
-    }
-
-    async fn init(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
-        info!("Initializing {}!", self.service.name);
-        Ok(())
-    }
-
-    async fn run(&mut self, _supervisor: &mut S, rt: &mut BackstageRuntime) -> Result<(), Self::Error> {
-        info!("Running {}!", self.service.name);
-        while let Some(evt) = self.inbox.recv().await {
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    where
+        Self: Sized,
+    {
+        while let Some(evt) = rt.next_event().await {
             match evt {
                 HowdyEvent::Shutdown => {
+                    for s in 0..4 {
+                        debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     break;
                 }
             }
         }
         Ok(())
     }
+}
 
-    async fn shutdown(
-        &mut self,
-        status: Result<(), Self::Error>,
-        _supervisor: &mut S,
-        rt: &mut BackstageRuntime,
-    ) -> Result<ActorRequest, ActorError> {
-        info!("Shutting down {}!", self.service.name);
-        // Some process that takes longer than the defined timeout
-        tokio::time::sleep(Duration::from_secs(4)).await;
-        match status {
-            std::result::Result::Ok(_) => Ok(ActorRequest::Finish),
-            std::result::Result::Err(e) => Err(e.into()),
-        }
+struct Launcher {
+    service: Service,
+}
+
+impl Launcher {
+    pub async fn send_to_hello_world(event: HelloWorldEvent) -> anyhow::Result<()> {
+        Self::route(LauncherChildren::HelloWorld(event)).await
     }
 }
 
-impl<E, S> EventActor<E, S> for Howdy
-where
-    S: 'static + Send + EventHandle<E>,
-{
-    type Event = HowdyEvent;
-    type Handle = HowdySender;
+#[derive(Clone, Debug)]
+pub enum LauncherChildren {
+    HelloWorld(HelloWorldEvent),
+    Howdy(HowdyEvent),
+    Shutdown { using_ctrl_c: bool },
+}
 
-    fn handle(&self) -> Self::Handle {
-        self.sender.clone()
+#[async_trait]
+impl System for Launcher {
+    type ChildEvents = LauncherChildren;
+
+    type Dependencies = ();
+
+    type Channel = TokioChannel<Self::ChildEvents>;
+
+    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
+    where
+        Self: Sized,
+    {
+        let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
+        let hello_world_service = this.write().await.service.spawn("Hello World");
+        let howdy_builder = HowdyBuilder::new();
+        let howdy_world_service = this.write().await.service.spawn("Howdy");
+        rt.spawn_actor(hello_world_builder.build(hello_world_service));
+        rt.spawn_actor(howdy_builder.build(howdy_world_service));
+        tokio::task::spawn(ctrl_c(rt.my_handle().await));
+        while let Some(evt) = rt.next_event().await {
+            if let LauncherChildren::Shutdown { using_ctrl_c } = evt {
+                debug!("Exiting launcher");
+                rt.send_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
+                rt.send_event::<Howdy>(HowdyEvent::Shutdown).await;
+                break;
+            }
+            Launcher::route(evt).await.ok();
+        }
+
+        Ok(())
     }
+
+    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        // match event {
+        //    LauncherChildren::HelloWorld(event) => rt.send_event::<HelloWorld>(event).await,
+        //}
+        Ok(())
+    }
+}
+
+pub async fn ctrl_c(mut sender: TokioSender<LauncherChildren>) {
+    tokio::signal::ctrl_c().await.unwrap();
+    let exit_program_event = LauncherChildren::Shutdown { using_ctrl_c: true };
+    sender.send(exit_program_event).await.ok();
 }
 
 #[tokio::main]
 async fn main() {
-    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     startup().await.unwrap();
 }
 
 async fn startup() -> anyhow::Result<()> {
-    launcher!(HelloWorldBuilder, HowdyBuilder)
-        .add("HelloWorld", HelloWorldBuilder::new("HelloWorld".to_owned(), 1), &["Howdy"], None)?
-        .name("Howdy")
-        .timeout(Duration::from_secs(2))
-        .builder(HowdyBuilder::new())?
-        .execute(|_launcher| {
-            info!("Executing with launcher");
+    BackstageRuntime::new()
+        .scope(|scope| {
+            let service = Service::new("Launcher");
+            let launcher = Launcher { service };
+            scope.spawn_system(launcher);
         })
-        .execute_async(|launcher| async {
-            info!("Executing async with launcher");
-            launcher
-        })
-        .await
-        .launch()
         .await?;
     Ok(())
 }
