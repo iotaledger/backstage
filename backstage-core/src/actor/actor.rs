@@ -5,7 +5,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Actor {
     type Dependencies;
-    type Event: Send;
+    type Event: Clone + Send;
     type Channel: Channel<Self::Event> + Send;
 
     /// The main function for the actor

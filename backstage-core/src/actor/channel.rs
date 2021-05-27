@@ -1,10 +1,15 @@
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
-pub trait Channel<E: Send> {
-    type Sender: Send + Sync + Clone;
+pub trait Channel<E: Send + Clone> {
+    type Sender: Sender<E> + Send + Sync + Clone;
     type Receiver: Receiver<E> + Send;
 
     fn new() -> (Self::Sender, Self::Receiver);
+}
+
+#[async_trait::async_trait]
+pub trait Sender<E: Send + Clone>: Clone {
+    async fn send(&mut self, event: E) -> anyhow::Result<()>;
 }
 
 #[async_trait::async_trait]
@@ -14,14 +19,24 @@ pub trait Receiver<E: Send> {
 
 pub struct TokioChannel<E>(PhantomData<E>);
 
-impl<E: Send> Channel<E> for TokioChannel<E> {
-    type Sender = tokio::sync::mpsc::UnboundedSender<E>;
+impl<E: 'static + Send + Clone + Debug + Sync> Channel<E> for TokioChannel<E> {
+    type Sender = TokioSender<E>;
 
     type Receiver = TokioReceiver<E>;
 
     fn new() -> (Self::Sender, Self::Receiver) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        (sender, TokioReceiver(receiver))
+        (TokioSender(sender), TokioReceiver(receiver))
+    }
+}
+
+#[derive(Clone)]
+pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
+
+#[async_trait::async_trait]
+impl<E: 'static + Send + Clone + Debug + Sync> Sender<E> for TokioSender<E> {
+    async fn send(&mut self, event: E) -> anyhow::Result<()> {
+        self.0.send(event).map_err(|e| anyhow::anyhow!(e))
     }
 }
 

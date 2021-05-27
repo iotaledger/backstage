@@ -126,7 +126,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         {
             type BuiltActor = #actor;
 
-            fn build<#gen_list>(self, service: Service) -> Self::BuiltActor
+            fn build(self, service: Service) -> Self::BuiltActor
                 #block
 
         }
