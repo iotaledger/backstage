@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use backstage::*;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -43,7 +44,7 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run(self, mut rt: ActorRuntime<Self>) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -67,8 +68,9 @@ impl Launcher {
 }
 
 #[derive(Clone, Debug)]
-enum LauncherChildren {
+pub enum LauncherChildren {
     HelloWorld(HelloWorldEvent),
+    Shutdown { using_ctrl_c: bool },
 }
 
 #[async_trait]
@@ -86,7 +88,13 @@ impl System for Launcher {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         let service = this.write().await.service.spawn("Hello World");
         rt.spawn_actor(builder.build(service));
+        tokio::task::spawn(ctrl_c(rt.my_handle().await));
         while let Some(evt) = rt.next_event().await {
+            if let LauncherChildren::Shutdown { using_ctrl_c } = evt {
+                debug!("Exiting launcher");
+                rt.send_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
+                break;
+            }
             Launcher::route(evt).await.ok();
         }
 
@@ -104,9 +112,15 @@ impl System for Launcher {
     }
 }
 
+pub async fn ctrl_c(mut sender: TokioSender<LauncherChildren>) {
+    tokio::signal::ctrl_c().await.unwrap();
+    let exit_program_event = LauncherChildren::Shutdown { using_ctrl_c: true };
+    sender.send(exit_program_event).await.ok();
+}
+
 #[tokio::main]
 async fn main() {
-    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     startup().await.unwrap();

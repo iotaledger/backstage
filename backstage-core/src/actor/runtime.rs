@@ -1,9 +1,9 @@
 use crate::{Actor, ActorError, Channel, Receiver, Sender, System};
 use anymap::{any::CloneAny, Map};
 use futures::Future;
+use log::debug;
 use lru::LruCache;
 use std::{
-    borrow::Cow,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -19,39 +19,30 @@ pub struct BackstageRuntime {
     pools: Map<dyn CloneAny + Send + Sync>,
 }
 
-pub struct ActorRuntime<A: Actor> {
-    runtime: BackstageRuntime,
+pub struct ActorRuntime<'a, A: Actor> {
+    runtime: RuntimeScope<'a>,
     receiver: <A::Channel as Channel<A::Event>>::Receiver,
 }
 
-impl<A: Actor> ActorRuntime<A> {
-    pub fn new(runtime: BackstageRuntime, receiver: <A::Channel as Channel<A::Event>>::Receiver) -> Self {
+impl<'a, A: Actor> ActorRuntime<'a, A> {
+    pub fn new(runtime: RuntimeScope<'a>, receiver: <A::Channel as Channel<A::Event>>::Receiver) -> Self {
         Self { runtime, receiver }
     }
 
     pub async fn next_event(&mut self) -> Option<A::Event> {
         Receiver::<A::Event>::recv(&mut self.receiver).await
     }
-
-    pub async fn actor_scope<O, F: FnOnce(&mut RuntimeScope, &mut <A::Channel as Channel<A::Event>>::Receiver) -> O>(
-        &mut self,
-        f: F,
-    ) -> anyhow::Result<O> {
-        let res = f(&mut RuntimeScope((&mut self.runtime).into()), &mut self.receiver);
-        self.join().await?;
-        Ok(res)
-    }
 }
 
-impl<A: Actor> Deref for ActorRuntime<A> {
-    type Target = BackstageRuntime;
+impl<'a, A: Actor> Deref for ActorRuntime<'a, A> {
+    type Target = RuntimeScope<'a>;
 
     fn deref(&self) -> &Self::Target {
         &self.runtime
     }
 }
 
-impl<A: Actor> DerefMut for ActorRuntime<A> {
+impl<'a, A: Actor> DerefMut for ActorRuntime<'a, A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.runtime
     }
@@ -70,6 +61,13 @@ impl<'a, S: System> SystemRuntime<'a, S> {
     pub async fn next_event(&mut self) -> Option<S::ChildEvents> {
         Receiver::<S::ChildEvents>::recv(&mut self.receiver).await
     }
+
+    pub async fn my_handle(&self) -> <S::Channel as Channel<S::ChildEvents>>::Sender
+    where
+        <S::Channel as Channel<S::ChildEvents>>::Sender: 'static,
+    {
+        self.runtime.0.system_event_handle::<S>().unwrap()
+    }
 }
 
 impl<'a, S: System> Deref for SystemRuntime<'a, S> {
@@ -86,44 +84,7 @@ impl<'a, S: System> DerefMut for SystemRuntime<'a, S> {
     }
 }
 
-pub enum Boo<'a, B: 'a> {
-    Borrowed(&'a mut B),
-    Owned(B),
-}
-
-impl<'a, B: 'a> Deref for Boo<'a, B> {
-    type Target = B;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Boo::Borrowed(b) => *b,
-            Boo::Owned(o) => o,
-        }
-    }
-}
-
-impl<'a, B: 'a> DerefMut for Boo<'a, B> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Boo::Borrowed(b) => *b,
-            Boo::Owned(ref mut o) => o,
-        }
-    }
-}
-
-impl<'a, O: 'a> From<O> for Boo<'a, O> {
-    fn from(owned: O) -> Self {
-        Self::Owned(owned)
-    }
-}
-
-impl<'a, B: 'a> From<&'a mut B> for Boo<'a, B> {
-    fn from(borrowed: &'a mut B) -> Self {
-        Self::Borrowed(borrowed)
-    }
-}
-
-pub struct RuntimeScope<'a>(pub Boo<'a, BackstageRuntime>);
+pub struct RuntimeScope<'a>(pub &'a mut BackstageRuntime);
 
 impl<'a> RuntimeScope<'a> {
     pub fn spawn_task<F: FnOnce(BackstageRuntime) -> O, O: 'static + Send + Future<Output = Result<(), ActorError>>>(&mut self, f: F) {
@@ -132,21 +93,26 @@ impl<'a> RuntimeScope<'a> {
         self.0.child_handles.push(child_task);
     }
 
-    pub fn spawn_actor<A: 'static + Actor>(&mut self, actor: A) -> <A::Channel as Channel<A::Event>>::Sender {
+    pub fn spawn_actor<A: 'static + Actor + Send + Sync>(&mut self, actor: A) -> <A::Channel as Channel<A::Event>>::Sender {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        let child_rt = ActorRuntime::new(self.0.child(), receiver);
         self.0.senders.insert(sender.clone());
-        let child_task = tokio::spawn(actor.run(child_rt));
+        let mut child_rt = self.0.child();
+        let child_task = tokio::spawn(async move {
+            let actor_rt = ActorRuntime::new(RuntimeScope(&mut child_rt), receiver);
+            let res = actor.run(actor_rt).await;
+            child_rt.join().await;
+            res
+        });
         self.0.child_handles.push(child_task);
         sender
     }
 
     pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let mut child_rt = self.0.child();
         let system = Arc::new(RwLock::new(system));
         self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
+        let mut child_rt = self.0.child();
         let child_task = tokio::spawn(async move {
             let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver);
             let res = S::run(system, system_rt).await;
@@ -167,6 +133,13 @@ impl<'a> RuntimeScope<'a> {
         let mut pool = Pool::default();
         f(&mut pool);
         self.0.pools.insert(Arc::new(RwLock::new(pool)));
+    }
+
+    pub async fn send_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
+    where
+        <A::Channel as Channel<A::Event>>::Sender: 'static,
+    {
+        self.0.send_event::<A>(event).await
     }
 }
 
@@ -221,6 +194,24 @@ impl BackstageRuntime {
 
     pub fn event_handle<H: 'static + Clone + Send + Sync>(&self) -> Option<H> {
         self.senders.get::<H>().map(|handle| handle.clone())
+    }
+
+    pub fn system_event_handle<S: System>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
+    where
+        <S::Channel as Channel<S::ChildEvents>>::Sender: 'static,
+    {
+        self.senders
+            .get::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
+            .map(|handle| handle.clone())
+    }
+
+    pub fn actor_event_handle<A: Actor>(&self) -> Option<<A::Channel as Channel<A::Event>>::Sender>
+    where
+        <A::Channel as Channel<A::Event>>::Sender: 'static,
+    {
+        self.senders
+            .get::<<A::Channel as Channel<A::Event>>::Sender>()
+            .map(|handle| handle.clone())
     }
 
     pub async fn send_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
@@ -291,55 +282,5 @@ impl<'a, H> Deref for Pool<'a, H> {
 
     fn deref(&self) -> &Self::Target {
         &self.handles
-    }
-}
-
-mod test {
-    use super::*;
-    use crate::TokioChannel;
-
-    struct MyResource {
-        n: u32,
-    }
-
-    #[derive(Clone, Debug)]
-    enum MyEvent {
-        Shutdown,
-        Text(String),
-    }
-
-    struct MyActor;
-
-    #[async_trait::async_trait]
-    impl Actor for MyActor {
-        type Dependencies = (Res<MyResource>,);
-
-        type Event = MyEvent;
-
-        type Channel = TokioChannel<Self::Event>;
-
-        async fn run(self, mut rt: ActorRuntime<Self>) -> Result<(), ActorError> {
-            while let Some(evt) = rt.next_event().await {
-                let res = rt.resource::<MyResource>();
-                match evt {
-                    MyEvent::Shutdown => break,
-                    MyEvent::Text(s) => {
-                        println!("Test received: {}", s);
-                    }
-                }
-            }
-
-            Ok(())
-        }
-    }
-    #[tokio::test]
-    async fn runtime() {
-        let mut rt = BackstageRuntime::new();
-        rt.scope(|scope| {
-            let res = scope.add_resource(MyResource { n: 0 });
-            let actor_handle = scope.spawn_actor(MyActor);
-        })
-        .await
-        .unwrap();
     }
 }

@@ -9,7 +9,7 @@ pub trait Actor {
     type Channel: Channel<Self::Event> + Send;
 
     /// The main function for the actor
-    async fn run(self, rt: ActorRuntime<Self>) -> Result<(), ActorError>
+    async fn run<'a>(self, rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
     where
         Self: Sized;
 }
