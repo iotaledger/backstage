@@ -1,30 +1,52 @@
+use super::*;
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, marker::PhantomData, net::SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
-use super::*;
-pub struct Websocket {
+pub struct Websocket<E: From<Message>, H: WebsocketHandle<E>> {
     service: Service,
     listen_address: SocketAddr,
     connections: HashMap<SocketAddr, TokioSender<Message>>,
+    handle: H,
+    _phantom: PhantomData<E>,
+}
+
+#[async_trait]
+pub trait WebsocketHandle<E: From<Message>> {
+    async fn send_websocket_msg(&mut self, msg: Message);
+}
+
+#[async_trait]
+impl<T, E> WebsocketHandle<E> for T
+where
+    T: Sender<E> + Send,
+    E: From<Message> + Send + Clone,
+{
+    async fn send_websocket_msg(&mut self, msg: Message) {
+        self.send(E::from(msg)).await.ok();
+    }
 }
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build(service: Service, listen_address: SocketAddr) -> Websocket {
+pub fn build<E: From<Message>, H: WebsocketHandle<E>>(service: Service, listen_address: SocketAddr, handle: H) -> Websocket<E, H> {
     Websocket {
         service,
         listen_address,
         connections: Default::default(),
+        handle,
+        _phantom: PhantomData::<E>,
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum WebsocketChildren {
-    Responder(Message),
+    Response(Message),
+    Received(Message),
     Connection(Connection),
+    Shutdown,
 }
 
 #[derive(Clone, Debug)]
@@ -34,7 +56,7 @@ pub struct Connection {
 }
 
 #[async_trait]
-impl System for Websocket {
+impl<E: 'static + From<Message> + Send + Sync, H: 'static + WebsocketHandle<E> + Send + Sync> System for Websocket<E, H> {
     type ChildEvents = WebsocketChildren;
 
     type Dependencies = ();
@@ -48,72 +70,60 @@ impl System for Websocket {
         let tcp_listener = TcpListener::bind(this.read().await.listen_address)
             .await
             .map_err(|_| anyhow::anyhow!("Unable to bind to dashboard listen address"))?;
-        rt.spawn_actor(Connector { tcp_listener });
+
+        let connector_abort = rt.spawn_task(|mut rt| {
+            async move {
+                loop {
+                    if let Ok((socket, peer)) = tcp_listener.accept().await {
+                        let peer = socket.peer_addr().unwrap_or(peer);
+                        if let Ok(stream) = accept_async(socket).await {
+                            let (sender, mut receiver) = stream.split();
+                            let (responder_abort, responder_handle) = rt.spawn_actor(Responder { sender });
+                            rt.spawn_task(|mut rt| {
+                                async move {
+                                    while let Some(Ok(msg)) = receiver.next().await {
+                                        match msg {
+                                            Message::Close(_) => {
+                                                responder_abort.abort();
+                                                break;
+                                            }
+                                            msg => {
+                                                rt.send_system_event::<Websocket<E, H>>(WebsocketChildren::Received(msg)).await?;
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                }
+                                .boxed()
+                            });
+                            rt.send_system_event::<Websocket<E, H>>(WebsocketChildren::Connection(Connection {
+                                peer,
+                                sender: responder_handle,
+                            }))
+                            .await?;
+                        }
+                    }
+                }
+            }
+            .boxed()
+        });
         while let Some(evt) = rt.next_event().await {
             match evt {
-                WebsocketChildren::Responder(msg) => {
-                    // Pass the message to the correct responder somehow
-                }
+                WebsocketChildren::Response(msg) => {}
                 WebsocketChildren::Connection(conn) => {
                     // Store this connection
                     this.write().await.connections.insert(conn.peer, conn.sender);
                 }
-            }
-        }
-        Ok(())
-    }
-}
-
-struct Connector {
-    tcp_listener: TcpListener,
-}
-
-#[derive(Clone, Debug)]
-struct ConnectorShutdown;
-
-#[async_trait]
-impl Actor for Connector {
-    type Dependencies = ();
-
-    type Event = ConnectorShutdown;
-
-    type Channel = TokioChannel<Self::Event>;
-
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
-    where
-        Self: Sized,
-    {
-        loop {
-            if let Ok((socket, peer)) = self.tcp_listener.accept().await {
-                let peer = socket.peer_addr().unwrap_or(peer);
-                if let Ok(stream) = accept_async(socket).await {
-                    let (sender, mut receiver) = stream.split();
-                    let responder_handle = rt.spawn_actor(Responder { sender });
-                    rt.spawn_task(|_| {
-                        async move {
-                            while let Some(Ok(msg)) = receiver.next().await {
-                                match msg {
-                                    Message::Text(_) => {
-                                        // forward this up
-                                    }
-                                    Message::Close(_) => {
-                                        break;
-                                    }
-                                    _ => (),
-                                }
-                            }
-                            Ok(())
-                        }
-                        .boxed()
-                    });
-                    rt.send_system_event::<Websocket>(WebsocketChildren::Connection(Connection {
-                        peer,
-                        sender: responder_handle,
-                    }))
-                    .await?;
+                WebsocketChildren::Received(msg) => {
+                    this.write().await.handle.send_websocket_msg(msg).await;
+                }
+                WebsocketChildren::Shutdown => {
+                    connector_abort.abort();
+                    break;
                 }
             }
         }
+        Ok(())
     }
 }
 

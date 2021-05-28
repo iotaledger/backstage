@@ -1,6 +1,6 @@
-use crate::{Actor, ActorError, Channel, Receiver, Sender, System};
+use crate::{Actor, ActorError, ActorRequest, Channel, Receiver, Sender, System};
 use anymap::{any::CloneAny, Map};
-use futures::future::BoxFuture;
+use futures::future::{AbortHandle, Abortable, BoxFuture};
 use lru::LruCache;
 use std::{
     ops::{Deref, DerefMut},
@@ -11,7 +11,8 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 pub struct BackstageRuntime {
-    child_handles: Vec<JoinHandle<Result<(), ActorError>>>,
+    join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
+    abort_handles: Vec<AbortHandle>,
     resources: Map<dyn CloneAny + Send + Sync>,
     senders: Map<dyn CloneAny + Send + Sync>,
     systems: Map<dyn CloneAny + Send + Sync>,
@@ -86,48 +87,91 @@ impl<'a, S: System> DerefMut for SystemRuntime<'a, S> {
 pub struct RuntimeScope<'a>(pub &'a mut BackstageRuntime);
 
 impl<'a> RuntimeScope<'a> {
-    pub fn spawn_task<F>(&mut self, f: F)
+    pub fn spawn_task<F>(&mut self, f: F) -> AbortHandle
     where
         for<'b> F: 'static + Send + FnOnce(RuntimeScope<'b>) -> BoxFuture<'b, Result<(), ActorError>>,
     {
         let mut child_rt = self.0.child();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let child_task = tokio::spawn(async move {
             let scope = RuntimeScope(&mut child_rt);
-            let res = f(scope).await;
-            child_rt.join().await;
-            res
+            let res = Abortable::new(f(scope), abort_registration).await;
+            match res {
+                Ok(res) => {
+                    child_rt.join().await;
+                    res
+                }
+                Err(a) => {
+                    child_rt.abort();
+                    Err(ActorError::Other {
+                        source: anyhow::anyhow!("Aborted!"),
+                        request: ActorRequest::Finish,
+                    })
+                }
+            }
         });
-        self.0.child_handles.push(child_task);
+        self.0.join_handles.push(child_task);
+        self.0.abort_handles.push(abort_handle.clone());
+        abort_handle
     }
 
-    pub fn spawn_actor<A: 'static + Actor + Send + Sync>(&mut self, actor: A) -> <A::Channel as Channel<A::Event>>::Sender {
+    pub fn spawn_actor<A: 'static + Actor + Send + Sync>(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender) {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.0.senders.insert(sender.clone());
         let mut child_rt = self.0.child();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let child_task = tokio::spawn(async move {
             let actor_rt = ActorRuntime::new(RuntimeScope(&mut child_rt), receiver);
-            let res = actor.run(actor_rt).await;
-            child_rt.join().await;
-            res
+            let res = Abortable::new(actor.run(actor_rt), abort_registration).await;
+            match res {
+                Ok(res) => {
+                    child_rt.join().await;
+                    res
+                }
+                Err(a) => {
+                    child_rt.abort();
+                    Err(ActorError::Other {
+                        source: anyhow::anyhow!("Aborted!"),
+                        request: ActorRequest::Finish,
+                    })
+                }
+            }
         });
-        self.0.child_handles.push(child_task);
-        sender
+        self.0.join_handles.push(child_task);
+        self.0.abort_handles.push(abort_handle.clone());
+        (abort_handle, sender)
     }
 
-    pub fn spawn_system<S: 'static + System + Send + Sync>(&mut self, system: S) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
+    pub fn spawn_system<S: 'static + System + Send + Sync>(
+        &mut self,
+        system: S,
+    ) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender) {
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
         let system = Arc::new(RwLock::new(system));
         self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
         let mut child_rt = self.0.child();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let child_task = tokio::spawn(async move {
             let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver);
-            let res = S::run(system, system_rt).await;
-            child_rt.join().await;
-            res
+            let res = Abortable::new(S::run(system, system_rt), abort_registration).await;
+            match res {
+                Ok(res) => {
+                    child_rt.join().await;
+                    res
+                }
+                Err(a) => {
+                    child_rt.abort();
+                    Err(ActorError::Other {
+                        source: anyhow::anyhow!("Aborted!"),
+                        request: ActorRequest::Finish,
+                    })
+                }
+            }
         });
-        self.0.child_handles.push(child_task);
-        sender
+        self.0.join_handles.push(child_task);
+        self.0.abort_handles.push(abort_handle.clone());
+        (abort_handle, sender)
     }
 
     pub fn spawn_pool<H: 'static + Send + Sync, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
@@ -172,7 +216,8 @@ impl<'a> RuntimeScope<'a> {
 impl Default for BackstageRuntime {
     fn default() -> Self {
         Self {
-            child_handles: Default::default(),
+            join_handles: Default::default(),
+            abort_handles: Default::default(),
             resources: Map::new(),
             senders: Map::new(),
             systems: Map::new(),
@@ -204,10 +249,16 @@ impl BackstageRuntime {
 
     async fn join(&mut self) -> Result<Vec<Result<(), ActorError>>, JoinError> {
         let mut results = Vec::new();
-        for handle in self.child_handles.drain(..) {
+        for handle in self.join_handles.drain(..) {
             results.push(handle.await?);
         }
         Ok(results)
+    }
+
+    fn abort(mut self) {
+        for handle in self.abort_handles.drain(..) {
+            handle.abort();
+        }
     }
 
     pub fn resource<R: 'static + Send + Sync>(&self) -> Option<&R> {

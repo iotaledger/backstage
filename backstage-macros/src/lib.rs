@@ -15,7 +15,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let actor = match sig.output {
         syn::ReturnType::Type(_, ref ty) => {
             if let syn::Type::Path(p) = ty.as_ref() {
-                p.path.get_ident().unwrap()
+                &p.path.segments.last().unwrap().ident
             } else {
                 panic!("Build function should specify an actor as its return type!");
             }
@@ -29,11 +29,41 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ..
     } = sig;
 
-    let (generics, gen_list, bounds) = if !generics.params.is_empty() {
+    let (generics, bounded_generics, bare_generics, bounds) = if !generics.params.is_empty() {
         let params = generics.params;
-        (quote! {}, quote! {#params}, quote! {})
+        let stripped_params = params
+            .iter()
+            .map(|param| match param {
+                syn::GenericParam::Type(t) => {
+                    let id = &t.ident;
+                    quote! {#id}
+                }
+                syn::GenericParam::Lifetime(l) => {
+                    let id = &l.lifetime;
+                    quote! {#id}
+                }
+                syn::GenericParam::Const(c) => {
+                    panic!("Const generics not supported for builders!");
+                }
+            })
+            .collect::<Vec<_>>();
+        if let Some(bounds) = generics.where_clause {
+            (
+                quote! {<#(#stripped_params),*>},
+                quote! {<#params>},
+                quote! {#(#stripped_params),*},
+                quote! {#bounds},
+            )
+        } else {
+            (
+                quote! {<#(#stripped_params),*>},
+                quote! {<#params>},
+                quote! {#(#stripped_params),*},
+                quote! {},
+            )
+        }
     } else {
-        (quote! {<E, S>}, quote! {E, S}, quote! {where S: 'static + Send + EventHandle<E>,})
+        (quote! {}, quote! {}, quote! {}, quote! {})
     };
 
     let builder = quote::format_ident!("{}Builder", actor);
@@ -100,6 +130,11 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         panic!("Build function must contain a Service parameter (ex. service: Service)!");
     }
 
+    let defaults = input_names
+        .iter()
+        .map(|name| quote! {#name: Default::default()})
+        .collect::<Vec<_>>();
+
     block.stmts.insert(
         0,
         syn::parse_quote! {
@@ -109,12 +144,21 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let res = quote! {
         #(#attrs)*
-        #[derive(Default)]
-        #vis struct #builder {
+        #vis struct #builder #generics {
+            _phantom: std::marker::PhantomData<(#bare_generics)>,
             #(#inputs),*
         }
 
-        impl #builder {
+        impl #bounded_generics Default for #builder #generics #bounds {
+            fn default() -> Self {
+                Self {
+                    _phantom: std::marker::PhantomData,
+                    #(#defaults),*
+                }
+            }
+        }
+
+        impl #bounded_generics #builder #generics #bounds {
             #vis fn new() -> Self {
                 Self::default()
             }
@@ -122,11 +166,11 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#add_fns)*
         }
 
-        impl Builder for #builder
+        impl #bounded_generics Builder for #builder #generics #bounds
         {
-            type Built = #actor;
+            type Built = #actor #generics;
 
-            fn build(self, service: Service) -> Self::Built
+            fn build(self, service: Service) -> Self::Built #bounds
                 #block
 
         }

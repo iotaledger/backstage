@@ -1,11 +1,11 @@
-use anyhow::anyhow;
 use async_trait::async_trait;
 use backstage::*;
-use futures::FutureExt;
+use futures::{FutureExt, SinkExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 //////////////////////////////// HelloWorld Actor ////////////////////////////////////////////
 
@@ -114,7 +114,7 @@ impl Into<ActorError> for HowdyError {
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build_howdy<LauncherEvent, LauncherSender>(service: Service) -> Howdy {
+pub fn build_howdy(service: Service) -> Howdy {
     Howdy { service }
 }
 
@@ -169,7 +169,14 @@ impl Launcher {
 pub enum LauncherChildren {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
+    WebsocketMsg(Message),
     Shutdown { using_ctrl_c: bool },
+}
+
+impl From<Message> for LauncherChildren {
+    fn from(msg: Message) -> Self {
+        Self::WebsocketMsg(msg)
+    }
 }
 
 #[async_trait]
@@ -184,13 +191,18 @@ impl System for Launcher {
     where
         Self: Sized,
     {
+        let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
-        let hello_world_service = this.write().await.service.spawn("Hello World");
         let howdy_builder = HowdyBuilder::new();
-        let howdy_world_service = this.write().await.service.spawn("Howdy");
-        rt.spawn_actor(hello_world_builder.build(hello_world_service));
-        rt.spawn_actor(howdy_builder.build(howdy_world_service));
-        tokio::task::spawn(ctrl_c(rt.my_handle().await));
+        rt.spawn_actor(hello_world_builder.build(this.write().await.service.spawn("Hello World")));
+        rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
+        rt.spawn_system(
+            prefabs::websocket::WebsocketBuilder::new()
+                .listen_address(([127, 0, 0, 1], 8000).into())
+                .handle(my_handle.clone())
+                .build(this.write().await.service.spawn("Websocket")),
+        );
+        tokio::task::spawn(ctrl_c(my_handle));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherChildren::HelloWorld(event) => {
@@ -204,6 +216,9 @@ impl System for Launcher {
                     rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
                     rt.send_actor_event::<Howdy>(HowdyEvent::Shutdown).await;
                     break;
+                }
+                LauncherChildren::WebsocketMsg(msg) => {
+                    info!("Received websocket message: {:?}", msg);
                 }
             }
         }
@@ -244,6 +259,8 @@ async fn startup() -> anyhow::Result<()> {
                     rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("bar".to_owned())))
                         .await
                         .unwrap();
+                    let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
+                    stream.send(Message::text("Hello there")).await.unwrap();
                     Ok(())
                 }
                 .boxed()
