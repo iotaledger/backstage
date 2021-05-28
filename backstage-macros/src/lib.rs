@@ -122,11 +122,11 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#add_fns)*
         }
 
-        impl ActorBuilder for #builder
+        impl Builder for #builder
         {
-            type BuiltActor = #actor;
+            type Built = #actor;
 
-            fn build(self, service: Service) -> Self::BuiltActor
+            fn build(self, service: Service) -> Self::Built
                 #block
 
         }

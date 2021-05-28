@@ -47,8 +47,8 @@ impl HelloWorldBuilder {
     }
 }
 
-impl ActorBuilder for HelloWorldBuilder {
-    type BuiltActor = HelloWorld;
+impl Builder for HelloWorldBuilder {
+    type Built = HelloWorld;
 
     fn build(self, service: Service) -> HelloWorld {
         HelloWorld {

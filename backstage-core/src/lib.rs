@@ -2,6 +2,8 @@
 pub mod actor;
 pub use actor::*;
 pub use async_recursion;
+#[cfg(feature = "prefabs")]
+pub mod prefabs;
 
 pub enum Boo<'a, B: 'a> {
     Borrowed(&'a mut B),

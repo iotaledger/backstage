@@ -30,7 +30,7 @@ impl<E: 'static + Send + Clone + Debug + Sync> Channel<E> for TokioChannel<E> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
 
 #[async_trait::async_trait]

@@ -25,6 +25,9 @@ log = { version = "0.4", optional = true }
 daggy = "0.7"
 lru = "0.6"
 
+futures-util = { version = "0.3", optional = true }
+tokio-tungstenite = { version = "0.14", optional = true }
+
 [dev-dependencies]
 serde_json = "1.0"
 tokio = { version = "1.5", features = ["macros", "rt-multi-thread", "signal"] }
@@ -40,5 +43,6 @@ name = "two_apps"
 path = "examples/two_apps.rs"
 
 [features]
-default = ["launcher"]
+default = ["launcher", "prefabs"]
 launcher = ["log"]
+prefabs = ["tokio/net", "futures-util", "tokio-tungstenite"]
