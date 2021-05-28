@@ -1,7 +1,6 @@
 use crate::{Actor, ActorError, Channel, Receiver, Sender, System};
 use anymap::{any::CloneAny, Map};
-use futures::Future;
-use log::debug;
+use futures::future::BoxFuture;
 use lru::LruCache;
 use std::{
     ops::{Deref, DerefMut},
@@ -87,9 +86,17 @@ impl<'a, S: System> DerefMut for SystemRuntime<'a, S> {
 pub struct RuntimeScope<'a>(pub &'a mut BackstageRuntime);
 
 impl<'a> RuntimeScope<'a> {
-    pub fn spawn_task<F: FnOnce(BackstageRuntime) -> O, O: 'static + Send + Future<Output = Result<(), ActorError>>>(&mut self, f: F) {
-        let child_rt = self.0.child();
-        let child_task = tokio::spawn(f(child_rt));
+    pub fn spawn_task<F>(&mut self, f: F)
+    where
+        for<'b> F: 'static + Send + FnOnce(RuntimeScope<'b>) -> BoxFuture<'b, Result<(), ActorError>>,
+    {
+        let mut child_rt = self.0.child();
+        let child_task = tokio::spawn(async move {
+            let scope = RuntimeScope(&mut child_rt);
+            let res = f(scope).await;
+            child_rt.join().await;
+            res
+        });
         self.0.child_handles.push(child_task);
     }
 
@@ -147,16 +154,23 @@ impl<'a> RuntimeScope<'a> {
         self.0.pool::<A>()
     }
 
-    pub async fn send_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
+    pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
     where
         <A::Channel as Channel<A::Event>>::Sender: 'static,
     {
-        self.0.send_event::<A>(event).await
+        self.0.send_actor_event::<A>(event).await
+    }
+
+    pub async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
+    where
+        <S::Channel as Channel<S::ChildEvents>>::Sender: 'static,
+    {
+        self.0.send_system_event::<S>(event).await
     }
 }
 
-impl BackstageRuntime {
-    pub fn new() -> Self {
+impl Default for BackstageRuntime {
+    fn default() -> Self {
         Self {
             child_handles: Default::default(),
             resources: Map::new(),
@@ -165,14 +179,20 @@ impl BackstageRuntime {
             pools: Map::new(),
         }
     }
+}
+
+impl BackstageRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     fn child(&self) -> Self {
         Self {
-            child_handles: Default::default(),
             resources: self.resources.clone(),
             senders: self.senders.clone(),
             systems: self.systems.clone(),
             pools: self.pools.clone(),
+            ..Default::default()
         }
     }
 
@@ -226,7 +246,7 @@ impl BackstageRuntime {
             .map(|handle| handle.clone())
     }
 
-    pub async fn send_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
+    pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
     where
         <A::Channel as Channel<A::Event>>::Sender: 'static,
     {
@@ -235,6 +255,17 @@ impl BackstageRuntime {
             .get_mut::<<A::Channel as Channel<A::Event>>::Sender>()
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
         Sender::<A::Event>::send(handle, event).await
+    }
+
+    pub async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
+    where
+        <S::Channel as Channel<S::ChildEvents>>::Sender: 'static,
+    {
+        let handle = self
+            .senders
+            .get_mut::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
+            .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
+        Sender::<S::ChildEvents>::send(handle, event).await
     }
 }
 

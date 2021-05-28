@@ -1,4 +1,4 @@
-use crate::{ActorError, BackstageRuntime, Channel, SystemRuntime};
+use crate::{ActorError, Channel, RuntimeScope, SystemRuntime};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -11,10 +11,6 @@ pub trait System {
 
     /// The main function for the system
     async fn run<'a>(this: Arc<RwLock<Self>>, rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
-    where
-        Self: Sized;
-
-    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
     where
         Self: Sized;
 }

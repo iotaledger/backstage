@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use backstage::*;
-use log::debug;
+use futures::FutureExt;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -18,6 +19,7 @@ impl Into<ActorError> for HelloWorldError {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
+    Print(String),
     Shutdown,
 }
 
@@ -51,6 +53,9 @@ impl Actor for HelloWorld {
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HelloWorldEvent::Shutdown => break,
+                HelloWorldEvent::Print(s) => {
+                    info!("HelloWorld printing: {}", s);
+                }
             }
         }
         Ok(())
@@ -62,8 +67,8 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(event: HelloWorldEvent) -> anyhow::Result<()> {
-        Self::route(LauncherChildren::HelloWorld(event)).await
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 }
 
@@ -90,24 +95,18 @@ impl System for Launcher {
         rt.spawn_actor(builder.build(service));
         tokio::task::spawn(ctrl_c(rt.my_handle().await));
         while let Some(evt) = rt.next_event().await {
-            if let LauncherChildren::Shutdown { using_ctrl_c } = evt {
-                debug!("Exiting launcher");
-                rt.send_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
-                break;
+            match evt {
+                LauncherChildren::HelloWorld(event) => {
+                    rt.send_actor_event::<HelloWorld>(event).await;
+                }
+                LauncherChildren::Shutdown { using_ctrl_c } => {
+                    debug!("Exiting launcher");
+                    rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
+                    break;
+                }
             }
-            Launcher::route(evt).await.ok();
         }
 
-        Ok(())
-    }
-
-    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        // match event {
-        //    LauncherChildren::HelloWorld(event) => rt.send_event::<HelloWorld>(event).await,
-        //}
         Ok(())
     }
 }
@@ -132,6 +131,19 @@ async fn startup() -> anyhow::Result<()> {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };
             scope.spawn_system(launcher);
+            scope.spawn_task(|mut rt| {
+                async move {
+                    rt.system::<Launcher>()
+                        .unwrap()
+                        .read()
+                        .await
+                        .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
+                        .await
+                        .unwrap();
+                    Ok(())
+                }
+                .boxed()
+            });
         })
         .await?;
     Ok(())

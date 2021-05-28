@@ -1,6 +1,7 @@
 use anyhow::anyhow;
 use async_trait::async_trait;
 use backstage::*;
+use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -11,6 +12,7 @@ use thiserror::Error;
 // The HelloWorld actor's event type
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
+    Print(String),
     Shutdown,
 }
 
@@ -78,6 +80,9 @@ impl Actor for HelloWorld {
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HelloWorldEvent::Shutdown => break,
+                HelloWorldEvent::Print(s) => {
+                    info!("HelloWorld printing: {}", s);
+                }
             }
         }
         Ok(())
@@ -92,6 +97,7 @@ impl Actor for HelloWorld {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HowdyEvent {
+    Print(String),
     Shutdown,
 }
 #[derive(Error, Debug)]
@@ -136,6 +142,9 @@ impl Actor for Howdy {
                     }
                     break;
                 }
+                HowdyEvent::Print(s) => {
+                    info!("Howdy printing: {}", s);
+                }
             }
         }
         Ok(())
@@ -147,12 +156,12 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(event: HelloWorldEvent) -> anyhow::Result<()> {
-        Self::route(LauncherChildren::HelloWorld(event)).await
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy(event: HowdyEvent) -> anyhow::Result<()> {
-        Self::route(LauncherChildren::Howdy(event)).await
+    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+        rt.send_system_event::<Self>(LauncherChildren::Howdy(event)).await
     }
 }
 
@@ -183,25 +192,22 @@ impl System for Launcher {
         rt.spawn_actor(howdy_builder.build(howdy_world_service));
         tokio::task::spawn(ctrl_c(rt.my_handle().await));
         while let Some(evt) = rt.next_event().await {
-            if let LauncherChildren::Shutdown { using_ctrl_c } = evt {
-                debug!("Exiting launcher");
-                rt.send_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
-                rt.send_event::<Howdy>(HowdyEvent::Shutdown).await;
-                break;
+            match evt {
+                LauncherChildren::HelloWorld(event) => {
+                    rt.send_actor_event::<HelloWorld>(event).await;
+                }
+                LauncherChildren::Howdy(event) => {
+                    rt.send_actor_event::<Howdy>(event).await;
+                }
+                LauncherChildren::Shutdown { using_ctrl_c } => {
+                    debug!("Exiting launcher");
+                    rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
+                    rt.send_actor_event::<Howdy>(HowdyEvent::Shutdown).await;
+                    break;
+                }
             }
-            Launcher::route(evt).await.ok();
         }
 
-        Ok(())
-    }
-
-    async fn route(event: Self::ChildEvents) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        // match event {
-        //    LauncherChildren::HelloWorld(event) => rt.send_event::<HelloWorld>(event).await,
-        //}
         Ok(())
     }
 }
@@ -226,6 +232,22 @@ async fn startup() -> anyhow::Result<()> {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };
             scope.spawn_system(launcher);
+            scope.spawn_task(|mut rt| {
+                async move {
+                    rt.system::<Launcher>()
+                        .unwrap()
+                        .read()
+                        .await
+                        .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
+                        .await
+                        .unwrap();
+                    rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("bar".to_owned())))
+                        .await
+                        .unwrap();
+                    Ok(())
+                }
+                .boxed()
+            });
         })
         .await?;
     Ok(())
