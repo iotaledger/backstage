@@ -150,6 +150,10 @@ impl Launcher {
     pub async fn send_to_hello_world(event: HelloWorldEvent) -> anyhow::Result<()> {
         Self::route(LauncherChildren::HelloWorld(event)).await
     }
+
+    pub async fn send_to_howdy(event: HowdyEvent) -> anyhow::Result<()> {
+        Self::route(LauncherChildren::Howdy(event)).await
+    }
 }
 
 #[derive(Clone, Debug)]

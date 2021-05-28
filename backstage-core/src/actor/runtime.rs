@@ -123,16 +123,28 @@ impl<'a> RuntimeScope<'a> {
         sender
     }
 
+    pub fn spawn_pool<H: 'static + Send + Sync, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
+        let mut pool = Pool::default();
+        f(&mut pool);
+        self.0.pools.insert(Arc::new(RwLock::new(pool)));
+    }
+
     pub fn add_resource<R: 'static + Send + Sync>(&mut self, resource: R) -> Res<R> {
         let res = Arc::new(resource);
         self.0.resources.insert(res.clone());
         Res(res)
     }
 
-    pub fn pool<H: 'static + Send + Sync, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
-        let mut pool = Pool::default();
-        f(&mut pool);
-        self.0.pools.insert(Arc::new(RwLock::new(pool)));
+    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<&R> {
+        self.0.resource::<R>()
+    }
+
+    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Arc<RwLock<S>>> {
+        self.0.system::<S>()
+    }
+
+    pub fn pool<A: Actor>(&self) -> Option<ResMut<Pool<'static, <A::Channel as Channel<A::Event>>::Sender>>> {
+        self.0.pool::<A>()
     }
 
     pub async fn send_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
