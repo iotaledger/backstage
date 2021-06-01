@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use backstage::*;
 use futures::{FutureExt, SinkExt};
 use log::{debug, info};
+use prefabs::websocket::{Websocket, WebsocketChildren};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
@@ -215,6 +216,8 @@ impl System for Launcher {
                     debug!("Exiting launcher");
                     rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
                     rt.send_actor_event::<Howdy>(HowdyEvent::Shutdown).await;
+                    rt.send_system_event::<Websocket<_, TokioSender<LauncherChildren>>>(WebsocketChildren::Shutdown)
+                        .await;
                     break;
                 }
                 LauncherChildren::WebsocketMsg(msg) => {

@@ -102,6 +102,7 @@ impl<'a> RuntimeScope<'a> {
                     res
                 }
                 Err(a) => {
+                    log::debug!("Aborting children of task!");
                     child_rt.abort();
                     Err(ActorError::Other {
                         source: anyhow::anyhow!("Aborted!"),
@@ -129,6 +130,7 @@ impl<'a> RuntimeScope<'a> {
                     res
                 }
                 Err(a) => {
+                    log::debug!("Aborting children of actor!");
                     child_rt.abort();
                     Err(ActorError::Other {
                         source: anyhow::anyhow!("Aborted!"),
@@ -161,6 +163,7 @@ impl<'a> RuntimeScope<'a> {
                     res
                 }
                 Err(a) => {
+                    log::debug!("Aborting children of system!");
                     child_rt.abort();
                     Err(ActorError::Other {
                         source: anyhow::anyhow!("Aborted!"),
