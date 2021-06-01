@@ -1,4 +1,4 @@
-use crate::{Actor, ActorError, ActorRequest, Channel, Receiver, Sender, System};
+use crate::{Actor, ActorError, ActorRequest, Channel, Dependencies, Receiver, Sender, System};
 use anymap::{any::CloneAny, Map};
 use futures::future::{AbortHandle, Abortable, BoxFuture};
 use lru::LruCache;
@@ -10,6 +10,7 @@ use tokio::{
     sync::RwLock,
     task::{JoinError, JoinHandle},
 };
+
 pub struct BackstageRuntime {
     join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
     abort_handles: Vec<AbortHandle>,
@@ -117,13 +118,17 @@ impl<'a> RuntimeScope<'a> {
     }
 
     pub fn spawn_actor<A: 'static + Actor + Send + Sync>(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender) {
+        let deps = <A::Dependencies as Dependencies>::instantiate(&self.0)
+            .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
+            .unwrap();
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.0.senders.insert(sender.clone());
         let mut child_rt = self.0.child();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let child_task = tokio::spawn(async move {
             let actor_rt = ActorRuntime::new(RuntimeScope(&mut child_rt), receiver);
-            let res = Abortable::new(actor.run(actor_rt), abort_registration).await;
+
+            let res = Abortable::new(actor.run(actor_rt, deps), abort_registration).await;
             match res {
                 Ok(res) => {
                     child_rt.join().await;
@@ -148,6 +153,9 @@ impl<'a> RuntimeScope<'a> {
         &mut self,
         system: S,
     ) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender) {
+        let deps = <S::Dependencies as Dependencies>::instantiate(&self.0)
+            .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<S>(), e))
+            .unwrap();
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
         let system = Arc::new(RwLock::new(system));
         self.0.senders.insert(sender.clone());
@@ -156,7 +164,7 @@ impl<'a> RuntimeScope<'a> {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let child_task = tokio::spawn(async move {
             let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver);
-            let res = Abortable::new(S::run(system, system_rt), abort_registration).await;
+            let res = Abortable::new(S::run(system, system_rt, deps), abort_registration).await;
             match res {
                 Ok(res) => {
                     child_rt.join().await;
@@ -177,8 +185,8 @@ impl<'a> RuntimeScope<'a> {
         (abort_handle, sender)
     }
 
-    pub fn spawn_pool<H: 'static + Send + Sync, F: FnOnce(&mut Pool<'_, H>)>(&'static mut self, f: F) {
-        let mut pool = Pool::default();
+    pub fn spawn_pool<H: 'static + Send + Sync, F: FnOnce(&mut ActorPool<'_, H>)>(&'static mut self, f: F) {
+        let mut pool = ActorPool::default();
         f(&mut pool);
         self.0.pools.insert(Arc::new(RwLock::new(pool)));
     }
@@ -189,15 +197,15 @@ impl<'a> RuntimeScope<'a> {
         Res(res)
     }
 
-    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<&R> {
+    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<Res<R>> {
         self.0.resource::<R>()
     }
 
-    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Arc<RwLock<S>>> {
+    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>> {
         self.0.system::<S>()
     }
 
-    pub fn pool<A: Actor>(&self) -> Option<ResMut<Pool<'static, <A::Channel as Channel<A::Event>>::Sender>>> {
+    pub fn pool<A: Actor>(&self) -> Option<ResMut<ActorPool<'static, <A::Channel as Channel<A::Event>>::Sender>>> {
         self.0.pool::<A>()
     }
 
@@ -264,17 +272,17 @@ impl BackstageRuntime {
         }
     }
 
-    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<&R> {
-        self.resources.get::<Arc<R>>().map(Arc::as_ref)
+    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<Res<R>> {
+        self.resources.get::<Arc<R>>().map(|res| Res(res.clone()))
     }
 
-    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Arc<RwLock<S>>> {
-        self.systems.get::<Arc<RwLock<S>>>().map(|sys| sys.clone())
+    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>> {
+        self.systems.get::<Arc<RwLock<S>>>().map(|sys| Sys(sys.clone()))
     }
 
-    pub fn pool<A: Actor>(&self) -> Option<ResMut<Pool<'static, <A::Channel as Channel<A::Event>>::Sender>>> {
+    pub fn pool<A: Actor>(&self) -> Option<ResMut<ActorPool<'static, <A::Channel as Channel<A::Event>>::Sender>>> {
         self.pools
-            .get::<Arc<RwLock<Pool<<A::Channel as Channel<A::Event>>::Sender>>>>()
+            .get::<Arc<RwLock<ActorPool<<A::Channel as Channel<A::Event>>::Sender>>>>()
             .map(|pool| ResMut(pool.clone()))
     }
 
@@ -291,13 +299,13 @@ impl BackstageRuntime {
             .map(|handle| handle.clone())
     }
 
-    pub fn actor_event_handle<A: Actor>(&self) -> Option<<A::Channel as Channel<A::Event>>::Sender>
+    pub fn actor_event_handle<A: Actor>(&self) -> Option<Act<A>>
     where
         <A::Channel as Channel<A::Event>>::Sender: 'static,
     {
         self.senders
             .get::<<A::Channel as Channel<A::Event>>::Sender>()
-            .map(|handle| handle.clone())
+            .map(|handle| Act(handle.clone()))
     }
 
     pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
@@ -335,22 +343,46 @@ impl<R> Deref for Res<R> {
 
 pub struct ResMut<R>(Arc<RwLock<R>>);
 
-impl<R> ResMut<R> {
-    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, R> {
-        self.0.read().await
-    }
+impl<R> Deref for ResMut<R> {
+    type Target = RwLock<R>;
 
-    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, R> {
-        self.0.write().await
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
     }
 }
 
-pub struct Pool<'a, H> {
+pub struct Sys<S: System>(Arc<RwLock<S>>);
+
+impl<S: System> Deref for Sys<S> {
+    type Target = RwLock<S>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+pub struct Act<A: Actor>(<A::Channel as Channel<A::Event>>::Sender);
+
+impl<A: Actor> Deref for Act<A> {
+    type Target = <A::Channel as Channel<A::Event>>::Sender;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<A: Actor> DerefMut for Act<A> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct ActorPool<'a, H> {
     handles: Vec<H>,
     lru: LruCache<usize, &'a H>,
 }
 
-impl<'a, H> Default for Pool<'a, H> {
+impl<'a, H> Default for ActorPool<'a, H> {
     fn default() -> Self {
         Self {
             handles: Default::default(),
@@ -359,7 +391,7 @@ impl<'a, H> Default for Pool<'a, H> {
     }
 }
 
-impl<'a, H> Pool<'a, H> {
+impl<'a, H> ActorPool<'a, H> {
     pub fn push(&'a mut self, handle: H) {
         let idx = self.handles.len();
         self.handles.push(handle);
@@ -374,7 +406,7 @@ impl<'a, H> Pool<'a, H> {
     }
 }
 
-impl<'a, H> Deref for Pool<'a, H> {
+impl<'a, H> Deref for ActorPool<'a, H> {
     type Target = Vec<H>;
 
     fn deref(&self) -> &Self::Target {

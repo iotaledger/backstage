@@ -6,6 +6,7 @@ use prefabs::websocket::{Websocket, WebsocketChildren};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 //////////////////////////////// HelloWorld Actor ////////////////////////////////////////////
@@ -74,7 +75,7 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -126,11 +127,11 @@ pub struct Howdy {
 
 #[async_trait]
 impl Actor for Howdy {
-    type Dependencies = ();
+    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<HelloWorld>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, (counter, mut hello_world): Self::Dependencies) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -145,11 +146,18 @@ impl Actor for Howdy {
                 }
                 HowdyEvent::Print(s) => {
                     info!("Howdy printing: {}", s);
+                    counter.write().await.counter += 1;
+                    info!("Printed {} times", counter.read().await.counter);
+                    hello_world.send(HelloWorldEvent::Print(s)).await;
                 }
             }
         }
         Ok(())
     }
+}
+
+pub struct NecessaryResource {
+    counter: usize,
 }
 
 struct Launcher {
@@ -188,7 +196,7 @@ impl System for Launcher {
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -196,6 +204,7 @@ impl System for Launcher {
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
         rt.spawn_actor(hello_world_builder.build(this.write().await.service.spawn("Hello World")));
+        rt.add_resource(RwLock::new(NecessaryResource { counter: 0 }));
         rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
         rt.spawn_system(
             prefabs::websocket::WebsocketBuilder::new()
@@ -252,16 +261,11 @@ async fn startup() -> anyhow::Result<()> {
             scope.spawn_system(launcher);
             scope.spawn_task(|mut rt| {
                 async move {
-                    rt.system::<Launcher>()
-                        .unwrap()
-                        .read()
-                        .await
-                        .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
-                        .await
-                        .unwrap();
-                    rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("bar".to_owned())))
-                        .await
-                        .unwrap();
+                    for _ in 0..3 {
+                        rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("echo".to_owned())))
+                            .await
+                            .unwrap();
+                    }
                     let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
                     stream.send(Message::text("Hello there")).await.unwrap();
                     Ok(())

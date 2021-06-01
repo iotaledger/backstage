@@ -46,7 +46,7 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -86,7 +86,7 @@ impl System for Launcher {
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {

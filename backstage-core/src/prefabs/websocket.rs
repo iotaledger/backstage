@@ -63,7 +63,7 @@ impl<E: 'static + From<Message> + Send + Sync, H: 'static + WebsocketHandle<E> +
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -139,7 +139,7 @@ impl Actor for Responder {
 
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(mut self, mut rt: ActorRuntime<'a, Self>) -> Result<(), ActorError>
+    async fn run<'a>(mut self, mut rt: ActorRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
