@@ -15,4 +15,5 @@ mod dependencies;
 mod result;
 mod runtime;
 mod service;
+mod shutdown_stream;
 mod system;

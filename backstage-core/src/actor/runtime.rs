@@ -1,19 +1,22 @@
-use crate::{Actor, ActorError, ActorRequest, Channel, Dependencies, Receiver, Sender, System};
+use crate::{actor::shutdown_stream::ShutdownStream, Actor, ActorError, ActorRequest, Channel, Dependencies, Sender, System};
 use anymap::{any::CloneAny, Map};
-use futures::future::{AbortHandle, Abortable, BoxFuture};
+use futures::{
+    future::{AbortHandle, Abortable, BoxFuture},
+    StreamExt,
+};
 use lru::LruCache;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 use tokio::{
-    sync::RwLock,
+    sync::{oneshot, RwLock},
     task::{JoinError, JoinHandle},
 };
 
 pub struct BackstageRuntime {
     join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
-    abort_handles: Vec<AbortHandle>,
+    shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
     resources: Map<dyn CloneAny + Send + Sync>,
     senders: Map<dyn CloneAny + Send + Sync>,
     systems: Map<dyn CloneAny + Send + Sync>,
@@ -22,16 +25,23 @@ pub struct BackstageRuntime {
 
 pub struct ActorRuntime<'a, A: Actor> {
     runtime: RuntimeScope<'a>,
-    receiver: <A::Channel as Channel<A::Event>>::Receiver,
+    receiver: ShutdownStream<<A::Channel as Channel<A::Event>>::Receiver>,
 }
 
 impl<'a, A: Actor> ActorRuntime<'a, A> {
-    pub fn new(runtime: RuntimeScope<'a>, receiver: <A::Channel as Channel<A::Event>>::Receiver) -> Self {
-        Self { runtime, receiver }
+    pub fn new(runtime: RuntimeScope<'a>, receiver: <A::Channel as Channel<A::Event>>::Receiver, shutdown: oneshot::Receiver<()>) -> Self {
+        Self {
+            runtime,
+            receiver: ShutdownStream::new(shutdown, receiver),
+        }
     }
 
     pub async fn next_event(&mut self) -> Option<A::Event> {
-        Receiver::<A::Event>::recv(&mut self.receiver).await
+        self.receiver.next().await
+    }
+
+    pub fn shutdown(mut self) {
+        self.0.shutdown()
     }
 }
 
@@ -49,18 +59,31 @@ impl<'a, A: Actor> DerefMut for ActorRuntime<'a, A> {
     }
 }
 
+impl<'a, A: Actor> Drop for ActorRuntime<'a, A> {
+    fn drop(&mut self) {
+        self.0.shutdown()
+    }
+}
+
 pub struct SystemRuntime<'a, S: System> {
     runtime: RuntimeScope<'a>,
-    receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
+    receiver: ShutdownStream<<S::Channel as Channel<S::ChildEvents>>::Receiver>,
 }
 
 impl<'a, S: System> SystemRuntime<'a, S> {
-    pub fn new(runtime: RuntimeScope<'a>, receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver) -> Self {
-        Self { runtime, receiver }
+    pub fn new(
+        runtime: RuntimeScope<'a>,
+        receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            runtime,
+            receiver: ShutdownStream::new(shutdown, receiver),
+        }
     }
 
     pub async fn next_event(&mut self) -> Option<S::ChildEvents> {
-        Receiver::<S::ChildEvents>::recv(&mut self.receiver).await
+        self.receiver.next().await
     }
 
     pub async fn my_handle(&self) -> <S::Channel as Channel<S::ChildEvents>>::Sender
@@ -68,6 +91,10 @@ impl<'a, S: System> SystemRuntime<'a, S> {
         <S::Channel as Channel<S::ChildEvents>>::Sender: 'static,
     {
         self.runtime.0.system_event_handle::<S>().unwrap()
+    }
+
+    pub fn shutdown(mut self) {
+        self.0.shutdown()
     }
 }
 
@@ -82,6 +109,12 @@ impl<'a, S: System> Deref for SystemRuntime<'a, S> {
 impl<'a, S: System> DerefMut for SystemRuntime<'a, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.runtime
+    }
+}
+
+impl<'a, S: System> Drop for SystemRuntime<'a, S> {
+    fn drop(&mut self) {
+        self.0.shutdown()
     }
 }
 
@@ -113,20 +146,25 @@ impl<'a> RuntimeScope<'a> {
             }
         });
         self.0.join_handles.push(child_task);
-        self.0.abort_handles.push(abort_handle.clone());
+        self.0.shutdown_handles.push((None, abort_handle.clone()));
         abort_handle
     }
 
-    pub fn spawn_actor<A: 'static + Actor + Send + Sync>(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender) {
+    pub fn spawn_actor<A>(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    where
+        A: 'static + Actor + Send + Sync,
+    {
         let deps = <A::Dependencies as Dependencies>::instantiate(&self.0)
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
             .unwrap();
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.0.senders.insert(sender.clone());
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let mut child_rt = self.0.child();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        self.0.shutdown_handles.push((Some(oneshot_send), abort_handle.clone()));
         let child_task = tokio::spawn(async move {
-            let actor_rt = ActorRuntime::new(RuntimeScope(&mut child_rt), receiver);
+            let actor_rt = ActorRuntime::new(RuntimeScope(&mut child_rt), receiver, oneshot_recv);
 
             let res = Abortable::new(actor.run(actor_rt, deps), abort_registration).await;
             match res {
@@ -145,7 +183,6 @@ impl<'a> RuntimeScope<'a> {
             }
         });
         self.0.join_handles.push(child_task);
-        self.0.abort_handles.push(abort_handle.clone());
         (abort_handle, sender)
     }
 
@@ -158,12 +195,14 @@ impl<'a> RuntimeScope<'a> {
             .unwrap();
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
         let system = Arc::new(RwLock::new(system));
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         self.0.senders.insert(sender.clone());
         self.0.systems.insert(system.clone());
         let mut child_rt = self.0.child();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        self.0.shutdown_handles.push((Some(oneshot_send), abort_handle.clone()));
         let child_task = tokio::spawn(async move {
-            let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver);
+            let system_rt = SystemRuntime::new(RuntimeScope((&mut child_rt).into()), receiver, oneshot_recv);
             let res = Abortable::new(S::run(system, system_rt, deps), abort_registration).await;
             match res {
                 Ok(res) => {
@@ -181,7 +220,6 @@ impl<'a> RuntimeScope<'a> {
             }
         });
         self.0.join_handles.push(child_task);
-        self.0.abort_handles.push(abort_handle.clone());
         (abort_handle, sender)
     }
 
@@ -228,7 +266,7 @@ impl Default for BackstageRuntime {
     fn default() -> Self {
         Self {
             join_handles: Default::default(),
-            abort_handles: Default::default(),
+            shutdown_handles: Default::default(),
             resources: Map::new(),
             senders: Map::new(),
             systems: Map::new(),
@@ -258,6 +296,12 @@ impl BackstageRuntime {
         Ok(res)
     }
 
+    pub fn shutdown(&mut self) {
+        for handle in self.shutdown_handles.iter_mut() {
+            handle.0.take().map(|h| h.send(()));
+        }
+    }
+
     async fn join(&mut self) -> Result<Vec<Result<(), ActorError>>, JoinError> {
         let mut results = Vec::new();
         for handle in self.join_handles.drain(..) {
@@ -267,8 +311,12 @@ impl BackstageRuntime {
     }
 
     fn abort(mut self) {
-        for handle in self.abort_handles.drain(..) {
-            handle.abort();
+        for handles in self.shutdown_handles.iter_mut() {
+            if let Some(shutdown_handle) = handles.0.take() {
+                shutdown_handle.send(());
+            } else {
+                handles.1.abort();
+            }
         }
     }
 

@@ -15,7 +15,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
     Print(String),
-    Shutdown,
 }
 
 // The possible errors that a HelloWorld actor can have
@@ -81,7 +80,6 @@ impl Actor for HelloWorld {
     {
         while let Some(evt) = rt.next_event().await {
             match evt {
-                HelloWorldEvent::Shutdown => break,
                 HelloWorldEvent::Print(s) => {
                     info!("HelloWorld printing: {}", s);
                 }
@@ -100,7 +98,6 @@ impl Actor for HelloWorld {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HowdyEvent {
     Print(String),
-    Shutdown,
 }
 #[derive(Error, Debug)]
 pub enum HowdyError {
@@ -137,13 +134,6 @@ impl Actor for Howdy {
     {
         while let Some(evt) = rt.next_event().await {
             match evt {
-                HowdyEvent::Shutdown => {
-                    for s in 0..4 {
-                        debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    break;
-                }
                 HowdyEvent::Print(s) => {
                     info!("Howdy printing: {}", s);
                     counter.write().await.counter += 1;
@@ -151,6 +141,10 @@ impl Actor for Howdy {
                     hello_world.send(HelloWorldEvent::Print(s)).await;
                 }
             }
+        }
+        for s in 0..4 {
+            debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Ok(())
     }
@@ -223,10 +217,6 @@ impl System for Launcher {
                 }
                 LauncherChildren::Shutdown { using_ctrl_c } => {
                     debug!("Exiting launcher");
-                    rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
-                    rt.send_actor_event::<Howdy>(HowdyEvent::Shutdown).await;
-                    rt.send_system_event::<Websocket<_, TokioSender<LauncherChildren>>>(WebsocketChildren::Shutdown)
-                        .await;
                     break;
                 }
                 LauncherChildren::WebsocketMsg(msg) => {

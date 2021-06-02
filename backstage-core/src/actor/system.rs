@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 #[async_trait]
 pub trait System {
-    type ChildEvents: Send + Clone;
+    type ChildEvents: Send + Sync;
     type Dependencies: Dependencies + Send;
     type Channel: Channel<Self::ChildEvents> + Send;
 

@@ -22,7 +22,7 @@ pub trait WebsocketHandle<E: From<Message>> {
 impl<T, E> WebsocketHandle<E> for T
 where
     T: Sender<E> + Send,
-    E: From<Message> + Send + Clone,
+    E: From<Message> + Send + Sync,
 {
     async fn send_websocket_msg(&mut self, msg: Message) {
         self.send(E::from(msg)).await.ok();
@@ -46,7 +46,6 @@ pub enum WebsocketChildren {
     Response(Message),
     Received(Message),
     Connection(Connection),
-    Shutdown,
 }
 
 #[derive(Clone, Debug)]
@@ -117,12 +116,9 @@ impl<E: 'static + From<Message> + Send + Sync, H: 'static + WebsocketHandle<E> +
                 WebsocketChildren::Received(msg) => {
                     this.write().await.handle.send_websocket_msg(msg).await;
                 }
-                WebsocketChildren::Shutdown => {
-                    connector_abort.abort();
-                    break;
-                }
             }
         }
+        connector_abort.abort();
         Ok(())
     }
 }
