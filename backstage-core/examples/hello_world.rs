@@ -41,12 +41,12 @@ pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> He
 }
 
 #[async_trait]
-impl Actor for HelloWorld {
+impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -67,7 +67,7 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 }
@@ -79,14 +79,18 @@ pub enum LauncherChildren {
 }
 
 #[async_trait]
-impl System for Launcher {
+impl<Rt: 'static + SystemRuntime> System<Rt> for Launcher {
     type ChildEvents = LauncherChildren;
 
     type Dependencies = ();
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(
+        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        mut rt: SystemScopedRuntime<'a, Self, Rt>,
+        deps: (),
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -126,7 +130,7 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
-    BackstageRuntime::new()
+    FullRuntime::new()
         .scope(|scope| {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };

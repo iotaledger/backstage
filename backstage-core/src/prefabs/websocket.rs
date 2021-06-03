@@ -55,14 +55,23 @@ pub struct Connection {
 }
 
 #[async_trait]
-impl<E: 'static + From<Message> + Send + Sync, H: 'static + WebsocketHandle<E> + Send + Sync> System for Websocket<E, H> {
+impl<Rt, E, H> System<Rt> for Websocket<E, H>
+where
+    Rt: 'static + BaseRuntime + SystemRuntime,
+    E: 'static + From<Message> + Send + Sync,
+    H: 'static + WebsocketHandle<E> + Send + Sync,
+{
     type ChildEvents = WebsocketChildren;
 
     type Dependencies = ();
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(
+        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        mut rt: SystemScopedRuntime<'a, Self, Rt>,
+        _deps: (),
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -128,14 +137,14 @@ struct Responder {
 }
 
 #[async_trait]
-impl Actor for Responder {
+impl<Rt: BaseRuntime> Actor<Rt> for Responder {
     type Dependencies = ();
 
     type Event = Message;
 
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(mut self, mut rt: ActorRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self, Rt>, _deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {

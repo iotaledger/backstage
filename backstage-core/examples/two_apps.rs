@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use backstage::*;
 use futures::{FutureExt, SinkExt};
 use log::{debug, info};
-use prefabs::websocket::{Websocket, WebsocketChildren};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
@@ -69,12 +68,12 @@ pub struct HelloWorld {
 }
 
 #[async_trait]
-impl Actor for HelloWorld {
+impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt>, deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -123,12 +122,16 @@ pub struct Howdy {
 }
 
 #[async_trait]
-impl Actor for Howdy {
-    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<HelloWorld>);
+impl<Rt: BaseRuntime + ResourceRuntime> Actor<Rt> for Howdy {
+    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<Rt, HelloWorld>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorRuntime<'a, Self>, (counter, mut hello_world): Self::Dependencies) -> Result<(), ActorError>
+    async fn run<'a>(
+        self,
+        mut rt: ActorScopedRuntime<'a, Self, Rt>,
+        (counter, mut hello_world): Self::Dependencies,
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -159,11 +162,11 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_>) -> anyhow::Result<()> {
+    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherChildren::Howdy(event)).await
     }
 }
@@ -183,22 +186,29 @@ impl From<Message> for LauncherChildren {
 }
 
 #[async_trait]
-impl System for Launcher {
+impl<Rt: 'static + SystemRuntime + ResourceRuntime + Into<BasicRuntime>> System<Rt> for Launcher {
     type ChildEvents = LauncherChildren;
 
     type Dependencies = ();
 
     type Channel = TokioChannel<Self::ChildEvents>;
 
-    async fn run<'a>(this: std::sync::Arc<tokio::sync::RwLock<Self>>, mut rt: SystemRuntime<'a, Self>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(
+        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        mut rt: SystemScopedRuntime<'a, Self, Rt>,
+        deps: (),
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
         let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(hello_world_builder.build(this.write().await.service.spawn("Hello World")));
+        rt.with_runtime::<BasicRuntime>()
+            .spawn_actor(hello_world_builder.build(this.write().await.service.spawn("Hello World")));
         rt.add_resource(RwLock::new(NecessaryResource { counter: 0 }));
+        // This won't work because the Howdy app requires a Rt that implements ResourceRuntime
+        // rt.with_runtime::<BasicRuntime>().spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
         rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
         rt.spawn_system(
             prefabs::websocket::WebsocketBuilder::new()
@@ -244,7 +254,7 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
-    BackstageRuntime::new()
+    FullRuntime::new()
         .scope(|scope| {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };

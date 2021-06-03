@@ -1,47 +1,47 @@
-use crate::{Act, Actor, BackstageRuntime, Channel, Res, Sys, System};
+use crate::{Act, Actor, BaseRuntime, Channel, FullRuntime, Res, ResourceRuntime, Sys, System, SystemRuntime};
 
-pub trait Dependencies {
-    fn instantiate(rt: &BackstageRuntime) -> anyhow::Result<Self>
+pub trait Dependencies<Rt> {
+    fn instantiate(rt: &Rt) -> anyhow::Result<Self>
     where
         Self: Sized;
 }
 
-impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
-    fn instantiate(rt: &BackstageRuntime) -> anyhow::Result<Self> {
+impl<Rt: SystemRuntime, S: 'static + System<Rt> + Send + Sync> Dependencies<Rt> for Sys<Rt, S> {
+    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.system()
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 }
 
-impl<A: Actor> Dependencies for Act<A>
+impl<Rt: BaseRuntime, A: Actor<Rt>> Dependencies<Rt> for Act<Rt, A>
 where
     <A::Channel as Channel<A::Event>>::Sender: 'static,
 {
-    fn instantiate(rt: &BackstageRuntime) -> anyhow::Result<Self> {
+    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.actor_event_handle()
             .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))
     }
 }
 
-impl<R: 'static + Send + Sync> Dependencies for Res<R> {
-    fn instantiate(rt: &BackstageRuntime) -> anyhow::Result<Self> {
+impl<Rt: ResourceRuntime, R: 'static + Send + Sync> Dependencies<Rt> for Res<R> {
+    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.resource()
             .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))
     }
 }
 
-impl Dependencies for () {
-    fn instantiate(_rt: &BackstageRuntime) -> anyhow::Result<Self> {
+impl<Rt> Dependencies<Rt> for () {
+    fn instantiate(_rt: &Rt) -> anyhow::Result<Self> {
         Ok(())
     }
 }
 
 macro_rules! impl_dependencies {
     ($($gen:ident),+) => {
-        impl<$($gen),+> Dependencies for ($($gen),+,)
-        where $($gen: Dependencies),+
+        impl<Rt, $($gen),+> Dependencies<Rt> for ($($gen),+,)
+        where $($gen: Dependencies<Rt>),+
         {
-            fn instantiate(rt: &BackstageRuntime) -> anyhow::Result<Self>
+            fn instantiate(rt: &Rt) -> anyhow::Result<Self>
             {
                 Ok(($($gen::instantiate(rt)?),+,))
             }
