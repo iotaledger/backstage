@@ -2,13 +2,17 @@ use crate::{actor::shutdown_stream::ShutdownStream, Actor, ActorError, ActorRequ
 use anymap::{any::CloneAny, Map};
 use async_trait::async_trait;
 use futures::{
-    future::{AbortHandle, AbortRegistration, Abortable, BoxFuture},
+    future::{AbortHandle, Abortable, BoxFuture},
     StreamExt,
 };
 use lru::LruCache;
+#[cfg(feature = "rand_pool")]
+use rand::Rng;
 use std::{
+    cell::RefCell,
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    rc::Rc,
     sync::Arc,
 };
 use tokio::{
@@ -176,12 +180,13 @@ pub trait PoolRuntime: BaseRuntime {
 
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
-    fn pool<A: Actor<Self>>(&self) -> Option<ResMut<ActorPool<'static, <A::Channel as Channel<A::Event>>::Sender>>>
+    fn pool<A>(&self) -> Option<ResMut<ActorPool<Self, A>>>
     where
-        Self: Sized,
+        Self: 'static + Sized,
+        A: 'static + Actor<Self> + Send + Sync,
     {
         self.pools()
-            .get::<Arc<RwLock<ActorPool<<A::Channel as Channel<A::Event>>::Sender>>>>()
+            .get::<Arc<RwLock<ActorPool<Self, A>>>>()
             .map(|pool| ResMut(pool.clone()))
     }
 }
@@ -345,12 +350,18 @@ impl<'a, Rt: 'static + BaseRuntime> RuntimeScope<'a, Rt> {
         abort_handle
     }
 
-    pub fn spawn_pool<H: 'static + Send + Sync, F: FnOnce(&mut ActorPool<'_, H>)>(&'static mut self, f: F)
+    pub fn spawn_pool<A: 'static + Actor<Rt>, F: FnOnce(&mut ScopedActorPool<Rt, A>)>(&mut self, f: F)
     where
         Rt: PoolRuntime,
+        <A::Channel as Channel<A::Event>>::Sender: 'static,
+        A: Send + Sync,
     {
         let mut pool = ActorPool::default();
-        f(&mut pool);
+        let mut scoped_pool = ScopedActorPool {
+            scope: self,
+            pool: &mut pool,
+        };
+        f(&mut scoped_pool);
         self.0.pools_mut().insert(Arc::new(RwLock::new(pool)));
     }
 
@@ -384,9 +395,10 @@ impl<'a, Rt: 'static + BaseRuntime> RuntimeScope<'a, Rt> {
         self.0.system()
     }
 
-    pub fn pool<A: Actor<Rt>>(&self) -> Option<ResMut<ActorPool<'static, <A::Channel as Channel<A::Event>>::Sender>>>
+    pub fn pool<A>(&self) -> Option<ResMut<ActorPool<Rt, A>>>
     where
         Rt: PoolRuntime,
+        A: 'static + Actor<Rt> + Send + Sync,
     {
         self.0.pool::<A>()
     }
@@ -598,12 +610,52 @@ impl<Rt: BaseRuntime, A: Actor<Rt>> DerefMut for Act<Rt, A> {
     }
 }
 
-pub struct ActorPool<'a, H> {
-    handles: Vec<H>,
-    lru: LruCache<usize, &'a H>,
+pub struct ScopedActorPool<'a, 'b, Rt: BaseRuntime, A: Actor<Rt>>
+where
+    <A::Channel as Channel<A::Event>>::Sender: 'static,
+{
+    scope: &'a mut RuntimeScope<'b, Rt>,
+    pool: &'a mut ActorPool<Rt, A>,
 }
 
-impl<'a, H> Default for ActorPool<'a, H> {
+impl<'a, 'b, Rt: BaseRuntime, A: Actor<Rt>> ScopedActorPool<'a, 'b, Rt, A> {
+    pub fn spawn(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    where
+        A: 'static + Send + Sync,
+        Rt: 'static,
+    {
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let child_rt = self.scope.0.child();
+        let abort_handle = self.scope.spawn_actor_with_runtime(child_rt, actor, receiver);
+        self.pool.push(sender.clone());
+        (abort_handle, sender)
+    }
+}
+
+pub struct ActorPool<Rt: BaseRuntime, A: Actor<Rt>>
+where
+    <A::Channel as Channel<A::Event>>::Sender: 'static,
+{
+    handles: Vec<Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
+    lru: LruCache<usize, Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
+}
+
+impl<Rt: BaseRuntime, A: Actor<Rt>> Clone for ActorPool<Rt, A> {
+    fn clone(&self) -> Self {
+        let handles = self.handles.iter().map(|rc| Rc::new(RefCell::new(rc.borrow().clone()))).collect();
+        let mut lru = LruCache::unbounded();
+        for (idx, lru_rc) in self.lru.iter().rev() {
+            lru.put(*idx, Rc::new(RefCell::new(lru_rc.borrow().clone())));
+        }
+        Self { handles: handles, lru }
+    }
+}
+
+unsafe impl<Rt: Send + BaseRuntime, A: Actor<Rt> + Send> Send for ActorPool<Rt, A> {}
+
+unsafe impl<Rt: Sync + BaseRuntime, A: Actor<Rt> + Sync> Sync for ActorPool<Rt, A> {}
+
+impl<'a, Rt: BaseRuntime, A: Actor<Rt>> Default for ActorPool<Rt, A> {
     fn default() -> Self {
         Self {
             handles: Default::default(),
@@ -612,25 +664,56 @@ impl<'a, H> Default for ActorPool<'a, H> {
     }
 }
 
-impl<'a, H> ActorPool<'a, H> {
-    pub fn push(&'a mut self, handle: H) {
+impl<'a, Rt: BaseRuntime, A: Actor<Rt>> ActorPool<Rt, A> {
+    fn push(&mut self, handle: <A::Channel as Channel<A::Event>>::Sender) {
         let idx = self.handles.len();
-        self.handles.push(handle);
-        self.lru.put(idx, &self.handles[idx]);
+        let handle_rc = Rc::new(RefCell::new(handle));
+        self.handles.push(handle_rc.clone());
+        self.lru.put(idx, handle_rc);
     }
 
-    pub fn get_lru(&mut self) -> Option<&H> {
+    pub fn get_lru(&mut self) -> Option<<A::Channel as Channel<A::Event>>::Sender> {
         self.lru.pop_lru().map(|(idx, handle)| {
+            let res = handle.borrow().clone();
             self.lru.put(idx, handle);
-            handle
+            res
         })
     }
-}
 
-impl<'a, H> Deref for ActorPool<'a, H> {
-    type Target = Vec<H>;
+    pub async fn send_lru(&mut self, event: A::Event) -> anyhow::Result<()> {
+        if let Some(mut handle) = self.get_lru() {
+            handle.send(event).await
+        } else {
+            anyhow::bail!("No handles in pool!");
+        }
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.handles
+    #[cfg(feature = "rand_pool")]
+    pub fn get_random(&mut self) -> Option<<A::Channel as Channel<A::Event>>::Sender> {
+        let mut rng = rand::thread_rng();
+        self.handles.get(rng.gen_range(0..self.handles.len())).map(|rc| rc.borrow().clone())
+    }
+
+    #[cfg(feature = "rand_pool")]
+    pub async fn send_random(&mut self, event: A::Event) -> anyhow::Result<()> {
+        if let Some(mut handle) = self.get_random() {
+            handle.send(event).await
+        } else {
+            anyhow::bail!("No handles in pool!");
+        }
+    }
+
+    pub fn iter(&mut self) -> std::vec::IntoIter<<A::Channel as Channel<A::Event>>::Sender> {
+        self.handles.iter().map(|rc| rc.borrow().clone()).collect::<Vec<_>>().into_iter()
+    }
+
+    pub async fn send_all(&mut self, event: A::Event) -> anyhow::Result<()>
+    where
+        A::Event: Clone,
+    {
+        for mut handle in self.iter() {
+            handle.send(event.clone()).await?;
+        }
+        Ok(())
     }
 }

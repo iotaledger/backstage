@@ -20,7 +20,6 @@ impl Into<ActorError> for HelloWorldError {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
     Print(String),
-    Shutdown,
 }
 
 #[derive(Debug)]
@@ -52,9 +51,8 @@ impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
     {
         while let Some(evt) = rt.next_event().await {
             match evt {
-                HelloWorldEvent::Shutdown => break,
                 HelloWorldEvent::Print(s) => {
-                    info!("HelloWorld printing: {}", s);
+                    info!("HelloWorld {} printing: {}", self.num, s);
                 }
             }
         }
@@ -79,7 +77,7 @@ pub enum LauncherChildren {
 }
 
 #[async_trait]
-impl<Rt: 'static + SystemRuntime> System<Rt> for Launcher {
+impl<Rt: 'static + SystemRuntime + PoolRuntime> System<Rt> for Launcher {
     type ChildEvents = LauncherChildren;
 
     type Dependencies = ();
@@ -95,22 +93,28 @@ impl<Rt: 'static + SystemRuntime> System<Rt> for Launcher {
         Self: Sized,
     {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-        let service = this.write().await.service.spawn("Hello World");
-        rt.spawn_actor(builder.build(service));
+        let service = &mut this.write().await.service;
+        rt.spawn_pool::<HelloWorld, _>(|pool| {
+            for i in 0..10 {
+                let service = service.spawn(format!("Hello World {}", i));
+                let (abort, handle) = pool.spawn(builder.clone().num(i).build(service));
+            }
+        });
         tokio::task::spawn(ctrl_c(rt.my_handle().await));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherChildren::HelloWorld(event) => {
-                    rt.send_actor_event::<HelloWorld>(event).await;
+                    info!("Received event for HelloWorld");
+                    if let Some(pool) = rt.pool::<HelloWorld>() {
+                        pool.write().await.send_all(event).await;
+                    }
                 }
                 LauncherChildren::Shutdown { using_ctrl_c } => {
                     debug!("Exiting launcher");
-                    rt.send_actor_event::<HelloWorld>(HelloWorldEvent::Shutdown).await;
                     break;
                 }
             }
         }
-
         Ok(())
     }
 }
