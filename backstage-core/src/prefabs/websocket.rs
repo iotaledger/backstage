@@ -37,9 +37,8 @@ pub struct Connection {
 }
 
 #[async_trait]
-impl<Rt, H, E> System<Rt, H, E> for Websocket<E>
+impl<H, E> System<H, E> for Websocket<E>
 where
-    Rt: 'static + SystemRuntime + Into<BasicRuntime> + Into<SystemsRuntime>,
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
     E: From<Message>,
@@ -47,10 +46,11 @@ where
     type ChildEvents = WebsocketChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
+    type Rt = SystemsRuntime;
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, Rt, H, E>,
+        mut rt: SystemScopedRuntime<'a, Self, H, E>,
         _deps: (),
     ) -> Result<Service, ActorError>
     where
@@ -63,14 +63,14 @@ where
                 .map_err(|_| ActorError::new(anyhow::anyhow!("Unable to bind to dashboard listen address").into(), service))?
         };
         let mut listener_service = this.write().await.service.spawn("Listener");
-        let connector_abort = rt.with_runtime::<SystemsRuntime>().spawn_task(|mut rt| {
+        let connector_abort = rt.spawn_task(|mut rt| {
             async move {
                 loop {
                     if let Ok((socket, peer)) = tcp_listener.accept().await {
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.with_runtime::<BasicRuntime>().spawn_actor::<_, H, E, _>(
+                            let (responder_abort, responder_handle) = rt.spawn_actor::<_, H, E, _>(
                                 Responder {
                                     service: listener_service.spawn("Responder"),
                                     sender,
@@ -130,17 +130,17 @@ struct Responder {
 }
 
 #[async_trait]
-impl<Rt, H, E> Actor<Rt, H, E> for Responder
+impl<H, E> Actor<H, E> for Responder
 where
-    Rt: BaseRuntime,
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
     type Dependencies = ();
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
+    type Rt = BasicRuntime;
 
-    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>, _deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self, H, E>, _deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {

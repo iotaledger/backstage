@@ -6,7 +6,7 @@ pub trait Dependencies<Rt: BaseRuntime> {
         Self: Sized;
 }
 
-impl<Rt: SystemRuntime, S: 'static + System<Rt, H, E> + Send + Sync, H, E> Dependencies<Rt> for Sys<Rt, S, H, E>
+impl<Rt: SystemRuntime, S: 'static + System<H, E> + Send + Sync, H, E> Dependencies<Rt> for Sys<S, H, E>
 where
     H: 'static + Sender<E> + Send + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -17,7 +17,7 @@ where
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E> + Send + Sync, H, E> Dependencies<Rt> for Act<Rt, A, H, E>
+impl<Rt: BaseRuntime, A: Actor<H, E> + Send + Sync, H, E> Dependencies<Rt> for Act<A, H, E>
 where
     H: 'static + Sender<E> + Send + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,

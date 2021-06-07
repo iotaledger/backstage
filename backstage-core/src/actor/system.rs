@@ -4,15 +4,16 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[async_trait]
-pub trait System<Rt: SystemRuntime, H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + SupervisorEvent + Send + Sync> {
+pub trait System<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + SupervisorEvent + Send + Sync> {
     type ChildEvents: 'static + Send + Sync;
-    type Dependencies: Dependencies<Rt> + Send;
+    type Dependencies: Dependencies<Self::Rt> + Send;
     type Channel: Channel<Self::ChildEvents> + Send;
+    type Rt: 'static + SystemRuntime;
 
     /// The main function for the system
     async fn run<'a>(
         this: Arc<RwLock<Self>>,
-        rt: SystemScopedRuntime<'a, Self, Rt, H, E>,
+        rt: SystemScopedRuntime<'a, Self, H, E>,
         deps: Self::Dependencies,
     ) -> Result<Service, ActorError>
     where
@@ -20,7 +21,7 @@ pub trait System<Rt: SystemRuntime, H: 'static + Sender<E> + Clone + Send + Sync
 
     async fn run_then_report<'a>(
         this: Arc<RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, Rt, H, E>,
+        mut rt: SystemScopedRuntime<'a, Self, H, E>,
         deps: Self::Dependencies,
     ) -> anyhow::Result<()>
     where

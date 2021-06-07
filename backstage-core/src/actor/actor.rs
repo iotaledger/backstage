@@ -2,17 +2,18 @@ use crate::{ActorError, ActorScopedRuntime, BaseRuntime, Channel, Dependencies, 
 use async_trait::async_trait;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor<Rt: BaseRuntime, H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + SupervisorEvent + Send + Sync> {
-    type Dependencies: Dependencies<Rt> + Send;
+pub trait Actor<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + SupervisorEvent + Send + Sync> {
+    type Dependencies: Dependencies<Self::Rt> + Send;
     type Event: 'static + Send + Sync;
     type Channel: Channel<Self::Event> + Send;
+    type Rt: 'static + BaseRuntime;
 
     /// The main function for the actor
-    async fn run<'a>(self, rt: ActorScopedRuntime<'a, Self, Rt, H, E>, deps: Self::Dependencies) -> Result<Service, ActorError>
+    async fn run<'a>(self, rt: ActorScopedRuntime<'a, Self, H, E>, deps: Self::Dependencies) -> Result<Service, ActorError>
     where
         Self: Sized;
 
-    async fn run_then_report<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>, deps: Self::Dependencies) -> anyhow::Result<()>
+    async fn run_then_report<'a>(self, mut rt: ActorScopedRuntime<'a, Self, H, E>, deps: Self::Dependencies) -> anyhow::Result<()>
     where
         Self: Sized,
     {

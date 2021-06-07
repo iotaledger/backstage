@@ -89,19 +89,18 @@ pub trait BaseRuntime: Send + Sync {
         self.senders().get::<T>().map(|handle| handle.clone())
     }
 
-    fn actor_event_handle<A: Actor<Self, H, E>, H, E>(&self) -> Option<Act<Self, A, H, E>>
+    fn actor_event_handle<A: Actor<H, E>, H, E>(&self) -> Option<Act<A, H, E>>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent + Send + Sync,
     {
-        self.senders().get::<<A::Channel as Channel<A::Event>>::Sender>().map(|handle| Act {
-            actor: handle.clone(),
-            _rt: PhantomData::<Self>,
-        })
+        self.senders()
+            .get::<<A::Channel as Channel<A::Event>>::Sender>()
+            .map(|handle| Act { actor: handle.clone() })
     }
 
-    async fn send_actor_event<A: Actor<Self, H, E>, H, E>(&mut self, event: A::Event) -> anyhow::Result<()>
+    async fn send_actor_event<A: Actor<H, E>, H, E>(&mut self, event: A::Event) -> anyhow::Result<()>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -128,7 +127,7 @@ pub trait SystemRuntime: BaseRuntime {
 
     fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
-    fn system<S: 'static + System<Self, H, E> + Send + Sync, H, E>(&self) -> Option<Sys<Self, S, H, E>>
+    fn system<S: 'static + System<H, E> + Send + Sync, H, E>(&self) -> Option<Sys<S, H, E>>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -137,7 +136,7 @@ pub trait SystemRuntime: BaseRuntime {
         self.systems().get::<Arc<RwLock<S>>>().map(|sys| Sys::new(sys.clone()))
     }
 
-    fn system_event_handle<S: System<Self, H, E>, H, E>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
+    fn system_event_handle<S: System<H, E>, H, E>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -148,7 +147,7 @@ pub trait SystemRuntime: BaseRuntime {
             .map(|handle| handle.clone())
     }
 
-    async fn send_system_event<S: System<Self, H, E>, H, E>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
+    async fn send_system_event<S: System<H, E>, H, E>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -188,16 +187,15 @@ pub trait PoolRuntime: BaseRuntime {
 
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
-    fn pool<ChildRt, A, H, E>(&self) -> Option<ResMut<ActorPool<ChildRt, A, H, E>>>
+    fn pool<A, H, E>(&self) -> Option<ResMut<ActorPool<A, H, E>>>
     where
         Self: 'static + Sized,
-        ChildRt: 'static + BaseRuntime,
-        A: 'static + Actor<ChildRt, H, E> + Send + Sync,
+        A: 'static + Actor<H, E> + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent + Send + Sync,
     {
         self.pools()
-            .get::<Arc<RwLock<ActorPool<ChildRt, A, H, E>>>>()
+            .get::<Arc<RwLock<ActorPool<A, H, E>>>>()
             .map(|pool| ResMut(pool.clone()))
     }
 }
@@ -222,16 +220,16 @@ impl<R> Deref for ResMut<R> {
     }
 }
 
-pub struct Sys<Rt: SystemRuntime, S: System<Rt, H, E>, H, E>
+pub struct Sys<S: System<H, E>, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
     system: Arc<RwLock<S>>,
-    _data: PhantomData<(Rt, H, E)>,
+    _data: PhantomData<(H, E)>,
 }
 
-impl<Rt: SystemRuntime, S: System<Rt, H, E>, H, E> Sys<Rt, S, H, E>
+impl<S: System<H, E>, H, E> Sys<S, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -244,7 +242,7 @@ where
     }
 }
 
-impl<Rt: SystemRuntime, S: System<Rt, H, E>, H, E> Deref for Sys<Rt, S, H, E>
+impl<S: System<H, E>, H, E> Deref for Sys<S, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -256,16 +254,15 @@ where
     }
 }
 
-pub struct Act<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E>
+pub struct Act<A: Actor<H, E>, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
     actor: <A::Channel as Channel<A::Event>>::Sender,
-    _rt: PhantomData<Rt>,
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E> Deref for Act<Rt, A, H, E>
+impl<A: Actor<H, E>, H, E> Deref for Act<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -277,7 +274,7 @@ where
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E> DerefMut for Act<Rt, A, H, E>
+impl<A: Actor<H, E>, H, E> DerefMut for Act<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -287,44 +284,7 @@ where
     }
 }
 
-pub struct ScopedActorPool<'a, 'b, Rt: BaseRuntime, ChildRt: BaseRuntime, A: Actor<ChildRt, H, E>, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    scope: &'a mut RuntimeScope<'b, Rt>,
-    pool: &'a mut ActorPool<ChildRt, A, H, E>,
-    supervisor_handle: Option<H>,
-    _evt: PhantomData<E>,
-}
-
-impl<'a, 'b, Rt, ChildRt, A, H, E> ScopedActorPool<'a, 'b, Rt, ChildRt, A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-    Rt: 'static + BaseRuntime + Into<ChildRt>,
-    ChildRt: 'static + BaseRuntime,
-    A: Actor<ChildRt, H, E>,
-{
-    fn child(&self) -> ChildRt {
-        self.scope.rt.child().into()
-    }
-
-    pub fn spawn(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
-    where
-        A: 'static + Send + Sync,
-    {
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        let child_rt = self.child();
-        let abort_handle = self
-            .scope
-            .spawn_actor_with_runtime(child_rt, actor, receiver, self.supervisor_handle.clone());
-        self.pool.push(sender.clone());
-        (abort_handle, sender)
-    }
-}
-
-pub struct ActorPool<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E>
+pub struct ActorPool<A: Actor<H, E>, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -333,7 +293,7 @@ where
     lru: LruCache<usize, Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E> Clone for ActorPool<Rt, A, H, E>
+impl<A: Actor<H, E>, H, E> Clone for ActorPool<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -348,21 +308,21 @@ where
     }
 }
 
-unsafe impl<Rt: Send + BaseRuntime, A: Actor<Rt, H, E> + Send, H, E> Send for ActorPool<Rt, A, H, E>
+unsafe impl<A: Actor<H, E> + Send, H, E> Send for ActorPool<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
 }
 
-unsafe impl<Rt: Sync + BaseRuntime, A: Actor<Rt, H, E> + Sync, H, E> Sync for ActorPool<Rt, A, H, E>
+unsafe impl<A: Actor<H, E> + Sync, H, E> Sync for ActorPool<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E> Default for ActorPool<Rt, A, H, E>
+impl<A: Actor<H, E>, H, E> Default for ActorPool<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
@@ -375,7 +335,7 @@ where
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt, H, E>, H, E> ActorPool<Rt, A, H, E>
+impl<A: Actor<H, E>, H, E> ActorPool<A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,

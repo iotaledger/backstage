@@ -40,17 +40,17 @@ pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> He
 }
 
 #[async_trait]
-impl<Rt, H, E> Actor<Rt, H, E> for HelloWorld
+impl<H, E> Actor<H, E> for HelloWorld
 where
-    Rt: BaseRuntime,
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
+    type Rt = BasicRuntime;
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>, deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, H, E>, deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -95,18 +95,15 @@ impl SupervisorEvent for LauncherChildren {
 }
 
 #[async_trait]
-impl<Rt> System<Rt, (), ()> for Launcher
-where
-    Rt: 'static + SystemRuntime + PoolRuntime,
-    Rt: Into<BasicRuntime>,
-{
+impl System<(), ()> for Launcher {
     type ChildEvents = LauncherChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
+    type Rt = FullRuntime;
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, Rt, (), ()>,
+        mut rt: SystemScopedRuntime<'a, Self, (), ()>,
         deps: (),
     ) -> Result<Service, ActorError>
     where
@@ -116,7 +113,7 @@ where
         {
             let service = &mut this.write().await.service;
             let my_handle = rt.my_handle();
-            rt.with_runtime::<BasicRuntime>().spawn_pool(my_handle, |pool| {
+            rt.spawn_pool(my_handle, |pool| {
                 for i in 0..10 {
                     let service = service.spawn(format!("Hello World {}", i));
                     let (abort, handle) = pool.spawn(builder.clone().num(i).build(service));
@@ -128,7 +125,7 @@ where
             match evt {
                 LauncherChildren::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool::<HelloWorld, BasicRuntime>() {
+                    if let Some(pool) = rt.children().pool::<HelloWorld>() {
                         pool.write().await.send_all(event).await;
                     }
                 }
