@@ -1,21 +1,26 @@
-use crate::{Act, Actor, BaseRuntime, Channel, FullRuntime, Res, ResourceRuntime, Sys, System, SystemRuntime};
+use crate::{Act, Actor, BaseRuntime, Channel, Res, ResourceRuntime, Sender, SupervisorEvent, Sys, System, SystemRuntime};
 
-pub trait Dependencies<Rt> {
+pub trait Dependencies<Rt: BaseRuntime> {
     fn instantiate(rt: &Rt) -> anyhow::Result<Self>
     where
         Self: Sized;
 }
 
-impl<Rt: SystemRuntime, S: 'static + System<Rt> + Send + Sync> Dependencies<Rt> for Sys<Rt, S> {
+impl<Rt: SystemRuntime, S: 'static + System<Rt, H, E> + Send + Sync, H, E> Dependencies<Rt> for Sys<Rt, S, H, E>
+where
+    H: 'static + Sender<E> + Send + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
+{
     fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.system()
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor<Rt>> Dependencies<Rt> for Act<Rt, A>
+impl<Rt: BaseRuntime, A: Actor<Rt, H, E> + Send + Sync, H, E> Dependencies<Rt> for Act<Rt, A, H, E>
 where
-    <A::Channel as Channel<A::Event>>::Sender: 'static,
+    H: 'static + Sender<E> + Send + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
 {
     fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.actor_event_handle()
@@ -30,7 +35,7 @@ impl<Rt: ResourceRuntime, R: 'static + Send + Sync> Dependencies<Rt> for Res<R> 
     }
 }
 
-impl<Rt> Dependencies<Rt> for () {
+impl<Rt: BaseRuntime> Dependencies<Rt> for () {
     fn instantiate(_rt: &Rt) -> anyhow::Result<Self> {
         Ok(())
     }
@@ -38,7 +43,7 @@ impl<Rt> Dependencies<Rt> for () {
 
 macro_rules! impl_dependencies {
     ($($gen:ident),+) => {
-        impl<Rt, $($gen),+> Dependencies<Rt> for ($($gen),+,)
+        impl<Rt: BaseRuntime, $($gen),+> Dependencies<Rt> for ($($gen),+,)
         where $($gen: Dependencies<Rt>),+
         {
             fn instantiate(rt: &Rt) -> anyhow::Result<Self>

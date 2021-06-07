@@ -1,7 +1,7 @@
 use super::*;
 
 pub struct FullRuntime {
-    pub(crate) join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
+    pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
     pub(crate) resources: Map<dyn CloneAny + Send + Sync>,
     pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
@@ -30,6 +30,27 @@ impl Default for FullRuntime {
 
 #[async_trait]
 impl BaseRuntime for FullRuntime {
+    fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
+        &self.join_handles
+    }
+
+    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>> {
+        &mut self.join_handles
+    }
+    fn shutdown_handles(&self) -> &Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
+        &self.shutdown_handles
+    }
+
+    fn shutdown_handles_mut(&mut self) -> &mut Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
+        &mut self.shutdown_handles
+    }
+    fn senders(&self) -> &Map<dyn CloneAny + Send + Sync> {
+        &self.senders
+    }
+
+    fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
+        &mut self.senders
+    }
     fn child(&self) -> Self {
         Self {
             resources: self.resources.clone(),
@@ -38,27 +59,6 @@ impl BaseRuntime for FullRuntime {
             pools: self.pools.clone(),
             ..Default::default()
         }
-    }
-
-    fn join_handles(&self) -> &Vec<JoinHandle<Result<(), ActorError>>> {
-        &self.join_handles
-    }
-    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<Result<(), ActorError>>> {
-        &mut self.join_handles
-    }
-
-    fn shutdown_handles(&self) -> &Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
-        &self.shutdown_handles
-    }
-    fn shutdown_handles_mut(&mut self) -> &mut Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
-        &mut self.shutdown_handles
-    }
-
-    fn senders(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.senders
-    }
-    fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.senders
     }
 }
 

@@ -1,10 +1,23 @@
+use crate::Service;
 use anyhow::anyhow;
 use std::time::Duration;
 use thiserror::Error;
 
+#[derive(Debug)]
+pub struct ActorError {
+    pub kind: ActorErrorKind,
+    pub service: Service,
+}
+
+impl ActorError {
+    pub fn new(kind: ActorErrorKind, service: Service) -> Self {
+        Self { kind, service }
+    }
+}
+
 /// Potential actor errors
 #[derive(Error, Debug)]
-pub enum ActorError {
+pub enum ActorErrorKind {
     /// Indicates that the data provided to the actor was bad
     #[error("Invalid data was given to the actor: {0}!")]
     InvalidData(String),
@@ -21,38 +34,38 @@ pub enum ActorError {
     },
 }
 
-impl ActorError {
+impl ActorErrorKind {
     /// Get the request from the error
     pub fn request(&self) -> &ActorRequest {
         match self {
-            ActorError::InvalidData(_) => &ActorRequest::Panic,
-            ActorError::RuntimeError(r) => r,
-            ActorError::Other { source: _, request: r } => r,
+            ActorErrorKind::InvalidData(_) => &ActorRequest::Panic,
+            ActorErrorKind::RuntimeError(r) => r,
+            ActorErrorKind::Other { source: _, request: r } => r,
         }
     }
 }
 
-impl From<std::borrow::Cow<'static, str>> for ActorError {
+impl From<std::borrow::Cow<'static, str>> for ActorErrorKind {
     fn from(cow: std::borrow::Cow<'static, str>) -> Self {
-        ActorError::Other {
+        ActorErrorKind::Other {
             source: anyhow!(cow),
             request: ActorRequest::Panic,
         }
     }
 }
 
-impl From<()> for ActorError {
+impl From<()> for ActorErrorKind {
     fn from(_: ()) -> Self {
-        ActorError::Other {
+        ActorErrorKind::Other {
             source: anyhow!("Error!"),
             request: ActorRequest::Finish,
         }
     }
 }
 
-impl From<anyhow::Error> for ActorError {
+impl From<anyhow::Error> for ActorErrorKind {
     fn from(e: anyhow::Error) -> Self {
-        ActorError::Other {
+        ActorErrorKind::Other {
             source: e,
             request: ActorRequest::Panic,
         }

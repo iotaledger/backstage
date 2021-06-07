@@ -11,9 +11,9 @@ pub enum HelloWorldError {
     SomeError,
 }
 
-impl Into<ActorError> for HelloWorldError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
+impl Into<ActorErrorKind> for HelloWorldError {
+    fn into(self) -> ActorErrorKind {
+        ActorErrorKind::RuntimeError(ActorRequest::Finish)
     }
 }
 
@@ -40,12 +40,17 @@ pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> He
 }
 
 #[async_trait]
-impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
+impl<Rt, H, E> Actor<Rt, H, E> for HelloWorld
+where
+    Rt: BaseRuntime,
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
+{
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>, deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -53,10 +58,11 @@ impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
             match evt {
                 HelloWorldEvent::Print(s) => {
                     info!("HelloWorld {} printing: {}", self.num, s);
+                    break;
                 }
             }
         }
-        Ok(())
+        Ok(self.service)
     }
 }
 
@@ -66,46 +72,63 @@ struct Launcher {
 
 impl Launcher {
     pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
+        rt.send_system_event::<Self, (), ()>(LauncherChildren::HelloWorld(event)).await
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum LauncherChildren {
     HelloWorld(HelloWorldEvent),
+    Status(Service),
+    Report(Result<Service, ActorError>),
     Shutdown { using_ctrl_c: bool },
 }
 
+impl SupervisorEvent for LauncherChildren {
+    fn report(res: Result<Service, ActorError>) -> Self {
+        Self::Report(res)
+    }
+
+    fn status(service: Service) -> Self {
+        Self::Status(service)
+    }
+}
+
 #[async_trait]
-impl<Rt: 'static + SystemRuntime + PoolRuntime> System<Rt> for Launcher {
+impl<Rt> System<Rt, (), ()> for Launcher
+where
+    Rt: 'static + SystemRuntime + PoolRuntime,
+    Rt: Into<BasicRuntime>,
+{
     type ChildEvents = LauncherChildren;
-
     type Dependencies = ();
-
     type Channel = TokioChannel<Self::ChildEvents>;
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, Rt>,
+        mut rt: SystemScopedRuntime<'a, Self, Rt, (), ()>,
         deps: (),
-    ) -> Result<(), ActorError>
+    ) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-        let service = &mut this.write().await.service;
-        rt.spawn_pool::<HelloWorld, _>(|pool| {
-            for i in 0..10 {
-                let service = service.spawn(format!("Hello World {}", i));
-                let (abort, handle) = pool.spawn(builder.clone().num(i).build(service));
-            }
-        });
-        tokio::task::spawn(ctrl_c(rt.my_handle().await));
+        {
+            let service = &mut this.write().await.service;
+            let my_handle = rt.my_handle();
+            rt.with_runtime::<BasicRuntime>().spawn_pool(my_handle, |pool| {
+                for i in 0..10 {
+                    let service = service.spawn(format!("Hello World {}", i));
+                    let (abort, handle) = pool.spawn(builder.clone().num(i).build(service));
+                }
+            });
+        }
+        tokio::task::spawn(ctrl_c(rt.my_handle()));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherChildren::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool::<HelloWorld>() {
+                    if let Some(pool) = rt.pool::<HelloWorld, BasicRuntime>() {
                         pool.write().await.send_all(event).await;
                     }
                 }
@@ -113,9 +136,22 @@ impl<Rt: 'static + SystemRuntime + PoolRuntime> System<Rt> for Launcher {
                     debug!("Exiting launcher");
                     break;
                 }
+                LauncherChildren::Report(res) => match res {
+                    Ok(s) => {
+                        info!("{} has shutdown!", s.name);
+                        this.write().await.service.update_microservice(s);
+                    }
+                    Err(e) => {
+                        info!("{} has shutdown unexpectedly!", e.service.name);
+                        this.write().await.service.update_microservice(e.service);
+                    }
+                },
+                LauncherChildren::Status(s) => {
+                    this.write().await.service.update_microservice(s);
+                }
             }
         }
-        Ok(())
+        Ok(this.read().await.service.clone())
     }
 }
 
@@ -138,10 +174,10 @@ async fn startup() -> anyhow::Result<()> {
         .scope(|scope| {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };
-            scope.spawn_system(launcher);
+            scope.spawn_system(launcher, None);
             scope.spawn_task(|mut rt| {
                 async move {
-                    rt.system::<Launcher>()
+                    rt.system::<Launcher, _, _>()
                         .unwrap()
                         .read()
                         .await

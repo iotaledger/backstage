@@ -27,9 +27,9 @@ pub enum HelloWorldError {
 // it should be convertable to an `ActorError` with an
 // associated `ActorRequest` specifying how the supervisor
 // should handle the error.
-impl Into<ActorError> for HelloWorldError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
+impl Into<ActorErrorKind> for HelloWorldError {
+    fn into(self) -> ActorErrorKind {
+        ActorErrorKind::RuntimeError(ActorRequest::Finish)
     }
 }
 
@@ -68,12 +68,17 @@ pub struct HelloWorld {
 }
 
 #[async_trait]
-impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
+impl<Rt, H, E> Actor<Rt, H, E> for HelloWorld
+where
+    Rt: BaseRuntime,
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
+{
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt>, deps: ()) -> Result<(), ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>, deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -84,7 +89,7 @@ impl<Rt: BaseRuntime> Actor<Rt> for HelloWorld {
                 }
             }
         }
-        Ok(())
+        Ok(self.service)
     }
 }
 
@@ -104,9 +109,9 @@ pub enum HowdyError {
     SomeError,
 }
 
-impl Into<ActorError> for HowdyError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
+impl Into<ActorErrorKind> for HowdyError {
+    fn into(self) -> ActorErrorKind {
+        ActorErrorKind::RuntimeError(ActorRequest::Finish)
     }
 }
 
@@ -122,16 +127,21 @@ pub struct Howdy {
 }
 
 #[async_trait]
-impl<Rt: BaseRuntime + ResourceRuntime> Actor<Rt> for Howdy {
-    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<Rt, HelloWorld>);
+impl<Rt, H, E> Actor<Rt, H, E> for Howdy
+where
+    Rt: BaseRuntime + ResourceRuntime,
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
+{
+    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<Rt, HelloWorld, H, E>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
     async fn run<'a>(
         self,
-        mut rt: ActorScopedRuntime<'a, Self, Rt>,
+        mut rt: ActorScopedRuntime<'a, Self, Rt, H, E>,
         (counter, mut hello_world): Self::Dependencies,
-    ) -> Result<(), ActorError>
+    ) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -149,7 +159,7 @@ impl<Rt: BaseRuntime + ResourceRuntime> Actor<Rt> for Howdy {
             debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        Ok(())
+        Ok(self.service)
     }
 }
 
@@ -162,21 +172,41 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
+    pub async fn send_to_hello_world<H, E>(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()>
+    where
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent + Send + Sync,
+    {
+        rt.send_system_event::<Self, H, E>(LauncherChildren::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherChildren::Howdy(event)).await
+    pub async fn send_to_howdy<H, E>(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()>
+    where
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent + Send + Sync,
+    {
+        rt.send_system_event::<Self, H, E>(LauncherChildren::Howdy(event)).await
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum LauncherChildren {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
     WebsocketMsg(Message),
+    Status(Service),
+    Report(Result<Service, ActorError>),
     Shutdown { using_ctrl_c: bool },
+}
+
+impl SupervisorEvent for LauncherChildren {
+    fn report(res: Result<Service, ActorError>) -> Self {
+        Self::Report(res)
+    }
+
+    fn status(service: Service) -> Self {
+        Self::Status(service)
+    }
 }
 
 impl From<Message> for LauncherChildren {
@@ -186,7 +216,12 @@ impl From<Message> for LauncherChildren {
 }
 
 #[async_trait]
-impl<Rt: 'static + SystemRuntime + ResourceRuntime + Into<BasicRuntime>> System<Rt> for Launcher {
+impl<Rt, H, E> System<Rt, H, E> for Launcher
+where
+    Rt: 'static + SystemRuntime + ResourceRuntime + Into<BasicRuntime> + Into<SystemsRuntime> + Into<FullRuntime>,
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent + Send + Sync,
+{
     type ChildEvents = LauncherChildren;
 
     type Dependencies = ();
@@ -195,26 +230,29 @@ impl<Rt: 'static + SystemRuntime + ResourceRuntime + Into<BasicRuntime>> System<
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, Rt>,
+        mut rt: SystemScopedRuntime<'a, Self, Rt, H, E>,
         deps: (),
-    ) -> Result<(), ActorError>
+    ) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
-        let my_handle = rt.my_handle().await;
+        let my_handle = rt.my_handle();
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.with_runtime::<BasicRuntime>()
-            .spawn_actor(hello_world_builder.build(this.write().await.service.spawn("Hello World")));
+        rt.with_runtime::<BasicRuntime>().spawn_actor(
+            hello_world_builder.build(this.write().await.service.spawn("Hello World")),
+            my_handle.clone(),
+        );
         rt.add_resource(RwLock::new(NecessaryResource { counter: 0 }));
         // This won't work because the Howdy app requires a Rt that implements ResourceRuntime
         // rt.with_runtime::<BasicRuntime>().spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
-        rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")));
-        rt.spawn_system(
+        rt.with_runtime::<FullRuntime>()
+            .spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")), my_handle.clone());
+        rt.with_runtime::<SystemsRuntime>().spawn_system(
             prefabs::websocket::WebsocketBuilder::new()
                 .listen_address(([127, 0, 0, 1], 8000).into())
-                .handle(my_handle.clone())
                 .build(this.write().await.service.spawn("Websocket")),
+            my_handle.clone(),
         );
         tokio::task::spawn(ctrl_c(my_handle));
         while let Some(evt) = rt.next_event().await {
@@ -232,10 +270,23 @@ impl<Rt: 'static + SystemRuntime + ResourceRuntime + Into<BasicRuntime>> System<
                 LauncherChildren::WebsocketMsg(msg) => {
                     info!("Received websocket message: {:?}", msg);
                 }
+                LauncherChildren::Report(res) => match res {
+                    Ok(s) => {
+                        info!("{} has shutdown!", s.name);
+                        this.write().await.service.update_microservice(s);
+                    }
+                    Err(e) => {
+                        info!("{} has shutdown unexpectedly!", e.service.name);
+                        this.write().await.service.update_microservice(e.service);
+                    }
+                },
+                LauncherChildren::Status(s) => {
+                    this.write().await.service.update_microservice(s);
+                }
             }
         }
 
-        Ok(())
+        Ok(this.read().await.service.clone())
     }
 }
 
@@ -258,11 +309,11 @@ async fn startup() -> anyhow::Result<()> {
         .scope(|scope| {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };
-            scope.spawn_system(launcher);
+            scope.spawn_system_without_supervisor(launcher);
             scope.spawn_task(|mut rt| {
                 async move {
                     for _ in 0..3 {
-                        rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("echo".to_owned())))
+                        rt.send_system_event::<Launcher, (), ()>(LauncherChildren::Howdy(HowdyEvent::Print("echo".to_owned())))
                             .await
                             .unwrap();
                     }

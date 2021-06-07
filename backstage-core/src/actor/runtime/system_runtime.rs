@@ -1,6 +1,6 @@
 use super::*;
 pub struct SystemsRuntime {
-    pub(crate) join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
+    pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
     pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
     pub(crate) systems: Map<dyn CloneAny + Send + Sync>,
@@ -25,19 +25,11 @@ impl Default for SystemsRuntime {
 
 #[async_trait]
 impl BaseRuntime for SystemsRuntime {
-    fn child(&self) -> Self {
-        Self {
-            senders: self.senders.clone(),
-            systems: self.systems.clone(),
-            ..Default::default()
-        }
-    }
-
-    fn join_handles(&self) -> &Vec<JoinHandle<Result<(), ActorError>>> {
+    fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
         &self.join_handles
     }
 
-    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<Result<(), ActorError>>> {
+    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>> {
         &mut self.join_handles
     }
 
@@ -55,6 +47,14 @@ impl BaseRuntime for SystemsRuntime {
 
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
         &mut self.senders
+    }
+
+    fn child(&self) -> Self {
+        Self {
+            senders: self.senders.clone(),
+            systems: self.systems.clone(),
+            ..Default::default()
+        }
     }
 }
 
@@ -86,6 +86,7 @@ impl From<FullRuntime> for SystemsRuntime {
             shutdown_handles: frt.shutdown_handles,
             senders: frt.senders,
             systems: frt.systems,
+            ..Default::default()
         }
     }
 }

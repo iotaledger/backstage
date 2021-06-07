@@ -1,6 +1,6 @@
 use super::*;
 pub struct BasicRuntime {
-    pub(crate) join_handles: Vec<JoinHandle<Result<(), ActorError>>>,
+    pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
     pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
 }
@@ -23,18 +23,11 @@ impl Default for BasicRuntime {
 
 #[async_trait]
 impl BaseRuntime for BasicRuntime {
-    fn child(&self) -> Self {
-        Self {
-            senders: self.senders.clone(),
-            ..Default::default()
-        }
-    }
-
-    fn join_handles(&self) -> &Vec<JoinHandle<Result<(), ActorError>>> {
+    fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
         &self.join_handles
     }
 
-    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<Result<(), ActorError>>> {
+    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>> {
         &mut self.join_handles
     }
 
@@ -53,6 +46,13 @@ impl BaseRuntime for BasicRuntime {
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
         &mut self.senders
     }
+
+    fn child(&self) -> Self {
+        Self {
+            senders: self.senders.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 impl From<FullRuntime> for BasicRuntime {
@@ -61,16 +61,18 @@ impl From<FullRuntime> for BasicRuntime {
             join_handles: frt.join_handles,
             shutdown_handles: frt.shutdown_handles,
             senders: frt.senders,
+            ..Default::default()
         }
     }
 }
 
 impl From<SystemsRuntime> for BasicRuntime {
-    fn from(frt: SystemsRuntime) -> Self {
+    fn from(srt: SystemsRuntime) -> Self {
         Self {
-            join_handles: frt.join_handles,
-            shutdown_handles: frt.shutdown_handles,
-            senders: frt.senders,
+            join_handles: srt.join_handles,
+            shutdown_handles: srt.shutdown_handles,
+            senders: srt.senders,
+            ..Default::default()
         }
     }
 }
