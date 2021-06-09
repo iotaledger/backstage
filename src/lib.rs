@@ -1,5 +1,6 @@
+//! Actor framework
 #![warn(missing_docs)]
-pub mod actor;
-
-pub use actor::*;
-pub use async_recursion;
+/// Provides the types for core functionality;
+pub mod core;
+/// Backstage default Runtime implementation
+pub mod runtime;
