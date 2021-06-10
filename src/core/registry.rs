@@ -37,6 +37,14 @@ impl ActorHandle for GlobalRegistryHandle {
 pub struct GlobalRegistry {
     handles: anymap::Map<dyn anymap::any::CloneAny + Send + Sync>,
 }
+impl GlobalRegistry {
+    /// Create new GlobalRegistry actor's struct
+    pub fn new() -> Self {
+        Self {
+            handles: anymap::Map::new(),
+        }
+    }
+}
 /// Anymap key used to store more than one V for the same K type
 #[derive(Clone)]
 pub struct Mapped<K> {
@@ -181,10 +189,13 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Remove<T> {
 impl<C> Actor<C> for GlobalRegistry
 where
     C: Essential<Actor = Self>,
+    C::Supervisor: ActorHandle,
 {
     async fn run(mut self, context: &mut C) -> ActorResult {
         // drop handle to trigger graceful shutdown when all the handles are dropped;
         context.handle().take();
+        context.service().update_status(ServiceStatus::Running);
+        context.propagate_service();
         while let Some(event) = context.inbox().0.recv().await {
             match event {
                 GlobalRegistryEvent::Boxed(registry_event) => {

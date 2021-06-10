@@ -10,6 +10,8 @@ pub enum Reason {
     Aborted,
     /// The actor got aborted becasue it reached its timeout limit
     Timeout,
+    /// The actor is asking for restart with clean state with optional Duration
+    Restart(Option<std::time::Duration>),
 }
 
 #[async_trait::async_trait]
@@ -74,6 +76,25 @@ impl ActorHandle for BoxedActorHandle {
         self.0.send(event)
     }
 }
+
+#[derive(Clone)]
+pub struct NullSupervisor;
+impl ActorHandle for NullSupervisor {
+    fn service(&self, _service: &Service) {
+        // do nothing
+    }
+    fn shutdown(self: Box<Self>) {
+        // do nothing
+    }
+    fn aknshutdown(&self, service: Service, r: ActorResult) {
+        // do nothing
+    }
+    fn send(&self, event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
+        // do nothing
+        Ok(())
+    }
+}
+
 /// Runtime Essential trait
 #[async_trait::async_trait]
 pub trait Essential: Send + Sized {
@@ -91,6 +112,20 @@ pub trait Essential: Send + Sized {
     fn handle(&mut self) -> &mut Option<<Self::Actor as Channel>::Handle>;
     /// Get the actor's inbox from the actor context
     fn inbox(&mut self) -> &mut <Self::Actor as Channel>::Inbox;
+    /// Wrapper around the runtime spawn
+    fn spawn_task<F: 'static + Send + futures::Future<Output = ()>>(task: F) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(task)
+    }
+    /// Push service to supervisor
+    fn propagate_service(&mut self);
+    /// Handle microservice status change
+    fn status_change(&mut self, service: Service);
+    /// init shutdown signal to all the children and transfer the service status to is_stopping
+    fn shutdown(&mut self);
+    /// Check if we requested microservice to shutdown
+    fn requested_to_shutdown(&self, name: &str) -> bool;
+    /// Shutdown microservice
+    fn shutdown_microservice(&mut self, name: &str, abort: bool);
 }
 /// Runtime Spawn trait
 pub trait Spawn<A: Channel, S>: Essential {
@@ -115,8 +150,11 @@ pub struct Service {
 
 impl Service {
     /// Create a new Service
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
     }
     /// Set the service status
     pub fn set_status(mut self, service_status: ServiceStatus) -> Self {
@@ -126,11 +164,6 @@ impl Service {
     /// Update the service status
     pub fn update_status(&mut self, service_status: ServiceStatus) {
         self.status = service_status;
-    }
-    /// Set the service (application) name
-    pub fn set_name(mut self, name: String) -> Self {
-        self.name = name;
-        self
     }
     /// Update the service (application) name
     pub fn update_name(&mut self, name: String) {
@@ -148,6 +181,10 @@ impl Service {
     /// Insert a new microservice
     pub fn update_microservice(&mut self, service_name: String, microservice: Self) {
         self.microservices.insert(service_name, microservice);
+    }
+    /// Get microservices
+    pub fn microservices(&mut self) -> &mut std::collections::HashMap<String, Service> {
+        &mut self.microservices
     }
     /// Update the status of a microservice
     pub fn update_microservice_status(&mut self, service_name: &str, status: ServiceStatus) {
@@ -233,7 +270,7 @@ pub trait Registry: Essential {
     async fn lookup<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<Option<T>, anyhow::Error>;
     /// Remove T registered by name
     async fn remove<T: 'static + Sync + Send + Clone>(&mut self, name: String);
-    /// Return all registered actor handles for a given type
+    /// Return all registered values for a given type T
     async fn lookup_all<T: 'static + Sync + Send + Clone>(&mut self)
         -> Result<Option<std::collections::HashMap<String, T>>, anyhow::Error>;
 }
@@ -244,4 +281,4 @@ pub mod registry;
 /// Provides builder macro
 pub mod builder;
 
-pub use registry::GlobalRegistryEvent;
+pub use registry::{GlobalRegistry, GlobalRegistryEvent};
