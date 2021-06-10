@@ -67,20 +67,9 @@ pub trait DynLauncherEvent: Send {
 #[async_trait::async_trait]
 impl Actor<BackstageContext> for Launcher {
     async fn run(mut self, context: &mut BackstageContext) -> ActorResult {
-        // Initialize registery
-        let registry = crate::core::GlobalRegistry::new();
-        // spawn registry as child
-        let supervisor_handle = context.handle().clone().expect("Launcher Handle");
-        let registry_handle = context.spawn(registry, supervisor_handle, Service::new("Registry")).map_err(|e| {
-            log::error!("Unable to spawn registry, Error: {}", e);
-            crate::core::Reason::Exit
-        })?;
-        // store the registry handle
-        context.registry.replace(registry_handle);
-        log::info!("{} spawned registry", context.service().name());
         // spawn ctrl_c as child
-        let supervisor_handle = context.handle().clone().expect("Launcher Handle");
-        BackstageContext::spawn_task(ctrl_c(supervisor_handle));
+        // let supervisor_handle = context.handle().clone().expect("Launcher Handle");
+        // BackstageContext::spawn_task(ctrl_c(supervisor_handle));
         while let Some(event) = context.inbox().0.recv().await {
             match event {
                 LauncherEvent::Boxed(launcher_event) => {
@@ -271,13 +260,4 @@ where
             false
         }
     }
-}
-/// Useful function to exit program using ctrl_c signal
-async fn ctrl_c(mut handle: LauncherHandle) {
-    // await on ctrl_c
-    if let Ok(_) = tokio::signal::ctrl_c().await {
-        // exit program using launcher
-        let exit_program_event = LauncherEvent::Shutdown;
-        let _ = handle.0.send(exit_program_event);
-    };
 }

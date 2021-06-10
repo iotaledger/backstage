@@ -226,6 +226,10 @@ impl Service {
     pub fn service_status(&self) -> &ServiceStatus {
         &self.status
     }
+    /// Check if service contains key
+    pub fn contains_microservice(&self, name: &str) -> bool {
+        self.microservices.contains_key(name)
+    }
 }
 
 impl Default for Service {
@@ -264,6 +268,8 @@ pub enum ServiceStatus {
 #[async_trait::async_trait]
 /// Runtime trait which provides registry functionality
 pub trait Registry: Essential {
+    /// Requesting precise dependency T from registry
+    async fn depends_on<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error>;
     /// Register T value in registry to be accessible within all scopes
     async fn register<T: 'static + Sync + Send + Clone>(&mut self, name: String, handle: T) -> Result<(), anyhow::Error>;
     /// Clone T registered by name

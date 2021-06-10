@@ -31,3 +31,11 @@ log = "0.4"
 [[example]]
 name = "no_children"
 path = "examples/no_children.rs"
+
+[[example]]
+name = "one_child"
+path = "examples/one_child.rs"
+
+[[example]]
+name = "two_child"
+path = "examples/two_child.rs"

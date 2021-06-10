@@ -18,8 +18,7 @@ impl Channel for GlobalRegistry {
 
 impl ActorHandle for GlobalRegistryHandle {
     fn shutdown(self: Box<Self>) {
-        // do nothing, the registry supposed to shutdown once all its handles are dropped
-        // which means once all actors drop
+        self.0.send(GlobalRegistryEvent::Shutdown).ok();
     }
     fn aknshutdown(&self, _service: Service, _r: ActorResult) {
         // do nothing
@@ -35,13 +34,15 @@ impl ActorHandle for GlobalRegistryHandle {
 }
 /// GlobalRegistry actor state
 pub struct GlobalRegistry {
-    handles: anymap::Map<dyn anymap::any::CloneAny + Send + Sync>,
+    store: anymap::Map<dyn anymap::any::CloneAny + Send + Sync>,
+    pendings: anymap::Map<dyn anymap::any::Any + Send + Sync>,
 }
 impl GlobalRegistry {
     /// Create new GlobalRegistry actor's struct
     pub fn new() -> Self {
         Self {
-            handles: anymap::Map::new(),
+            store: anymap::Map::new(),
+            pendings: anymap::Map::new(),
         }
     }
 }
@@ -50,10 +51,16 @@ impl GlobalRegistry {
 pub struct Mapped<K> {
     values: std::collections::HashMap<String, K>,
 }
+/// Hold the interested parties with a given T
+pub struct Pending<T> {
+    // clients interested in precise T for Name String
+    precise: std::collections::HashMap<String, Vec<tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>>>,
+}
 /// GlobalRegistry event type to be used by consumers to access the registry functionality
 pub enum GlobalRegistryEvent {
     /// Register actor handle
     Boxed(Box<dyn RegistryEvent>),
+    Shutdown,
 }
 /// The event type of registry
 pub trait RegistryEvent: Send {
@@ -63,37 +70,41 @@ pub trait RegistryEvent: Send {
 /// Register T event
 pub struct Register<T: Clone> {
     name: String,
-    handle: T,
+    t: T,
     response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
 }
 
 impl<T: Clone> Register<T> {
     /// Create new Register T struct
-    pub fn new(name: String, handle: T, response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>) -> Self {
-        Self {
-            name,
-            handle,
-            response_handle,
-        }
+    pub fn new(name: String, t: T, response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>) -> Self {
+        Self { name, t, response_handle }
     }
 }
 
 impl<T: 'static + Sync + Send + Clone> RegistryEvent for Register<T> {
     fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
-        if let Some(hash_map) = registry.handles.get_mut::<Mapped<T>>() {
+        // check if there is any pendings for this T type;
+        if let Some(pendings) = registry.pendings.get_mut::<Pending<T>>() {
+            if let Some(response_handles) = pendings.precise.remove(&self.name) {
+                for h in response_handles {
+                    h.send(Ok(self.t.clone())).ok();
+                }
+            }
+        };
+        if let Some(hash_map) = registry.store.get_mut::<Mapped<T>>() {
             if hash_map.values.contains_key(&self.name) {
                 self.response_handle
                     .send(Err(anyhow::Error::msg("duplicated name for same value")))
                     .ok();
             } else {
-                hash_map.values.insert(self.name, self.handle);
+                hash_map.values.insert(self.name, self.t);
                 self.response_handle.send(Ok(())).ok();
             }
         } else {
             let mut values = HashMap::new();
-            values.insert(self.name, self.handle);
+            values.insert(self.name, self.t);
             let mapped = Mapped { values };
-            registry.handles.insert::<Mapped<T>>(mapped);
+            registry.store.insert::<Mapped<T>>(mapped);
             self.response_handle.send(Ok(())).ok();
         };
     }
@@ -102,24 +113,19 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Register<T> {
 /// Lookup T event by name
 pub struct Lookup<T> {
     name: String,
-    _marker: std::marker::PhantomData<T>,
     response_handle: tokio::sync::oneshot::Sender<Option<T>>,
 }
 
 impl<T> Lookup<T> {
     /// Create new lookup T struct
     pub fn new(name: String, response_handle: tokio::sync::oneshot::Sender<Option<T>>) -> Self {
-        Self {
-            name,
-            _marker: std::marker::PhantomData::<T>,
-            response_handle,
-        }
+        Self { name, response_handle }
     }
 }
 
 impl<T: 'static + Sync + Send + Clone> RegistryEvent for Lookup<T> {
     fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
-        if let Some(hash_map) = registry.handles.get::<Mapped<T>>() {
+        if let Some(hash_map) = registry.store.get::<Mapped<T>>() {
             if let Some(requested_t) = hash_map.values.get(&self.name) {
                 self.response_handle.send(Some(requested_t.clone())).ok();
                 return ();
@@ -130,25 +136,21 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Lookup<T> {
     }
 }
 
-/// LookupAll T event by name
+/// LookupAll T event
 pub struct LookupAll<T> {
-    _marker: std::marker::PhantomData<T>,
     response_handle: tokio::sync::oneshot::Sender<Option<HashMap<String, T>>>,
 }
 
 impl<T> LookupAll<T> {
     /// Create new lookupall T struct
     pub fn new(response_handle: tokio::sync::oneshot::Sender<Option<HashMap<String, T>>>) -> Self {
-        Self {
-            _marker: std::marker::PhantomData::<T>,
-            response_handle,
-        }
+        Self { response_handle }
     }
 }
 
 impl<T: 'static + Sync + Send + Clone> RegistryEvent for LookupAll<T> {
     fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
-        if let Some(hash_map) = registry.handles.get::<Mapped<T>>() {
+        if let Some(hash_map) = registry.store.get::<Mapped<T>>() {
             self.response_handle.send(Some(hash_map.values.clone())).ok();
             return ();
         };
@@ -174,12 +176,49 @@ impl<T> Remove<T> {
 
 impl<T: 'static + Sync + Send + Clone> RegistryEvent for Remove<T> {
     fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
-        if let Some(mut hash_map) = registry.handles.remove::<Mapped<T>>() {
+        if let Some(mut hash_map) = registry.store.remove::<Mapped<T>>() {
             let _ = hash_map.values.remove(&self.name);
             if hash_map.values.len() != 0 {
                 // reinsert
-                registry.handles.insert(hash_map);
+                registry.store.insert(hash_map);
             }
+        };
+    }
+}
+
+/// DependsOn T event
+pub struct DependsOn<T> {
+    name: String,
+    response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>,
+}
+
+impl<T> DependsOn<T> {
+    /// Create new DependsOn T struct
+    pub fn new(name: String, response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>) -> Self {
+        Self { name, response_handle }
+    }
+}
+
+impl<T: 'static + Sync + Send + Clone> RegistryEvent for DependsOn<T> {
+    fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
+        if let Some(hash_map) = registry.store.get::<Mapped<T>>() {
+            if let Some(requested_t) = hash_map.values.get(&self.name) {
+                self.response_handle.send(Ok(requested_t.clone())).ok();
+                return ();
+            }
+        };
+        if let Some(pendings) = registry.pendings.get_mut::<Pending<T>>() {
+            // check if we already have precise request
+            if let Some(response_handles) = pendings.precise.get_mut(&self.name) {
+                response_handles.push(self.response_handle);
+            } else {
+                pendings.precise.insert(self.name, vec![self.response_handle]);
+            }
+        } else {
+            let mut precise = HashMap::new();
+            precise.insert(self.name, vec![self.response_handle]);
+            let p = Pending { precise };
+            registry.pendings.insert::<Pending<T>>(p);
         };
     }
 }
@@ -196,10 +235,14 @@ where
         context.handle().take();
         context.service().update_status(ServiceStatus::Running);
         context.propagate_service();
+
         while let Some(event) = context.inbox().0.recv().await {
             match event {
                 GlobalRegistryEvent::Boxed(registry_event) => {
                     registry_event.handle(&mut self);
+                }
+                GlobalRegistryEvent::Shutdown => {
+                    self.pendings.as_mut().drain();
                 }
             }
         }
