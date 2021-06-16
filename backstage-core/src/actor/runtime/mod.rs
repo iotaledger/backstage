@@ -173,8 +173,8 @@ pub trait ResourceRuntime: BaseRuntime {
 
     fn resources_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
-    fn resource<R: 'static + Send + Sync>(&self) -> Option<Res<R>> {
-        self.resources().get::<Arc<R>>().map(|res| Res(res.clone()))
+    fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>> {
+        self.resources().get::<R>().map(|res| Res(res.clone()))
     }
 
     fn resource_ref<R: 'static + Send + Sync>(&self) -> Option<&R> {
@@ -187,36 +187,40 @@ pub trait PoolRuntime: BaseRuntime {
 
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
-    fn pool<A, H, E>(&self) -> Option<ResMut<ActorPool<A, H, E>>>
+    fn pool<A, H, E>(&self) -> Option<Res<Arc<RwLock<ActorPool<A, H, E>>>>>
     where
         Self: 'static + Sized,
         A: 'static + Actor<H, E> + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent + Send + Sync,
     {
-        self.pools()
-            .get::<Arc<RwLock<ActorPool<A, H, E>>>>()
-            .map(|pool| ResMut(pool.clone()))
+        self.pools().get::<Arc<RwLock<ActorPool<A, H, E>>>>().map(|pool| Res(pool.clone()))
     }
 }
 
-pub struct Res<R>(Arc<R>);
+pub struct Res<R: Clone>(R);
 
-impl<R> Deref for Res<R> {
-    type Target = R;
+impl<R: Deref + Clone> Deref for Res<R> {
+    type Target = R::Target;
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
     }
 }
 
-pub struct ResMut<R>(Arc<RwLock<R>>);
+impl<R: DerefMut + Clone> DerefMut for Res<R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.deref_mut()
+    }
+}
 
-impl<R> Deref for ResMut<R> {
-    type Target = RwLock<R>;
+impl<T> Res<Arc<RwLock<T>>> {
+    pub async fn read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> {
+        self.0.read().await
+    }
 
-    fn deref(&self) -> &Self::Target {
-        self.0.deref()
+    pub async fn write<'a>(&'a self) -> tokio::sync::RwLockWriteGuard<'a, T> {
+        self.0.write().await
     }
 }
 

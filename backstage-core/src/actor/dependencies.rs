@@ -28,7 +28,7 @@ where
     }
 }
 
-impl<Rt: ResourceRuntime, R: 'static + Send + Sync> Dependencies<Rt> for Res<R> {
+impl<Rt: ResourceRuntime, R: 'static + Send + Sync + Clone> Dependencies<Rt> for Res<R> {
     fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.resource()
             .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))

@@ -218,16 +218,15 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.pools_mut().insert(Arc::new(RwLock::new(pool)));
     }
 
-    pub fn add_resource<R: 'static + Send + Sync>(&mut self, resource: R) -> Res<R>
+    pub fn add_resource<R: 'static + Send + Sync + Clone>(&mut self, resource: R) -> Res<R>
     where
         Rt: ResourceRuntime,
     {
-        let res = Arc::new(resource);
-        self.rt.resources_mut().insert(res.clone());
-        Res(res)
+        self.rt.resources_mut().insert(resource.clone());
+        Res(resource)
     }
 
-    pub fn resource<R: 'static + Send + Sync>(&self) -> Option<Res<R>>
+    pub fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>>
     where
         Rt: ResourceRuntime,
     {
@@ -250,7 +249,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.system()
     }
 
-    pub fn pool<A, H, E>(&self) -> Option<ResMut<ActorPool<A, H, E>>>
+    pub fn pool<A, H, E>(&self) -> Option<Res<Arc<RwLock<ActorPool<A, H, E>>>>>
     where
         Rt: PoolRuntime,
         A: 'static + Actor<H, E> + Send + Sync,
@@ -489,7 +488,7 @@ where
         self.scope.system()
     }
 
-    pub fn pool<A>(&self) -> Option<ResMut<ActorPool<A, H, E>>>
+    pub fn pool<A>(&self) -> Option<Res<Arc<RwLock<ActorPool<A, H, E>>>>>
     where
         Rt: PoolRuntime,
         A: 'static + Actor<H, E> + Send + Sync,

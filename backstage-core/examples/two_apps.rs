@@ -3,7 +3,7 @@ use backstage::*;
 use futures::{FutureExt, SinkExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -132,7 +132,7 @@ where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
-    type Dependencies = (Res<RwLock<NecessaryResource>>, Act<HelloWorld, H, E>);
+    type Dependencies = (Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld, H, E>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
     type Rt = FullRuntime;
@@ -241,7 +241,7 @@ where
             hello_world_builder.build(this.write().await.service.spawn("Hello World")),
             my_handle.clone(),
         );
-        rt.add_resource(RwLock::new(NecessaryResource { counter: 0 }));
+        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })));
         rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")), my_handle.clone());
         rt.spawn_system(
             prefabs::websocket::WebsocketBuilder::new()
