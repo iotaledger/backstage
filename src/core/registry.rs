@@ -37,7 +37,10 @@ pub struct GlobalRegistry {
     store: anymap::Map<dyn anymap::any::CloneAny + Send + Sync>,
     pendings: anymap::Map<dyn anymap::any::Any + Send + Sync>,
     cleanups: HashMap<NamedType, Vec<Box<dyn CleanupFromStore>>>,
+    // store all linked actors to a given unique type
+    linked: HashMap<NamedType, Vec<Box<dyn ShutdownLinkedActor>>>,
 }
+
 impl GlobalRegistry {
     /// Create new GlobalRegistry actor's struct
     pub fn new() -> Self {
@@ -45,6 +48,7 @@ impl GlobalRegistry {
             store: anymap::Map::new(),
             pendings: anymap::Map::new(),
             cleanups: HashMap::new(),
+            linked: HashMap::new(),
         }
     }
 }
@@ -203,6 +207,13 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Remove<T> {
                 registry.store.insert(hash_map);
             }
         };
+        // remmove all linked handles/actor to T
+        let named_type = NamedType::new::<T>(self.name.into());
+        if let Some(linked_handles) = registry.linked.remove(&named_type) {
+            for h in linked_handles {
+                h.shutdown(registry);
+            }
+        }
     }
 }
 
@@ -249,6 +260,61 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for DependsOn<T> {
         // todo insert cleanup object to release close self.response handle
     }
 }
+
+/// Link T event
+pub struct Link<A: Channel, T> {
+    named_type: NamedType,
+    name: String,
+    response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>,
+    caller_name: String,
+    _marker: std::marker::PhantomData<A>,
+}
+
+impl<A: 'static + Channel, T: 'static> Link<A, T> {
+    /// Create new DependsOn T struct
+    pub fn new(caller_name: String, name: String, response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>) -> Self {
+        let named_type = NamedType::new::<T>(name.clone());
+        Self {
+            name,
+            response_handle,
+            named_type,
+            caller_name,
+            _marker: std::marker::PhantomData::<A>,
+        }
+    }
+}
+
+impl<A: 'static + Channel, T: 'static + Sync + Send + Clone> RegistryEvent for Link<A, T> {
+    fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
+        let shutdown_link_actor = ShutdownActor::<A::Handle>::new(self.caller_name);
+        if let Some(linked_handles) = registry.linked.get_mut(&self.named_type) {
+            linked_handles.push(Box::new(shutdown_link_actor));
+        } else {
+            registry.linked.insert(self.named_type, vec![Box::new(shutdown_link_actor)]);
+        };
+        if let Some(hash_map) = registry.store.get::<Mapped<T>>() {
+            if let Some(requested_t) = hash_map.values.get(&self.name) {
+                self.response_handle.send(Ok(requested_t.clone())).ok();
+                return ();
+            }
+        };
+        if let Some(pendings) = registry.pendings.get_mut::<Pending<T>>() {
+            // check if we already have precise request
+            if let Some(response_handles) = pendings.precise.get_mut(&self.name) {
+                response_handles.push(self.response_handle);
+            } else {
+                pendings.precise.insert(self.name, vec![self.response_handle]);
+            }
+        } else {
+            let mut precise = HashMap::new();
+            precise.insert(self.name, vec![self.response_handle]);
+            let p = Pending { precise };
+            registry.pendings.insert::<Pending<T>>(p);
+        };
+        // todo insert cleanup object to release close self.response handle
+    }
+}
+
 /// Unique id for a named typeid;
 #[derive(Eq, PartialEq, Clone)]
 pub struct NamedType {
@@ -352,6 +418,13 @@ impl<T: 'static + Sync + Send + Clone> CleanupFromStore for Cleanup<T> {
                 }
             }
         };
+        // remmove all linked handles/actor to T
+        let named_type = NamedType::new::<T>(name.into());
+        if let Some(linked_handles) = registry.linked.remove(&named_type) {
+            for h in linked_handles {
+                h.shutdown(registry);
+            }
+        }
     }
     fn cleanup(mut self: Box<Self>, name: &str, registry: &mut GlobalRegistry) {
         self.cleanup_pendings(name, registry);
@@ -365,6 +438,32 @@ impl<T: 'static + Sync + Send + Clone> CleanupFromStore for Cleanup<T> {
     }
     fn of(&self, type_id: &std::any::TypeId) -> bool {
         &std::any::TypeId::of::<T>() == type_id
+    }
+}
+trait ShutdownLinkedActor: Send + Sync {
+    fn shutdown(self: Box<Self>, registry: &mut GlobalRegistry);
+}
+
+struct ShutdownActor<H: ActorHandle> {
+    name: String,
+    _marker: std::marker::PhantomData<H>,
+}
+impl<H: ActorHandle> ShutdownActor<H> {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            _marker: std::marker::PhantomData::<H>,
+        }
+    }
+}
+impl<H: ActorHandle + Sync + Clone> ShutdownLinkedActor for ShutdownActor<H> {
+    fn shutdown(self: Box<Self>, registry: &mut GlobalRegistry) {
+        if let Some(hash_map) = registry.store.get_mut::<Mapped<H>>() {
+            if let Some(requested_handle) = hash_map.values.remove(&self.name) {
+                Box::new(requested_handle).shutdown();
+                return ();
+            }
+        };
     }
 }
 /// GlobalRegistry Actor implementation

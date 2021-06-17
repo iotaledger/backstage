@@ -257,9 +257,7 @@ where
         let recoverable = Recoverable::new(self.name.clone(), self.actor.clone());
         // reinsert it to the launcher state
         launcher.recoverable_actors.insert(self.name.clone(), Box::new(recoverable));
-        let s = crate::core::NullSupervisor;
         let supervisor: Box<dyn ActorHandle> = Box::new(backstage.handle().clone().unwrap());
-
         let r = backstage.spawn(self.actor, Box::new(supervisor), Service::new(&self.name));
         if r.is_ok() {
             true

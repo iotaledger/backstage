@@ -1,4 +1,4 @@
-use crate::core::{Actor, ActorHandle, ActorResult, BoxedActorHandle, Channel, Essential, Service, Spawn};
+use crate::core::{Actor, ActorHandle, ActorResult, Channel, Essential, Service, Spawn};
 use futures::future::AbortHandle;
 /// Backstage default runtime struct
 pub struct Backstage<C: Channel, S: ActorHandle, G: Clone + Send> {
@@ -74,8 +74,6 @@ where
         self.supervisor.aknshutdown(self.service, r);
     }
     fn shutdown(&mut self) {
-        // drop registty handle (if any)
-        self.registry.take();
         // drop self handle (if any)
         self.handle.take();
         // shutdown children handles (if any)
@@ -199,6 +197,16 @@ where
 
 #[async_trait::async_trait]
 impl<C: Channel + 'static, S: ActorHandle, G: Clone + Send + 'static> crate::core::Registry for Backstage<C, S, G> {
+    async fn link<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let event = crate::core::registry::Link::<C, T>::new(self.service().name().into(), name, tx);
+        if let Some(r) = self.registry.as_ref() {
+            r.0.send(crate::core::registry::GlobalRegistryEvent::Boxed(Box::new(event))).ok();
+        } else {
+            anyhow::bail!("Registry doesn't exist")
+        }
+        rx.await?
+    }
     async fn depends_on<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let event = crate::core::registry::DependsOn::<T>::new::<C>(name, tx);
@@ -252,7 +260,6 @@ impl<C: Channel + 'static, S: ActorHandle, G: Clone + Send + 'static> crate::cor
 
 pub mod launcher;
 
-pub struct BackstageBuilder {}
 pub struct BackstageRuntime<G: Clone + Send + 'static> {
     context: Backstage<BackstageActor, crate::core::NullSupervisor, G>,
     launcher_handle: Option<launcher::LauncherHandle<G>>,
@@ -391,6 +398,16 @@ impl<G: Send + Clone + 'static> BackstageRuntime<G> {
     }
 }
 
+/// Useful function to exit program using ctrl_c signal
+async fn ctrl_c(handle: BackstageHandle) {
+    // await on ctrl_c
+    if let Ok(_) = tokio::signal::ctrl_c().await {
+        // exit program using launcher
+        let exit_program_event = BackstageEvent::ExitProgram;
+        let _ = handle.tx.send(exit_program_event);
+    };
+}
+
 ///////////
 #[derive(Clone)]
 struct TestActor;
@@ -423,18 +440,8 @@ impl Channel for TestActor {
     }
 }
 
-/// Useful function to exit program using ctrl_c signal
-async fn ctrl_c(handle: BackstageHandle) {
-    // await on ctrl_c
-    if let Ok(_) = tokio::signal::ctrl_c().await {
-        // exit program using launcher
-        let exit_program_event = BackstageEvent::ExitProgram;
-        let _ = handle.tx.send(exit_program_event);
-    };
-}
-
 #[tokio::test]
-async fn no_children() {
+async fn backstage_test() {
     env_logger::init();
     #[derive(Clone)]
     pub struct NoBounds;

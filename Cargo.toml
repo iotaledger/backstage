@@ -43,3 +43,8 @@ path = "examples/two_child.rs"
 [[example]]
 name = "resource_child"
 path = "examples/resource_child.rs"
+
+
+[[example]]
+name = "linked_child"
+path = "examples/linked_child.rs"

@@ -139,9 +139,7 @@ pub trait Spawn<A: Channel, S>: Essential {
     /// Defines how to spawn Actor of Type A with supervisor of handle S
     fn spawn(&mut self, actor: A, supervisor: S, service: Service) -> Result<A::Handle, anyhow::Error>;
 }
-pub trait SomeStorage {
-    // type Backend: Clone + Sync + Send + 'static;
-}
+
 /// An application's metrics
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Service {
@@ -277,6 +275,8 @@ pub enum ServiceStatus {
 #[async_trait::async_trait]
 /// Runtime trait which provides registry functionality
 pub trait Registry: Essential {
+    /// Requesting precise dependency T from registry and shutdown the caller in case it went out of scope
+    async fn link<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error>;
     /// Requesting precise dependency T from registry
     async fn depends_on<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error>;
     /// Register T value in registry to be accessible within all scopes
