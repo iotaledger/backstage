@@ -1,5 +1,5 @@
 use crate::actor::*;
 use async_trait::async_trait;
-use backstage_macros::*;
 
+/// A prefab websocket which forwards messages to the supervisor
 pub mod websocket;

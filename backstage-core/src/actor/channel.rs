@@ -1,39 +1,33 @@
-use crate::{ActorError, Service, SupervisorEvent};
 use async_trait::async_trait;
 use futures::Stream;
 use std::{fmt::Debug, marker::PhantomData};
 
+/// Defines a channel which becomes a sender and receiver half
 pub trait Channel<E: 'static + Send + Sync> {
+    /// The sender half of the channel
     type Sender: 'static + Sender<E> + Send + Sync + Clone;
+    /// The receiver half of the channel
     type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send;
 
+    /// Create a sender and receiver of the appropriate types
     fn new() -> (Self::Sender, Self::Receiver);
 }
 
+/// Defines half of a channel which sends events
 #[async_trait]
 pub trait Sender<E: 'static + Send + Sync> {
+    /// Send an event over the channel
     async fn send(&mut self, event: E) -> anyhow::Result<()>;
-
-    async fn report(&mut self, res: Result<Service, ActorError>) -> anyhow::Result<()>
-    where
-        E: SupervisorEvent,
-    {
-        self.send(E::report(res)).await
-    }
-
-    async fn update_status(&mut self, service: Service) -> anyhow::Result<()>
-    where
-        E: SupervisorEvent,
-    {
-        self.send(E::status(service)).await
-    }
 }
 
+/// Defines half of a channel which receives events
 #[async_trait]
 pub trait Receiver<E: Send> {
+    /// Receive an event from the channel
     async fn recv(&mut self) -> Option<E>;
 }
 
+/// A tokio mpsc channel implementation
 pub struct TokioChannel<E>(PhantomData<E>);
 
 impl<E: 'static + Send + Debug + Sync> Channel<E> for TokioChannel<E> {
@@ -47,6 +41,7 @@ impl<E: 'static + Send + Debug + Sync> Channel<E> for TokioChannel<E> {
     }
 }
 
+/// A tokio mpsc sender implementation
 #[derive(Debug)]
 pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
 
@@ -63,6 +58,7 @@ impl<E: 'static + Send + Debug + Sync> Sender<E> for TokioSender<E> {
     }
 }
 
+/// A tokio mpsc receiver implementation
 pub struct TokioReceiver<E>(tokio::sync::mpsc::UnboundedReceiver<E>);
 
 #[async_trait]

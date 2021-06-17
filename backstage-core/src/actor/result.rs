@@ -3,13 +3,17 @@ use anyhow::anyhow;
 use std::time::Duration;
 use thiserror::Error;
 
+/// An actor (or system)'s error result
 #[derive(Debug)]
 pub struct ActorError {
+    /// The kind of error that occurred
     pub kind: ActorErrorKind,
+    /// The actor (or system)'s service
     pub service: Service,
 }
 
 impl ActorError {
+    /// Create a new actor error from an error kind
     pub fn new(kind: ActorErrorKind, service: Service) -> Self {
         Self { kind, service }
     }

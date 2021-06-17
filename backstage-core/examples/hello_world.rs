@@ -40,17 +40,14 @@ pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> He
 }
 
 #[async_trait]
-impl<H, E> Actor<H, E> for HelloWorld
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
     type Rt = BasicRuntime;
+    type SupervisorEvent = ();
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, H, E>, deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self>, _deps: Self::Dependencies) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -72,7 +69,7 @@ struct Launcher {
 
 impl Launcher {
     pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
-        rt.send_system_event::<Self, (), ()>(LauncherChildren::HelloWorld(event)).await
+        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 }
 
@@ -94,17 +91,24 @@ impl SupervisorEvent for LauncherChildren {
     }
 }
 
+impl From<()> for LauncherChildren {
+    fn from(_: ()) -> Self {
+        panic!()
+    }
+}
+
 #[async_trait]
-impl System<(), ()> for Launcher {
+impl System for Launcher {
     type ChildEvents = LauncherChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
     type Rt = FullRuntime;
+    type SupervisorEvent = ();
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, (), ()>,
-        deps: (),
+        mut rt: SystemScopedRuntime<'a, Self>,
+        _deps: (),
     ) -> Result<Service, ActorError>
     where
         Self: Sized,
@@ -125,7 +129,7 @@ impl System<(), ()> for Launcher {
             match evt {
                 LauncherChildren::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.children().pool::<HelloWorld>() {
+                    if let Some(pool) = rt.pool::<HelloWorld>() {
                         pool.write().await.send_all(event).await;
                     }
                 }
@@ -171,10 +175,10 @@ async fn startup() -> anyhow::Result<()> {
         .scope(|scope| {
             let service = Service::new("Launcher");
             let launcher = Launcher { service };
-            scope.spawn_system(launcher, None);
+            scope.spawn_system_unsupervised(launcher);
             scope.spawn_task(|mut rt| {
                 async move {
-                    rt.system::<Launcher, _, _>()
+                    rt.system::<Launcher>()
                         .unwrap()
                         .read()
                         .await

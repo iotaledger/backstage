@@ -42,7 +42,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let id = &l.lifetime;
                     quote! {#id}
                 }
-                syn::GenericParam::Const(c) => {
+                syn::GenericParam::Const(_) => {
                     panic!("Const generics not supported for builders!");
                 }
             })
@@ -89,7 +89,13 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                 if seg.ident.to_string() == "Option" {
                                     if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
                                         let ty = args.args.first().unwrap();
+                                        let doc_name = match name.as_ref() {
+                                            syn::Pat::Ident(i) => i.ident.to_string(),
+                                            _ => "???".to_string(),
+                                        };
+                                        let doc = format!("Provide the builder with the {} field", doc_name);
                                         let add_fn = quote! {
+                                            #[doc=#doc]
                                             #vis fn #name<I: Into<Option<#ty>>> (mut self, val: I) -> Self {
                                                 self.#name = val.into();
                                                 self
@@ -102,7 +108,13 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                         panic!("Invalid Option arg!");
                                     }
                                 } else {
+                                    let doc_name = match name.as_ref() {
+                                        syn::Pat::Ident(i) => i.ident.to_string(),
+                                        _ => "???".to_string(),
+                                    };
+                                    let doc = format!("Provide the builder with the {} field", doc_name);
                                     let add_fn = quote! {
+                                        #[doc=#doc]
                                         #vis fn #name (mut self, val: #ty) -> Self {
                                             self.#name.replace(val);
                                             self
@@ -142,7 +154,11 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         },
     );
 
+    let builder_doc = format!("A builder for the {} type", actor);
+    let new_builder_doc = format!("Create a new `{}`", builder);
+
     let res = quote! {
+        #[doc=#builder_doc]
         #(#attrs)*
         #vis struct #builder #generics {
             _phantom: std::marker::PhantomData<(#bare_generics)>,
@@ -159,6 +175,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #bounded_generics #builder #generics #bounds {
+            #[doc=#new_builder_doc]
             #vis fn new() -> Self {
                 Self::default()
             }

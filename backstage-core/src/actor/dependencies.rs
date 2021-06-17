@@ -1,27 +1,21 @@
-use crate::{Act, Actor, BaseRuntime, Channel, Res, ResourceRuntime, Sender, SupervisorEvent, Sys, System, SystemRuntime};
+use crate::{Act, Actor, BaseRuntime, Res, ResourceRuntime, Sys, System, SystemRuntime};
 
+/// Defines dependencies that an actor or system can check for
 pub trait Dependencies<Rt: BaseRuntime> {
+    /// Instantiate instances of some dependencies
     fn instantiate(rt: &Rt) -> anyhow::Result<Self>
     where
         Self: Sized;
 }
 
-impl<Rt: SystemRuntime, S: 'static + System<H, E> + Send + Sync, H, E> Dependencies<Rt> for Sys<S, H, E>
-where
-    H: 'static + Sender<E> + Send + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<Rt: SystemRuntime, S: 'static + System + Send + Sync> Dependencies<Rt> for Sys<S> {
     fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.system()
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor<H, E> + Send + Sync, H, E> Dependencies<Rt> for Act<A, H, E>
-where
-    H: 'static + Sender<E> + Send + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<Rt: BaseRuntime, A: Actor + Send + Sync> Dependencies<Rt> for Act<A> {
     fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
         rt.actor_event_handle()
             .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))

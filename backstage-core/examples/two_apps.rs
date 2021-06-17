@@ -68,17 +68,14 @@ pub struct HelloWorld {
 }
 
 #[async_trait]
-impl<H, E> Actor<H, E> for HelloWorld
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
     type Rt = BasicRuntime;
+    type SupervisorEvent = ();
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self, H, E>, deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
@@ -127,19 +124,16 @@ pub struct Howdy {
 }
 
 #[async_trait]
-impl<H, E> Actor<H, E> for Howdy
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    type Dependencies = (Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld, H, E>);
+impl Actor for Howdy {
+    type Dependencies = (Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
     type Rt = FullRuntime;
+    type SupervisorEvent = ();
 
     async fn run<'a>(
         self,
-        mut rt: ActorScopedRuntime<'a, Self, H, E>,
+        mut rt: ActorScopedRuntime<'a, Self>,
         (counter, mut hello_world): Self::Dependencies,
     ) -> Result<Service, ActorError>
     where
@@ -172,20 +166,12 @@ struct Launcher {
 }
 
 impl Launcher {
-    pub async fn send_to_hello_world<H, E>(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()>
-    where
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
-    {
-        rt.send_system_event::<Self, H, E>(LauncherChildren::HelloWorld(event)).await
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
+        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy<H, E>(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()>
-    where
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
-    {
-        rt.send_system_event::<Self, H, E>(LauncherChildren::Howdy(event)).await
+    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
+        rt.send_system_event::<Self>(LauncherChildren::Howdy(event)).await
     }
 }
 
@@ -215,21 +201,24 @@ impl From<(SocketAddr, Message)> for LauncherChildren {
     }
 }
 
+impl From<()> for LauncherChildren {
+    fn from(_: ()) -> Self {
+        panic!()
+    }
+}
+
 #[async_trait]
-impl<H, E> System<H, E> for Launcher
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl System for Launcher {
     type ChildEvents = LauncherChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
     type Rt = FullRuntime;
+    type SupervisorEvent = ();
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, H, E>,
-        deps: (),
+        mut rt: SystemScopedRuntime<'a, Self>,
+        _deps: (),
     ) -> Result<Service, ActorError>
     where
         Self: Sized,
@@ -253,10 +242,10 @@ where
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherChildren::HelloWorld(event) => {
-                    rt.children().send_actor_event::<HelloWorld>(event).await;
+                    rt.send_actor_event::<HelloWorld>(event).await;
                 }
                 LauncherChildren::Howdy(event) => {
-                    rt.children().send_actor_event::<Howdy>(event).await;
+                    rt.send_actor_event::<Howdy>(event).await;
                 }
                 LauncherChildren::Shutdown { using_ctrl_c } => {
                     debug!("Exiting launcher");
@@ -309,7 +298,7 @@ async fn startup() -> anyhow::Result<()> {
             scope.spawn_task(|mut rt| {
                 async move {
                     for _ in 0..3 {
-                        rt.send_system_event::<Launcher, (), ()>(LauncherChildren::Howdy(HowdyEvent::Print("echo".to_owned())))
+                        rt.send_system_event::<Launcher>(LauncherChildren::Howdy(HowdyEvent::Print("echo".to_owned())))
                             .await
                             .unwrap();
                     }

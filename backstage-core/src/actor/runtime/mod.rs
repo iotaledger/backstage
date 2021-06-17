@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{
     sync::{oneshot, RwLock},
-    task::{JoinError, JoinHandle},
+    task::JoinHandle,
 };
 
 pub use basic_runtime::*;
@@ -61,7 +61,7 @@ pub trait BaseRuntime: Send + Sync {
         Self: 'static + Sized,
     {
         let res = f(&mut RuntimeScope::new(self));
-        self.join().await?;
+        self.join().await;
         Ok(res)
     }
 
@@ -73,13 +73,10 @@ pub trait BaseRuntime: Send + Sync {
     }
 
     /// Await the tasks in this runtime's scope
-    async fn join(&mut self) -> Result<(), JoinError> {
+    async fn join(&mut self) {
         for handle in self.join_handles_mut().drain(..) {
-            if let Err(e) = handle.await? {
-                log::error!("{}", e);
-            }
+            handle.await.ok();
         }
-        Ok(())
     }
 
     /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
@@ -106,23 +103,19 @@ pub trait BaseRuntime: Send + Sync {
 
     /// Get an actor's event handle, if it exists in this scope.
     /// Note: This will only return a handle if the actor exists outside of a pool.
-    fn actor_event_handle<A: Actor<H, E>, H, E>(&self) -> Option<Act<A, H, E>>
+    fn actor_event_handle<A: Actor>(&self) -> Option<Act<A>>
     where
         Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
     {
         self.senders()
             .get::<<A::Channel as Channel<A::Event>>::Sender>()
-            .map(|handle| Act { actor: handle.clone() })
+            .map(|handle| Act(handle.clone()))
     }
 
     /// Send an event to a given actor, if it exists in this scope
-    async fn send_actor_event<A: Actor<H, E>, H, E>(&mut self, event: A::Event) -> anyhow::Result<()>
+    async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
     where
         Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
     {
         let handle = self
             .senders_mut()
@@ -142,21 +135,17 @@ pub trait SystemRuntime: BaseRuntime {
     fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
     /// Get a shared reference to a system if it exists in this runtime's scope
-    fn system<S: 'static + System<H, E> + Send + Sync, H, E>(&self) -> Option<Sys<S, H, E>>
+    fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>>
     where
         Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
     {
-        self.systems().get::<Arc<RwLock<S>>>().map(|sys| Sys::new(sys.clone()))
+        self.systems().get::<Arc<RwLock<S>>>().map(|sys| Sys(sys.clone()))
     }
 
     /// Get a system's event handle if the system exists in this runtime's scope
-    fn system_event_handle<S: System<H, E>, H, E>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
+    fn system_event_handle<S: System>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
     where
         Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
     {
         self.senders()
             .get::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
@@ -164,11 +153,9 @@ pub trait SystemRuntime: BaseRuntime {
     }
 
     /// Send an event to a system if it exists within this runtime's scope
-    async fn send_system_event<S: System<H, E>, H, E>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
+    async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
     where
         Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
     {
         let handle = self
             .senders_mut()
@@ -201,14 +188,12 @@ pub trait PoolRuntime: BaseRuntime {
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
     /// Get the pool of a specified actor if it exists in this runtime's scope
-    fn pool<A, H, E>(&self) -> Option<Res<Arc<RwLock<ActorPool<A, H, E>>>>>
+    fn pool<A>(&self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
     where
         Self: 'static + Sized,
-        A: 'static + Actor<H, E> + Send + Sync,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync,
+        A: 'static + Actor + Send + Sync,
     {
-        self.pools().get::<Arc<RwLock<ActorPool<A, H, E>>>>().map(|pool| Res(pool.clone()))
+        self.pools().get::<Arc<RwLock<ActorPool<A>>>>().map(|pool| Res(pool.clone()))
     }
 }
 
@@ -230,96 +215,40 @@ impl<R: DerefMut + Clone> DerefMut for Res<R> {
 }
 
 /// A shared system reference
-pub struct Sys<S: System<H, E>, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    system: Arc<RwLock<S>>,
-    _data: PhantomData<(H, E)>,
-}
+pub struct Sys<S: System>(Arc<RwLock<S>>);
 
-impl<S: System<H, E>, H, E> Sys<S, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    fn new(system: Arc<RwLock<S>>) -> Self {
-        Self {
-            system,
-            _data: PhantomData,
-        }
-    }
-}
-
-impl<S: System<H, E>, H, E> Deref for Sys<S, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<S: System> Deref for Sys<S> {
     type Target = RwLock<S>;
 
     fn deref(&self) -> &Self::Target {
-        self.system.deref()
+        self.0.deref()
     }
 }
 
 /// An actor handle, used to send events
-pub struct Act<A: Actor<H, E>, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    actor: <A::Channel as Channel<A::Event>>::Sender,
-}
+pub struct Act<A: Actor>(<A::Channel as Channel<A::Event>>::Sender);
 
-impl<A: Actor<H, E>, H, E> Act<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-    fn new(actor: <A::Channel as Channel<A::Event>>::Sender) -> Self {
-        Act { actor }
-    }
-}
-
-impl<A: Actor<H, E>, H, E> Deref for Act<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<A: Actor> Deref for Act<A> {
     type Target = <A::Channel as Channel<A::Event>>::Sender;
 
     fn deref(&self) -> &Self::Target {
-        &self.actor
+        &self.0
     }
 }
 
-impl<A: Actor<H, E>, H, E> DerefMut for Act<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<A: Actor> DerefMut for Act<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.actor
+        &mut self.0
     }
 }
 
 /// A pool of actors which can be queried for actor handles
-pub struct ActorPool<A: Actor<H, E>, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+pub struct ActorPool<A: Actor> {
     handles: Vec<Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
     lru: LruCache<usize, Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
 }
 
-impl<A: Actor<H, E>, H, E> Clone for ActorPool<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<A: Actor> Clone for ActorPool<A> {
     fn clone(&self) -> Self {
         let handles = self.handles.iter().map(|rc| Rc::new(RefCell::new(rc.borrow().clone()))).collect();
         let mut lru = LruCache::unbounded();
@@ -330,25 +259,11 @@ where
     }
 }
 
-unsafe impl<A: Actor<H, E> + Send, H, E> Send for ActorPool<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-}
+unsafe impl<A: Actor + Send> Send for ActorPool<A> {}
 
-unsafe impl<A: Actor<H, E> + Sync, H, E> Sync for ActorPool<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
-}
+unsafe impl<A: Actor + Sync> Sync for ActorPool<A> {}
 
-impl<A: Actor<H, E>, H, E> Default for ActorPool<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<A: Actor> Default for ActorPool<A> {
     fn default() -> Self {
         Self {
             handles: Default::default(),
@@ -357,11 +272,7 @@ where
     }
 }
 
-impl<A: Actor<H, E>, H, E> ActorPool<A, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl<A: Actor> ActorPool<A> {
     fn push(&mut self, handle: <A::Channel as Channel<A::Event>>::Sender) {
         let idx = self.handles.len();
         let handle_rc = Rc::new(RefCell::new(handle));
@@ -370,11 +281,11 @@ where
     }
 
     /// Get the least recently used actor handle from this pool
-    pub fn get_lru(&mut self) -> Option<Act<A, H, E>> {
+    pub fn get_lru(&mut self) -> Option<Act<A>> {
         self.lru.pop_lru().map(|(idx, handle)| {
             let res = handle.borrow().clone();
             self.lru.put(idx, handle);
-            Act::new(res)
+            Act(res)
         })
     }
 
@@ -389,11 +300,11 @@ where
 
     #[cfg(feature = "rand_pool")]
     /// Get a random actor handle from this pool
-    pub fn get_random(&mut self) -> Option<Act<A, H, E>> {
+    pub fn get_random(&mut self) -> Option<Act<A>> {
         let mut rng = rand::thread_rng();
         self.handles
             .get(rng.gen_range(0..self.handles.len()))
-            .map(|rc| Act::new(rc.borrow().clone()))
+            .map(|rc| Act(rc.borrow().clone()))
     }
 
     #[cfg(feature = "rand_pool")]
@@ -407,10 +318,10 @@ where
     }
 
     /// Get an iterator over the actor handles in this pool
-    pub fn iter(&mut self) -> std::vec::IntoIter<Act<A, H, E>> {
+    pub fn iter(&mut self) -> std::vec::IntoIter<Act<A>> {
         self.handles
             .iter()
-            .map(|rc| Act::new(rc.borrow().clone()))
+            .map(|rc| Act(rc.borrow().clone()))
             .collect::<Vec<_>>()
             .into_iter()
     }

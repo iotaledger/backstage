@@ -1,36 +1,43 @@
 use super::*;
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
+use std::collections::HashMap;
 pub use std::net::SocketAddr;
-use std::{collections::HashMap, marker::PhantomData};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
-pub struct Websocket<E> {
+/// A websocket which awaits connections on a specified listen
+/// address and forwards messages to its supervisor
+pub struct Websocket {
     service: Service,
     listen_address: SocketAddr,
     connections: HashMap<SocketAddr, TokioSender<Message>>,
-    _evt: PhantomData<E>,
 }
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build<E: From<(SocketAddr, Message)>>(service: Service, listen_address: SocketAddr) -> Websocket<E> {
+pub fn build(service: Service, listen_address: SocketAddr) -> Websocket {
     Websocket {
         service,
         listen_address,
         connections: Default::default(),
-        _evt: PhantomData,
     }
 }
 
+/// The websocket system's events
 #[derive(Clone, Debug)]
 pub enum WebsocketChildren {
+    /// A response to send across the websocket to the client
     Response((SocketAddr, Message)),
+    /// A message received from the client, to be sent to the supervisor
     Received((SocketAddr, Message)),
+    /// A new connection
     Connection(Connection),
+    /// A closed connection
+    Close(SocketAddr),
 }
 
+/// A websocket connection
 #[derive(Clone, Debug)]
 pub struct Connection {
     peer: SocketAddr,
@@ -38,24 +45,22 @@ pub struct Connection {
 }
 
 #[async_trait]
-impl<H, E> System<H, E> for Websocket<E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-    E: From<(SocketAddr, Message)>,
-{
+impl System for Websocket {
     type ChildEvents = WebsocketChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
     type Rt = SystemsRuntime;
+    type SupervisorEvent = (SocketAddr, Message);
 
-    async fn run<'a>(
+    async fn run_supervised<'a, H, E>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self, H, E>,
+        mut rt: SupervisedSystemScopedRuntime<'a, Self, H, E>,
         _deps: (),
     ) -> Result<Service, ActorError>
     where
-        Self: Sized,
+        Self: Send + Sync + Sized,
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
     {
         let tcp_listener = {
             let service = this.read().await.service.clone();
@@ -71,24 +76,21 @@ where
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor::<_, H, E, _>(
-                                Responder {
-                                    service: listener_service.spawn("Responder"),
-                                    sender,
-                                },
-                                None,
-                            );
+                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder {
+                                service: listener_service.spawn("Responder"),
+                                sender,
+                            });
                             rt.spawn_task(move |mut rt| {
                                 async move {
                                     while let Some(Ok(msg)) = receiver.next().await {
                                         match msg {
                                             Message::Close(_) => {
                                                 responder_abort.abort();
+                                                rt.send_system_event::<Websocket>(WebsocketChildren::Close(peer)).await?;
                                                 break;
                                             }
                                             msg => {
-                                                rt.send_system_event::<Websocket<E>, H, E>(WebsocketChildren::Received((peer, msg)))
-                                                    .await?;
+                                                rt.send_system_event::<Websocket>(WebsocketChildren::Received((peer, msg))).await?;
                                             }
                                         }
                                     }
@@ -96,7 +98,7 @@ where
                                 }
                                 .boxed()
                             });
-                            rt.send_system_event::<Websocket<E>, H, E>(WebsocketChildren::Connection(Connection {
+                            rt.send_system_event::<Websocket>(WebsocketChildren::Connection(Connection {
                                 peer,
                                 sender: responder_handle,
                             }))
@@ -111,7 +113,9 @@ where
             match evt {
                 WebsocketChildren::Response((peer, msg)) => {
                     if let Some(conn) = this.write().await.connections.get_mut(&peer) {
-                        conn.send(msg).await;
+                        if let Err(_) = conn.send(msg).await {
+                            this.write().await.connections.remove(&peer);
+                        }
                     }
                 }
                 WebsocketChildren::Connection(conn) => {
@@ -119,13 +123,24 @@ where
                     this.write().await.connections.insert(conn.peer, conn.sender);
                 }
                 WebsocketChildren::Received(msg) => {
-                    if let Some(supervisor) = rt.supervisor_handle() {
-                        supervisor.send(msg.into()).await;
+                    if let Err(_) = rt.supervisor_handle().send(msg.into()).await {
+                        break;
                     }
+                }
+                WebsocketChildren::Close(peer) => {
+                    this.write().await.connections.remove(&peer);
                 }
             }
         }
         connector_abort.abort();
+        Ok(this.read().await.service.clone())
+    }
+
+    async fn run<'a>(
+        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        _rt: SystemScopedRuntime<'a, Self>,
+        _deps: (),
+    ) -> Result<Service, ActorError> {
         Ok(this.read().await.service.clone())
     }
 }
@@ -136,17 +151,14 @@ struct Responder {
 }
 
 #[async_trait]
-impl<H, E> Actor<H, E> for Responder
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent + Send + Sync,
-{
+impl Actor for Responder {
     type Dependencies = ();
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
     type Rt = BasicRuntime;
+    type SupervisorEvent = ();
 
-    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self, H, E>, _deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<Service, ActorError>
     where
         Self: Sized,
     {
