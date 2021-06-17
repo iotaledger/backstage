@@ -1,14 +1,14 @@
 use super::*;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-type BackstageContext = Backstage<Launcher, Box<dyn ActorHandle>>;
+// type BackstageContext<G> = Backstage<Launcher<G>, Box<dyn ActorHandle>, G>;
 crate::builder!(LauncherBuilder {});
 
-pub struct Launcher {
-    recoverable_actors: HashMap<String, Box<dyn Recovery>>,
+pub struct Launcher<G> {
+    recoverable_actors: HashMap<String, Box<dyn Recovery<G>>>,
 }
 
-impl Launcher {
+impl<G> Launcher<G> {
     /// Create new launcher actor struct
     pub fn new() -> Self {
         Self {
@@ -17,59 +17,62 @@ impl Launcher {
     }
 }
 
-pub enum LauncherEvent {
-    Boxed(Box<dyn DynLauncherEvent>),
+/// Launcher event type
+pub enum LauncherEvent<G> {
+    /// Launcher dynamic boxed variants
+    Boxed(Box<dyn DynLauncherEvent<G>>),
+    /// Children aknowledging shutdown
     AknShutdown(Service, ActorResult),
+    /// Children service(s)
     Service(Service),
-    Recover(String, Box<dyn Recovery>),
+    /// Recover/Restart actor
+    Recover(String, Box<dyn Recovery<G>>),
+    /// Shutdown the launcher
     Shutdown,
 }
 
 #[derive(Clone)]
 /// LauncherEvent handle used to access the launcher functionality
-pub struct LauncherHandle(pub UnboundedSender<LauncherEvent>);
+pub struct LauncherHandle<G: Clone + Send + 'static>(pub UnboundedSender<LauncherEvent<G>>);
 /// Inbox used by LauncherInbox actor to receive events
-pub struct LauncherInbox(UnboundedReceiver<LauncherEvent>);
+pub struct LauncherInbox<G: Clone + Send + 'static>(UnboundedReceiver<LauncherEvent<G>>);
 /// Channel implementation
-impl Channel for Launcher {
-    type Handle = LauncherHandle;
-    type Inbox = LauncherInbox;
+impl<G: Clone + Send + 'static> Channel for Launcher<G> {
+    type Handle = LauncherHandle<G>;
+    type Inbox = LauncherInbox<G>;
     fn channel(&mut self) -> Result<(Self::Handle, Self::Inbox), anyhow::Error> {
         let (tx, rx) = unbounded_channel();
         Ok((LauncherHandle(tx), LauncherInbox(rx)))
     }
 }
 
-impl ActorHandle for LauncherHandle {
+impl<G: Clone + Send + 'static> ActorHandle for LauncherHandle<G> {
     fn shutdown(self: Box<Self>) {
-        self.0.send(LauncherEvent::Shutdown).ok();
+        self.0.send(LauncherEvent::<G>::Shutdown).ok();
     }
     fn aknshutdown(&self, service: Service, r: ActorResult) {
-        self.0.send(LauncherEvent::AknShutdown(service, r)).ok();
+        self.0.send(LauncherEvent::<G>::AknShutdown(service, r)).ok();
     }
     fn service(&self, service: &Service) {
-        self.0.send(LauncherEvent::Service(service.clone())).ok();
+        self.0.send(LauncherEvent::<G>::Service(service.clone())).ok();
     }
     fn send(&self, event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
-        let my_event: LauncherEvent = *event.downcast()?;
+        let my_event: LauncherEvent<G> = *event.downcast()?;
         self.0.send(my_event).ok();
         Ok(())
     }
 }
 
 /// The event type of registry
-pub trait DynLauncherEvent: Send {
+pub trait DynLauncherEvent<G: Clone + Send + 'static>: Send {
     /// implement how launcher supposed to handle the boxed event
-    fn handle(self: Box<Self>, launhcer: &mut Launcher, backstage: &mut BackstageContext);
+    fn handle(self: Box<Self>, launhcer: &mut Launcher<G>, backstage: &mut Backstage<Launcher<G>, Box<dyn ActorHandle>, G>);
 }
 
 /// Launcher Actor implementation
 #[async_trait::async_trait]
-impl Actor<BackstageContext> for Launcher {
-    async fn run(mut self, context: &mut BackstageContext) -> ActorResult {
-        // spawn ctrl_c as child
-        // let supervisor_handle = context.handle().clone().expect("Launcher Handle");
-        // BackstageContext::spawn_task(ctrl_c(supervisor_handle));
+impl<G: Send + Clone + 'static> Actor<Backstage<Self, Box<dyn ActorHandle>, G>> for Launcher<G> {
+    async fn run(mut self, context: &mut Backstage<Self, Box<dyn ActorHandle>, G>) -> ActorResult {
         while let Some(event) = context.inbox().0.recv().await {
             match event {
                 LauncherEvent::Boxed(launcher_event) => {
@@ -204,11 +207,11 @@ impl<T: Channel + Clone> Add<T> {
     }
 }
 
-impl<T: Channel + Clone + 'static> DynLauncherEvent for Add<T>
+impl<T: Channel + Clone + 'static, G: Send + Clone + 'static> DynLauncherEvent<G> for Add<T>
 where
-    Backstage<Launcher, Box<dyn ActorHandle>>: Spawn<T, Box<dyn ActorHandle>>,
+    Backstage<Launcher<G>, Box<dyn ActorHandle>, G>: Spawn<T, Box<dyn ActorHandle>>,
 {
-    fn handle(self: Box<Self>, launcher: &mut Launcher, backstage: &mut Backstage<Launcher, Box<dyn ActorHandle>>) {
+    fn handle(self: Box<Self>, launcher: &mut Launcher<G>, backstage: &mut Backstage<Launcher<G>, Box<dyn ActorHandle>, G>) {
         // ensure the launcher is not stopping
         if !backstage.service().is_stopping() {
             // create recoveralbe actor
@@ -219,7 +222,7 @@ where
             let r = backstage.spawn(self.actor, Box::new(supervisor), Service::new(&self.name));
             self.response_handle.send(r).ok();
         } else {
-            let msg = format!("{} cannot add {}", backstage.service().name(), self.name);
+            let msg = format!("{} is stopping, cannot add {}", backstage.service().name(), self.name);
             self.response_handle.send(Err(anyhow::Error::msg(msg))).ok();
         }
     }
@@ -238,21 +241,25 @@ impl<T: Clone> Recoverable<T> {
         Self { name, actor }
     }
 }
-
-trait Recovery: Send {
-    fn recover(self: Box<Self>, launcher: &mut Launcher, backstage: &mut Backstage<Launcher, Box<dyn ActorHandle>>) -> bool;
+/// Defines how to recover/restart actor
+pub trait Recovery<G: Send + Clone + 'static>: Send {
+    /// Restart the actor after shutdown
+    fn recover(self: Box<Self>, launcher: &mut Launcher<G>, backstage: &mut Backstage<Launcher<G>, Box<dyn ActorHandle>, G>) -> bool;
 }
 
-impl<T: Channel + Clone + 'static> Recovery for Recoverable<T>
+impl<T: Channel + Clone + 'static, G> Recovery<G> for Recoverable<T>
 where
-    Backstage<Launcher, Box<dyn ActorHandle>>: Spawn<T, Box<dyn ActorHandle>>,
+    Backstage<Launcher<G>, Box<dyn ActorHandle>, G>: Spawn<T, Box<dyn ActorHandle>>,
+    G: Send + Clone + 'static,
 {
-    fn recover(self: Box<Self>, launcher: &mut Launcher, backstage: &mut Backstage<Launcher, Box<dyn ActorHandle>>) -> bool {
+    fn recover(self: Box<Self>, launcher: &mut Launcher<G>, backstage: &mut Backstage<Launcher<G>, Box<dyn ActorHandle>, G>) -> bool {
         // create new recoveralbe actor
         let recoverable = Recoverable::new(self.name.clone(), self.actor.clone());
         // reinsert it to the launcher state
         launcher.recoverable_actors.insert(self.name.clone(), Box::new(recoverable));
-        let supervisor = backstage.handle().clone().unwrap();
+        let s = crate::core::NullSupervisor;
+        let supervisor: Box<dyn ActorHandle> = Box::new(backstage.handle().clone().unwrap());
+
         let r = backstage.spawn(self.actor, Box::new(supervisor), Service::new(&self.name));
         if r.is_ok() {
             true

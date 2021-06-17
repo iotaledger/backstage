@@ -90,7 +90,9 @@ impl Channel for SecondChild {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let mut runtime = BackstageRuntime::new("two-child-example").expect("runtime to get created");
+    #[derive(Clone)]
+    pub struct NoBounds;
+    let mut runtime = BackstageRuntime::new("two-child-example", NoBounds).expect("runtime to get created");
     runtime.add("FirstChild", FirstChild).await.expect("FirstChild to get spawned");
     runtime.add("SecondChild", SecondChild).await.expect("SecondChild to get spawned");
     runtime.block_on().await;

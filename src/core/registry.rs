@@ -36,6 +36,7 @@ impl ActorHandle for GlobalRegistryHandle {
 pub struct GlobalRegistry {
     store: anymap::Map<dyn anymap::any::CloneAny + Send + Sync>,
     pendings: anymap::Map<dyn anymap::any::Any + Send + Sync>,
+    cleanups: HashMap<NamedType, Vec<Box<dyn CleanupFromStore>>>,
 }
 impl GlobalRegistry {
     /// Create new GlobalRegistry actor's struct
@@ -43,6 +44,7 @@ impl GlobalRegistry {
         Self {
             store: anymap::Map::new(),
             pendings: anymap::Map::new(),
+            cleanups: HashMap::new(),
         }
     }
 }
@@ -60,6 +62,7 @@ pub struct Pending<T> {
 pub enum GlobalRegistryEvent {
     /// Register actor handle
     Boxed(Box<dyn RegistryEvent>),
+    /// Shutdown registry variant
     Shutdown,
 }
 /// The event type of registry
@@ -69,15 +72,30 @@ pub trait RegistryEvent: Send {
 }
 /// Register T event
 pub struct Register<T: Clone> {
-    name: String,
+    named_type: NamedType,
     t: T,
     response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>,
 }
 
 impl<T: Clone> Register<T> {
     /// Create new Register T struct
-    pub fn new(name: String, t: T, response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>) -> Self {
-        Self { name, t, response_handle }
+    pub fn new<A: 'static + Channel>(name: String, t: T, response_handle: tokio::sync::oneshot::Sender<Result<(), anyhow::Error>>) -> Self {
+        Self {
+            named_type: NamedType::new::<A>(name),
+            t,
+            response_handle,
+        }
+    }
+    /// Insert cleanup record for a given T from named actor
+    pub(crate) fn insert_cleanup(registry: &mut GlobalRegistry, named_type: NamedType)
+    where
+        T: Sync + Send + Clone + 'static,
+    {
+        if let Some(existing_cleanups) = registry.cleanups.get_mut(&named_type) {
+            existing_cleanups.push(Box::new(Cleanup::<T>::new()));
+        } else {
+            registry.cleanups.insert(named_type, vec![Box::new(Cleanup::<T>::new())]);
+        }
     }
 }
 
@@ -85,28 +103,30 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Register<T> {
     fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
         // check if there is any pendings for this T type;
         if let Some(pendings) = registry.pendings.get_mut::<Pending<T>>() {
-            if let Some(response_handles) = pendings.precise.remove(&self.name) {
+            if let Some(response_handles) = pendings.precise.remove(&self.named_type.name) {
                 for h in response_handles {
                     h.send(Ok(self.t.clone())).ok();
                 }
             }
         };
         if let Some(hash_map) = registry.store.get_mut::<Mapped<T>>() {
-            if hash_map.values.contains_key(&self.name) {
+            if hash_map.values.contains_key(&self.named_type.name) {
                 self.response_handle
                     .send(Err(anyhow::Error::msg("duplicated name for same value")))
                     .ok();
             } else {
-                hash_map.values.insert(self.name, self.t);
+                hash_map.values.insert(self.named_type.name.clone(), self.t);
                 self.response_handle.send(Ok(())).ok();
             }
         } else {
             let mut values = HashMap::new();
-            values.insert(self.name, self.t);
+            values.insert(self.named_type.name.clone(), self.t);
             let mapped = Mapped { values };
             registry.store.insert::<Mapped<T>>(mapped);
             self.response_handle.send(Ok(())).ok();
         };
+        // store cleanup record
+        Self::insert_cleanup(registry, self.named_type.clone());
     }
 }
 
@@ -188,14 +208,20 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for Remove<T> {
 
 /// DependsOn T event
 pub struct DependsOn<T> {
+    named_type: NamedType,
     name: String,
     response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>,
 }
 
 impl<T> DependsOn<T> {
     /// Create new DependsOn T struct
-    pub fn new(name: String, response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>) -> Self {
-        Self { name, response_handle }
+    pub fn new<A: 'static + Channel>(name: String, response_handle: tokio::sync::oneshot::Sender<Result<T, anyhow::Error>>) -> Self {
+        let named_type = NamedType::new::<A>(name.clone());
+        Self {
+            name,
+            response_handle,
+            named_type,
+        }
     }
 }
 
@@ -220,9 +246,127 @@ impl<T: 'static + Sync + Send + Clone> RegistryEvent for DependsOn<T> {
             let p = Pending { precise };
             registry.pendings.insert::<Pending<T>>(p);
         };
+        // todo insert cleanup object to release close self.response handle
+    }
+}
+/// Unique id for a named typeid;
+#[derive(Eq, PartialEq, Clone)]
+pub struct NamedType {
+    name: String,
+    type_id: std::any::TypeId,
+}
+
+impl std::hash::Hash for NamedType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.type_id.hash(state);
     }
 }
 
+impl NamedType {
+    fn new<T: 'static>(name: String) -> Self {
+        Self {
+            name,
+            type_id: std::any::TypeId::of::<T>(),
+        }
+    }
+}
+/// Cleanup registred types by Actor T
+pub struct CleanupTypes<T: Channel> {
+    _marker: std::marker::PhantomData<T>,
+    name: String,
+}
+impl<T: Channel> CleanupTypes<T> {
+    pub fn new(name: String) -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+            name,
+        }
+    }
+}
+
+impl<T: Channel + 'static> RegistryEvent for CleanupTypes<T> {
+    fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
+        let named_type = NamedType::new::<T>(self.name);
+        if let Some(cleanups) = registry.cleanups.remove(&named_type) {
+            for c in cleanups {
+                c.cleanup(&named_type.name, registry);
+            }
+        };
+    }
+}
+
+/// Close any pending/dependency on the actor
+pub struct ClosePending<T: Channel> {
+    _marker: std::marker::PhantomData<T>,
+    name: String,
+}
+
+impl<T: Channel> ClosePending<T> {
+    pub fn new(name: String) -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+            name,
+        }
+    }
+}
+
+impl<T: Channel + 'static> RegistryEvent for ClosePending<T> {
+    fn handle(self: Box<Self>, registry: &mut GlobalRegistry) {
+        let named_type = NamedType::new::<T>(self.name);
+        if let Some(mut cleanups) = registry.cleanups.remove(&named_type) {
+            for c in cleanups.iter_mut() {
+                c.cleanup_pendings(&named_type.name, registry);
+            }
+            // reinsert
+            registry.cleanups.insert(named_type, cleanups);
+        };
+    }
+}
+
+struct Cleanup<T> {
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Cleanup<T> {
+    /// create cleanup event
+    fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData::<T>,
+        }
+    }
+}
+trait CleanupFromStore: Send + Sync {
+    fn cleanup(self: Box<Self>, name: &str, registry: &mut GlobalRegistry);
+    fn cleanup_pendings(&mut self, name: &str, registry: &mut GlobalRegistry);
+    fn of(&self, type_id: &std::any::TypeId) -> bool;
+}
+
+impl<T: 'static + Sync + Send + Clone> CleanupFromStore for Cleanup<T> {
+    fn cleanup_pendings(&mut self, name: &str, registry: &mut GlobalRegistry) {
+        // check if there is any pendings for this T type;
+        if let Some(pendings) = registry.pendings.get_mut::<Pending<T>>() {
+            if let Some(response_handles) = pendings.precise.remove(name) {
+                for h in response_handles {
+                    h.send(Err(anyhow::Error::msg("Cleanup process dropped response handle"))).ok();
+                }
+            }
+        };
+    }
+    fn cleanup(mut self: Box<Self>, name: &str, registry: &mut GlobalRegistry) {
+        self.cleanup_pendings(name, registry);
+        if let Some(mut hash_map) = registry.store.remove::<Mapped<T>>() {
+            let _ = hash_map.values.remove(name);
+            if hash_map.values.len() != 0 {
+                // reinsert as there are other T don't belong to the provided name
+                registry.store.insert(hash_map);
+            }
+        };
+    }
+    fn of(&self, type_id: &std::any::TypeId) -> bool {
+        &std::any::TypeId::of::<T>() == type_id
+    }
+}
 /// GlobalRegistry Actor implementation
 #[async_trait::async_trait]
 impl<C> Actor<C> for GlobalRegistry
@@ -231,11 +375,9 @@ where
     C::Supervisor: ActorHandle,
 {
     async fn run(mut self, context: &mut C) -> ActorResult {
-        // drop handle to trigger graceful shutdown when all the handles are dropped;
         context.handle().take();
         context.service().update_status(ServiceStatus::Running);
         context.propagate_service();
-
         while let Some(event) = context.inbox().0.recv().await {
             match event {
                 GlobalRegistryEvent::Boxed(registry_event) => {

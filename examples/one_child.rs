@@ -42,7 +42,9 @@ impl Channel for OneChild {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let mut runtime = BackstageRuntime::new("one-child-example").expect("runtime to get created");
+    #[derive(Clone)]
+    pub struct NoBounds;
+    let mut runtime = BackstageRuntime::new("one-child-example", NoBounds).expect("runtime to get created");
     runtime.add("OneChild", OneChild).await.expect("OneChild to get spawned");
     runtime.block_on().await;
 }

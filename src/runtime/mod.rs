@@ -1,7 +1,7 @@
 use crate::core::{Actor, ActorHandle, ActorResult, BoxedActorHandle, Channel, Essential, Service, Spawn};
 use futures::future::AbortHandle;
 /// Backstage default runtime struct
-pub struct Backstage<C: Channel, S: ActorHandle> {
+pub struct Backstage<C: Channel, S: ActorHandle, G: Clone + Send> {
     /// The supervisor handle which is used to keep the supervisor up to date with child status
     supervisor: S,
     /// The actor's handle
@@ -18,9 +18,11 @@ pub struct Backstage<C: Channel, S: ActorHandle> {
     children_aborts: std::collections::HashMap<String, AbortHandle>,
     /// Registry handle
     registry: Option<crate::core::registry::GlobalRegistryHandle>,
+    /// passed generic bounds
+    generic: G,
 }
 
-impl<C: Channel, S: ActorHandle> Backstage<C, S> {
+impl<C: Channel, S: ActorHandle, G: Clone + Send> Backstage<C, S, G> {
     /// Create backstage context
     pub fn new(
         supervisor: S,
@@ -28,6 +30,7 @@ impl<C: Channel, S: ActorHandle> Backstage<C, S> {
         inbox: C::Inbox,
         service: Service,
         registry: Option<crate::core::registry::GlobalRegistryHandle>,
+        generic: G,
     ) -> Self {
         Self {
             supervisor,
@@ -38,17 +41,19 @@ impl<C: Channel, S: ActorHandle> Backstage<C, S> {
             children_joins: std::collections::HashMap::new(),
             children_aborts: std::collections::HashMap::new(),
             registry,
+            generic,
         }
     }
 }
 
 #[async_trait::async_trait]
-impl<S: ActorHandle, C: Channel> Essential for Backstage<C, S>
+impl<S: ActorHandle, C: Channel + 'static, G: Clone + Send> Essential for Backstage<C, S, G>
 where
     C::Handle: Clone + Sync,
 {
     type Supervisor = S;
     type Actor = C;
+    type Generic = G;
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
     async fn breakdown(mut self, r: ActorResult) {
         // shutdown children
@@ -59,11 +64,10 @@ where
         }
         // update service to be stopped
         self.service.update_status(crate::core::ServiceStatus::Stopped);
-        // remove itself from the registry (if any)
+        // cleanup all associated registered types from the registry
         if let Some(r) = self.registry.as_ref() {
-            let event = crate::core::GlobalRegistryEvent::Boxed(Box::new(crate::core::registry::Remove::<C::Handle>::new(
-                self.service.name().into(),
-            )));
+            let cleanup = crate::core::registry::CleanupTypes::<C>::new(self.service.name().into());
+            let event = crate::core::GlobalRegistryEvent::Boxed(Box::new(cleanup));
             r.0.send(event).ok();
         }
         // aknshutdown to supervisor
@@ -152,13 +156,16 @@ where
         }
         self.supervisor.service(&self.service);
     }
+    fn generic(&mut self) -> &mut Self::Generic {
+        &mut self.generic
+    }
 }
 use crate::core::Registry;
 // implementation of spawn contract
-impl<PA: Channel, PS: ActorHandle, A, S: ActorHandle> Spawn<A, S> for Backstage<PA, PS>
+impl<PA: Channel, PS: ActorHandle, A, S: ActorHandle, G: Send + Clone + 'static> Spawn<A, S> for Backstage<PA, PS, G>
 where
-    Self: Essential<Actor = PA> + crate::core::Registry,
-    A: Actor<Backstage<A, S>>,
+    Self: Essential<Actor = PA, Generic = G> + crate::core::Registry,
+    A: Actor<Backstage<A, S, G>>,
     A::Handle: ActorHandle + Clone,
 {
     fn spawn(&mut self, mut actor: A, supervisor: S, service: Service) -> Result<A::Handle, anyhow::Error> {
@@ -166,17 +173,18 @@ where
         let (handle, inbox) = actor.channel()?;
         // get the name of the actor service
         let name: String = service.name().into();
-        // register the handle in registry (if registry available)
-        if self.registry.is_some() {
-            let f = self.register(name.clone(), handle.clone());
-            tokio::task::block_in_place(move || tokio::runtime::Handle::current().block_on(async move { f.await }))?;
-        }
         // update microservice
         self.service.update_microservice(name.clone(), service.clone());
         self.children_handles.insert(name.clone(), Box::new(handle.clone()));
         // clone registry (if any)
         let registry_handle = self.registry.clone();
-        let child_context = Backstage::<A, S>::new(supervisor, handle.clone(), inbox, service.clone(), registry_handle);
+        let generic = self.generic.clone();
+        let mut child_context = Backstage::<A, S, G>::new(supervisor, handle.clone(), inbox, service.clone(), registry_handle, generic);
+        // register the handle in registry (if registry available)
+        if child_context.registry.is_some() {
+            let f = child_context.register::<A::Handle>(handle.clone());
+            tokio::task::block_in_place(move || tokio::runtime::Handle::current().block_on(async move { f.await }))?;
+        }
         let wrapped_fut = async move {
             let mut context = child_context;
             let child_fut = actor.run(&mut context);
@@ -190,10 +198,10 @@ where
 }
 
 #[async_trait::async_trait]
-impl<C: Channel, S: ActorHandle> crate::core::Registry for Backstage<C, S> {
+impl<C: Channel + 'static, S: ActorHandle, G: Clone + Send + 'static> crate::core::Registry for Backstage<C, S, G> {
     async fn depends_on<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let event = crate::core::registry::DependsOn::<T>::new(name, tx);
+        let event = crate::core::registry::DependsOn::<T>::new::<C>(name, tx);
         if let Some(r) = self.registry.as_ref() {
             r.0.send(crate::core::registry::GlobalRegistryEvent::Boxed(Box::new(event))).ok();
         } else {
@@ -201,14 +209,12 @@ impl<C: Channel, S: ActorHandle> crate::core::Registry for Backstage<C, S> {
         }
         rx.await?
     }
-    async fn register<T: 'static + Sync + Send + Clone>(&mut self, name: String, handle: T) -> Result<(), anyhow::Error> {
+    async fn register<T: 'static + Sync + Send + Clone>(&mut self, t: T) -> Result<(), anyhow::Error> {
+        let name = self.service().name();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let event = crate::core::registry::Register::<T>::new(name.clone(), handle, tx);
+        let event = crate::core::registry::Register::<T>::new::<C>(name.into(), t, tx);
         if let Some(r) = self.registry.as_ref() {
-            let s =
-                r.0.send(crate::core::registry::GlobalRegistryEvent::Boxed(Box::new(event)))
-                    .ok()
-                    .is_some();
+            r.0.send(crate::core::registry::GlobalRegistryEvent::Boxed(Box::new(event))).ok();
         } else {
             anyhow::bail!("Registry doesn't exist")
         }
@@ -246,9 +252,10 @@ impl<C: Channel, S: ActorHandle> crate::core::Registry for Backstage<C, S> {
 
 pub mod launcher;
 
-pub struct BackstageRuntime {
-    context: Backstage<BackstageActor, crate::core::NullSupervisor>,
-    launcher_handle: Option<launcher::LauncherHandle>,
+pub struct BackstageBuilder {}
+pub struct BackstageRuntime<G: Clone + Send + 'static> {
+    context: Backstage<BackstageActor, crate::core::NullSupervisor, G>,
+    launcher_handle: Option<launcher::LauncherHandle<G>>,
 }
 
 #[derive(Clone)]
@@ -264,13 +271,13 @@ impl BackstageHandle {
 
 impl ActorHandle for BackstageHandle {
     fn service(&self, service: &Service) {
-        self.tx.send(BackstageEvent::Service(service.clone()));
+        self.tx.send(BackstageEvent::Service(service.clone())).ok();
     }
     fn shutdown(self: Box<Self>) {
         // do nothing
     }
-    fn aknshutdown(&self, service: Service, r: ActorResult) {
-        self.tx.send(BackstageEvent::Service(service));
+    fn aknshutdown(&self, service: Service, _r: ActorResult) {
+        self.tx.send(BackstageEvent::Service(service)).ok();
     }
     fn send(&self, event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
         // do nothing
@@ -283,11 +290,13 @@ pub enum BackstageEvent {
     Service(Service),
     ExitProgram,
 }
+/// Backstage inbox (wrapper around tokio receiver)
 pub struct BackstageInbox {
     rx: tokio::sync::mpsc::UnboundedReceiver<BackstageEvent>,
 }
 
 impl BackstageInbox {
+    /// Create new backstage inbox (wrapper around tokio receiver)
     pub fn new(rx: tokio::sync::mpsc::UnboundedReceiver<BackstageEvent>) -> Self {
         Self { rx }
     }
@@ -302,13 +311,20 @@ impl Channel for BackstageActor {
         Ok((handle, inbox))
     }
 }
-impl BackstageRuntime {
+
+impl<G: Send + Clone + 'static> BackstageRuntime<G> {
     /// Create new runtime
-    pub fn new(name: &str) -> Result<Self, anyhow::Error> {
+    pub fn new(name: &str, generic: G) -> Result<Self, anyhow::Error> {
         // create backstage
         let (handle, inbox) = BackstageActor.channel()?;
-        let mut backstage =
-            Backstage::<BackstageActor, _>::new(crate::core::NullSupervisor, handle.clone(), inbox, Service::new(name), None);
+        let mut backstage = Backstage::<BackstageActor, _, _>::new(
+            crate::core::NullSupervisor,
+            handle.clone(),
+            inbox,
+            Service::new(name),
+            None,
+            generic,
+        );
         // spawn registry as runtime child
         // Initialize registery
         let registry = crate::core::GlobalRegistry::new();
@@ -322,7 +338,7 @@ impl BackstageRuntime {
         let launcher = launcher::Launcher::new();
         let launcher_handle = backstage.spawn(launcher, Box::new(handle.clone()), Service::new("Launcher"))?;
         // spawn ctrl_c
-        Backstage::<BackstageActor, crate::core::NullSupervisor>::spawn_task(ctrl_c(handle));
+        Backstage::<BackstageActor, crate::core::NullSupervisor, G>::spawn_task(ctrl_c(handle));
 
         Ok(Self {
             context: backstage,
@@ -330,17 +346,18 @@ impl BackstageRuntime {
         })
     }
     /// Return context reference
-    pub fn context(&mut self) -> &mut Backstage<BackstageActor, crate::core::NullSupervisor> {
+    pub fn context(&mut self) -> &mut Backstage<BackstageActor, crate::core::NullSupervisor, G> {
         &mut self.context
     }
     /// Add actor to the launcher
-    pub async fn add<T: Clone + Channel + crate::core::Actor<Backstage<T, Box<(dyn crate::core::ActorHandle + 'static)>>>>(
+    pub async fn add<T: Clone + Channel + crate::core::Actor<Backstage<T, Box<(dyn crate::core::ActorHandle + 'static)>, G>>>(
         &mut self,
         name: &str,
         actor: T,
     ) -> Result<T::Handle, anyhow::Error>
     where
         T::Handle: crate::core::ActorHandle,
+        G: Send + Clone + 'static,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let add_event = launcher::Add::new(name.into(), actor, tx);
@@ -348,7 +365,7 @@ impl BackstageRuntime {
             .as_mut()
             .expect("Launcher Handle")
             .0
-            .send(launcher::LauncherEvent::Boxed(Box::new(add_event)))
+            .send(launcher::LauncherEvent::<G>::Boxed(Box::new(add_event)))
             .map_err(|e| anyhow::Error::msg(format!("{}", e)))?;
         rx.await?
     }
@@ -380,10 +397,10 @@ struct TestActor;
 #[derive(Clone)]
 struct TestActorHandle;
 impl ActorHandle for TestActorHandle {
-    fn service(&self, service: &Service) {}
+    fn service(&self, _service: &Service) {}
     fn shutdown(self: Box<Self>) {}
-    fn aknshutdown(&self, service: Service, r: ActorResult) {}
-    fn send(&self, event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
+    fn aknshutdown(&self, _service: Service, _r: ActorResult) {}
+    fn send(&self, _event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
         Ok(())
     }
 }
@@ -393,10 +410,11 @@ impl<C> Actor<C> for TestActor
 where
     C: Essential<Actor = Self>,
 {
-    async fn run(self, context: &mut C) -> ActorResult {
+    async fn run(self, _context: &mut C) -> ActorResult {
         Ok(())
     }
 }
+
 impl Channel for TestActor {
     type Handle = TestActorHandle;
     type Inbox = TestActorInbox;
@@ -418,8 +436,10 @@ async fn ctrl_c(handle: BackstageHandle) {
 #[tokio::test]
 async fn no_children() {
     env_logger::init();
+    #[derive(Clone)]
+    pub struct NoBounds;
     // build runtime and spawn launcher
-    let mut runtime = BackstageRuntime::new("backstage-test").expect("runtime to get created");
+    let mut runtime = BackstageRuntime::new("backstage-test", NoBounds).expect("runtime to get created");
     runtime.add("TestActor", TestActor).await.unwrap();
     runtime.block_on().await;
 }

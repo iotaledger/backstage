@@ -20,10 +20,11 @@ pub trait Actor<C: Essential<Actor = Self>>: Sized + Send + 'static + Channel {
     /// Actor lifecycle
     async fn run(self, context: &mut C) -> ActorResult;
 }
+
 /// Should be implemented for the actor type
 pub trait Channel: Send {
     /// The actor handle type
-    type Handle: Send + Clone + Sync + 'static;
+    type Handle: Send + Clone + Sync + 'static + ActorHandle;
     /// The actor inbox type
     type Inbox: Send;
     /// Initialize/create the actor channel
@@ -44,7 +45,7 @@ pub trait ActorHandle: 'static + Send + dyn_clone::DynClone {
 
 /// Wrapper to Box<dyn ActorHandle>
 #[derive(Clone)]
-pub struct BoxedActorHandle(Box<dyn ActorHandle>);
+pub struct BoxedActorHandle(pub Box<dyn ActorHandle>);
 dyn_clone::clone_trait_object!(ActorHandle);
 
 impl ActorHandle for Box<dyn ActorHandle> {
@@ -78,6 +79,8 @@ impl ActorHandle for BoxedActorHandle {
 }
 
 #[derive(Clone)]
+/// NullSupervisor that does nothing.
+/// Note: Mostly used by the root of the program (runtime).
 pub struct NullSupervisor;
 impl ActorHandle for NullSupervisor {
     fn service(&self, _service: &Service) {
@@ -86,10 +89,10 @@ impl ActorHandle for NullSupervisor {
     fn shutdown(self: Box<Self>) {
         // do nothing
     }
-    fn aknshutdown(&self, service: Service, r: ActorResult) {
+    fn aknshutdown(&self, _service: Service, _r: ActorResult) {
         // do nothing
     }
-    fn send(&self, event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
+    fn send(&self, _event: Box<dyn std::any::Any>) -> Result<(), Box<dyn std::any::Any>> {
         // do nothing
         Ok(())
     }
@@ -102,6 +105,8 @@ pub trait Essential: Send + Sized {
     type Supervisor: Send;
     /// The actor type which impl the Channel trait
     type Actor: Channel;
+    /// Generic bounds
+    type Generic: Clone;
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
     async fn breakdown(self, r: ActorResult);
     /// Get the service from the actor context
@@ -120,19 +125,23 @@ pub trait Essential: Send + Sized {
     fn propagate_service(&mut self);
     /// Handle microservice status change
     fn status_change(&mut self, service: Service);
-    /// init shutdown signal to all the children and transfer the service status to is_stopping
+    /// init shutdown signal to all the children and change the service status to is_stopping
     fn shutdown(&mut self);
     /// Check if we requested microservice to shutdown
     fn requested_to_shutdown(&self, name: &str) -> bool;
     /// Shutdown microservice
     fn shutdown_microservice(&mut self, name: &str, abort: bool);
+    /// Generic
+    fn generic(&mut self) -> &mut Self::Generic;
 }
 /// Runtime Spawn trait
 pub trait Spawn<A: Channel, S>: Essential {
     /// Defines how to spawn Actor of Type A with supervisor of handle S
     fn spawn(&mut self, actor: A, supervisor: S, service: Service) -> Result<A::Handle, anyhow::Error>;
 }
-
+pub trait SomeStorage {
+    // type Backend: Clone + Sync + Send + 'static;
+}
 /// An application's metrics
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Service {
@@ -271,7 +280,7 @@ pub trait Registry: Essential {
     /// Requesting precise dependency T from registry
     async fn depends_on<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<T, anyhow::Error>;
     /// Register T value in registry to be accessible within all scopes
-    async fn register<T: 'static + Sync + Send + Clone>(&mut self, name: String, handle: T) -> Result<(), anyhow::Error>;
+    async fn register<T: 'static + Sync + Send + Clone>(&mut self, t: T) -> Result<(), anyhow::Error>;
     /// Clone T registered by name
     async fn lookup<T: 'static + Sync + Send + Clone>(&mut self, name: String) -> Result<Option<T>, anyhow::Error>;
     /// Remove T registered by name
