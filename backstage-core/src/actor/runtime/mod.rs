@@ -97,8 +97,10 @@ pub trait BaseRuntime: Send + Sync {
     }
 
     /// Get an event handle of the given type, if it exists in this scope
-    fn event_handle<T: 'static + Clone + Send + Sync>(&self) -> Option<T> {
-        self.senders().get::<T>().map(|handle| handle.clone())
+    fn event_handle<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + Send + Sync>(&self) -> Option<H> {
+        self.senders()
+            .get::<H>()
+            .and_then(|handle| (!handle.is_closed()).then(|| handle.clone()))
     }
 
     /// Get an actor's event handle, if it exists in this scope.
@@ -109,7 +111,7 @@ pub trait BaseRuntime: Send + Sync {
     {
         self.senders()
             .get::<<A::Channel as Channel<A::Event>>::Sender>()
-            .map(|handle| Act(handle.clone()))
+            .and_then(|handle| (!handle.is_closed()).then(|| Act(handle.clone())))
     }
 
     /// Send an event to a given actor, if it exists in this scope
@@ -120,6 +122,7 @@ pub trait BaseRuntime: Send + Sync {
         let handle = self
             .senders_mut()
             .get_mut::<<A::Channel as Channel<A::Event>>::Sender>()
+            .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
         Sender::<A::Event>::send(handle, event).await
     }
@@ -149,7 +152,7 @@ pub trait SystemRuntime: BaseRuntime {
     {
         self.senders()
             .get::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
-            .map(|handle| handle.clone())
+            .and_then(|handle| (!handle.is_closed()).then(|| handle.clone()))
     }
 
     /// Send an event to a system if it exists within this runtime's scope
@@ -160,6 +163,7 @@ pub trait SystemRuntime: BaseRuntime {
         let handle = self
             .senders_mut()
             .get_mut::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
+            .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
         Sender::<S::ChildEvents>::send(handle, event).await
     }

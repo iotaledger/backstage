@@ -18,6 +18,9 @@ pub trait Channel<E: 'static + Send + Sync> {
 pub trait Sender<E: 'static + Send + Sync> {
     /// Send an event over the channel
     async fn send(&mut self, event: E) -> anyhow::Result<()>;
+
+    /// Check if the channel is closed
+    fn is_closed(&self) -> bool;
 }
 
 /// Defines half of a channel which receives events
@@ -56,6 +59,10 @@ impl<E: 'static + Send + Debug + Sync> Sender<E> for TokioSender<E> {
     async fn send(&mut self, event: E) -> anyhow::Result<()> {
         self.0.send(event).map_err(|e| anyhow::anyhow!(e))
     }
+
+    fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
 }
 
 /// A tokio mpsc receiver implementation
@@ -87,6 +94,13 @@ where
             None => Ok(()),
         }
     }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Some(s) => s.is_closed(),
+            None => true,
+        }
+    }
 }
 
 #[async_trait]
@@ -106,6 +120,10 @@ where
 impl<E: 'static + Send + Debug + Sync> Sender<E> for () {
     async fn send(&mut self, _event: E) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        true
     }
 }
 
