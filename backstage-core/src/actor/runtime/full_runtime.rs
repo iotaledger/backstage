@@ -1,5 +1,6 @@
 use super::*;
 
+/// A provided implementation of all runtime traits: `BaseRuntime`, `SystemRuntime`, `ResourceRuntime`, and `PoolRuntime`
 pub struct FullRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
@@ -10,6 +11,7 @@ pub struct FullRuntime {
 }
 
 impl FullRuntime {
+    /// Create a new, empty FullRuntime
     pub fn new() -> Self {
         Self::default()
     }

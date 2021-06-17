@@ -1,14 +1,19 @@
 use super::*;
 
+/// A runtime which defines a particular scope and functionality to
+/// create tasks within it.
 pub struct RuntimeScope<'a, Rt> {
+    /// The underlying runtime. Most functionality is forwarded to the scope,
+    /// but this may still be useful in certain situations.
     pub rt: &'a mut Rt,
 }
 
 impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
-    pub fn new(rt: &'a mut Rt) -> Self {
+    pub(crate) fn new(rt: &'a mut Rt) -> Self {
         Self { rt }
     }
 
+    /// Spawn a new, plain task with the same runtime as this scope
     pub fn spawn_task<F>(&mut self, f: F) -> AbortHandle
     where
         Rt: BaseRuntime,
@@ -18,6 +23,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.common_spawn_task(child_rt, f)
     }
 
+    /// Spawn a new, plain task with a specified runtime
     pub fn spawn_task_with_runtime<TaskRt, F>(&mut self, f: F) -> AbortHandle
     where
         Rt: BaseRuntime + Into<TaskRt>,
@@ -55,6 +61,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         abort_handle
     }
 
+    /// Spawn a new actor with a supervisor handle
     pub fn spawn_actor<A, H, E, I: Into<Option<H>>>(
         &mut self,
         actor: A,
@@ -73,6 +80,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         (abort_handle, sender)
     }
 
+    /// Spawn a new actor with no supervisor
     pub fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
         Rt: BaseRuntime + Into<A::Rt>,
@@ -124,6 +132,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         abort_handle
     }
 
+    /// Spawn a new system with a supervisor handle
     pub fn spawn_system<S, H, E, I: Into<Option<H>>>(
         &mut self,
         system: S,
@@ -144,6 +153,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         (abort_handle, sender)
     }
 
+    /// Spawn a new system with no supervisor
     pub fn spawn_system_unsupervised<S>(&mut self, system: S) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
     where
         Rt: SystemRuntime + Into<S::Rt>,
@@ -197,6 +207,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         abort_handle
     }
 
+    /// Spawn a new pool of actors of a given type
     pub fn spawn_pool<A: 'static + Actor<H, E>, H, E, I: Into<Option<H>>, F: FnOnce(&mut ScopedActorPool<Rt, A, H, E>)>(
         &mut self,
         supervisor_handle: I,
@@ -218,6 +229,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.pools_mut().insert(Arc::new(RwLock::new(pool)));
     }
 
+    /// Add a shared resource and get a reference to it
     pub fn add_resource<R: 'static + Send + Sync + Clone>(&mut self, resource: R) -> Res<R>
     where
         Rt: ResourceRuntime,
@@ -226,6 +238,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         Res(resource)
     }
 
+    /// Get a shared resource if it exists in the scope
     pub fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>>
     where
         Rt: ResourceRuntime,
@@ -233,13 +246,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.resource()
     }
 
-    pub fn resource_ref<R: 'static + Send + Sync>(&self) -> Option<&R>
-    where
-        Rt: ResourceRuntime,
-    {
-        self.rt.resource_ref()
-    }
-
+    /// Get a system reference if it exists in the scope
     pub fn system<S: 'static + System<H, E> + Send + Sync, H, E>(&self) -> Option<Sys<S, H, E>>
     where
         Rt: SystemRuntime,
@@ -249,6 +256,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.system()
     }
 
+    /// Get a pool of actors if it exists in the scope
     pub fn pool<A, H, E>(&self) -> Option<Res<Arc<RwLock<ActorPool<A, H, E>>>>>
     where
         Rt: PoolRuntime,
@@ -259,6 +267,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.pool::<A, H, E>()
     }
 
+    /// Send an event to an actor in this scope
     pub async fn send_actor_event<A: Actor<H, E>, H, E>(&mut self, event: A::Event) -> anyhow::Result<()>
     where
         Rt: BaseRuntime,
@@ -268,6 +277,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
         self.rt.send_actor_event::<A, H, E>(event).await
     }
 
+    /// Send an event to a system in this scope
     pub async fn send_system_event<S: System<H, E>, H, E>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
     where
         Rt: SystemRuntime,
@@ -278,6 +288,7 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
     }
 }
 
+/// An actor's scope, which provides some helpful functions specific to an actor
 pub struct ActorScopedRuntime<'a, A: Actor<H, E>, H, E>
 where
     A::Event: 'static,
@@ -295,7 +306,7 @@ where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
 {
-    pub fn new<I: Into<Option<H>>>(
+    pub(crate) fn new<I: Into<Option<H>>>(
         runtime: RuntimeScope<'a, A::Rt>,
         receiver: <A::Channel as Channel<A::Event>>::Receiver,
         shutdown: oneshot::Receiver<()>,
@@ -309,6 +320,7 @@ where
         }
     }
 
+    /// Get this actor's supervisor handle, if it exists
     pub fn supervisor_handle(&mut self) -> &mut Option<H> {
         &mut self.supervisor_handle
     }

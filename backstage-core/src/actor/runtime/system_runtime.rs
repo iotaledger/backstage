@@ -1,4 +1,5 @@
 use super::*;
+/// A provided implementation of the `SystemRuntime` trait
 pub struct SystemsRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
@@ -7,6 +8,7 @@ pub struct SystemsRuntime {
 }
 
 impl SystemsRuntime {
+    /// Create a new, empty SystemsRuntime
     pub fn new() -> Self {
         Self::default()
     }

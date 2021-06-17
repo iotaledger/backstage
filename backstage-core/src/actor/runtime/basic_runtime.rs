@@ -1,4 +1,5 @@
 use super::*;
+/// A provided implementation of the `BaseRuntime` trait
 pub struct BasicRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
@@ -6,6 +7,7 @@ pub struct BasicRuntime {
 }
 
 impl BasicRuntime {
+    /// Create a new, empty BasicRuntime
     pub fn new() -> Self {
         Self::default()
     }

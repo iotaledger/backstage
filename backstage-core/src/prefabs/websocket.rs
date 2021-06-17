@@ -1,7 +1,8 @@
 use super::*;
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
-use std::{collections::HashMap, marker::PhantomData, net::SocketAddr};
+pub use std::net::SocketAddr;
+use std::{collections::HashMap, marker::PhantomData};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
@@ -14,7 +15,7 @@ pub struct Websocket<E> {
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build<E: From<Message>>(service: Service, listen_address: SocketAddr) -> Websocket<E> {
+pub fn build<E: From<(SocketAddr, Message)>>(service: Service, listen_address: SocketAddr) -> Websocket<E> {
     Websocket {
         service,
         listen_address,
@@ -25,8 +26,8 @@ pub fn build<E: From<Message>>(service: Service, listen_address: SocketAddr) -> 
 
 #[derive(Clone, Debug)]
 pub enum WebsocketChildren {
-    Response(Message),
-    Received(Message),
+    Response((SocketAddr, Message)),
+    Received((SocketAddr, Message)),
     Connection(Connection),
 }
 
@@ -41,7 +42,7 @@ impl<H, E> System<H, E> for Websocket<E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent + Send + Sync,
-    E: From<Message>,
+    E: From<(SocketAddr, Message)>,
 {
     type ChildEvents = WebsocketChildren;
     type Dependencies = ();
@@ -77,7 +78,7 @@ where
                                 },
                                 None,
                             );
-                            rt.spawn_task(|mut rt| {
+                            rt.spawn_task(move |mut rt| {
                                 async move {
                                     while let Some(Ok(msg)) = receiver.next().await {
                                         match msg {
@@ -86,7 +87,8 @@ where
                                                 break;
                                             }
                                             msg => {
-                                                rt.send_system_event::<Websocket<E>, H, E>(WebsocketChildren::Received(msg)).await?;
+                                                rt.send_system_event::<Websocket<E>, H, E>(WebsocketChildren::Received((peer, msg)))
+                                                    .await?;
                                             }
                                         }
                                     }
@@ -107,7 +109,11 @@ where
         });
         while let Some(evt) = rt.next_event().await {
             match evt {
-                WebsocketChildren::Response(msg) => {}
+                WebsocketChildren::Response((peer, msg)) => {
+                    if let Some(conn) = this.write().await.connections.get_mut(&peer) {
+                        conn.send(msg).await;
+                    }
+                }
                 WebsocketChildren::Connection(conn) => {
                     // Store this connection
                     this.write().await.connections.insert(conn.peer, conn.sender);

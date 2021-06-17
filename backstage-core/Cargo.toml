@@ -45,7 +45,7 @@ name = "two_apps"
 path = "examples/two_apps.rs"
 
 [features]
-default = ["launcher", "prefabs"]
+default = ["launcher", "prefabs", "rand_pool"]
 launcher = ["log"]
 prefabs = ["tokio/net", "futures-util", "tokio-tungstenite"]
 rand_pool = ["rand"]

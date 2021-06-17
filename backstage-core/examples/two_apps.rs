@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use backstage::*;
-use futures::{FutureExt, SinkExt};
+use backstage::{prefabs::websocket::*, *};
+use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -193,7 +193,7 @@ impl Launcher {
 pub enum LauncherChildren {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
-    WebsocketMsg(Message),
+    WebsocketMsg((SocketAddr, Message)),
     Status(Service),
     Report(Result<Service, ActorError>),
     Shutdown { using_ctrl_c: bool },
@@ -209,8 +209,8 @@ impl SupervisorEvent for LauncherChildren {
     }
 }
 
-impl From<Message> for LauncherChildren {
-    fn from(msg: Message) -> Self {
+impl From<(SocketAddr, Message)> for LauncherChildren {
+    fn from(msg: (SocketAddr, Message)) -> Self {
         Self::WebsocketMsg(msg)
     }
 }
@@ -243,7 +243,7 @@ where
         );
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })));
         rt.spawn_actor(howdy_builder.build(this.write().await.service.spawn("Howdy")), my_handle.clone());
-        rt.spawn_system(
+        let (_, mut websocket_handle) = rt.spawn_system(
             prefabs::websocket::WebsocketBuilder::new()
                 .listen_address(([127, 0, 0, 1], 8000).into())
                 .build(this.write().await.service.spawn("Websocket")),
@@ -262,8 +262,9 @@ where
                     debug!("Exiting launcher");
                     break;
                 }
-                LauncherChildren::WebsocketMsg(msg) => {
+                LauncherChildren::WebsocketMsg((peer, msg)) => {
                     info!("Received websocket message: {:?}", msg);
+                    websocket_handle.send(WebsocketChildren::Response((peer, "bonjour".into()))).await;
                 }
                 LauncherChildren::Report(res) => match res {
                     Ok(s) => {
@@ -314,6 +315,9 @@ async fn startup() -> anyhow::Result<()> {
                     }
                     let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
                     stream.send(Message::text("Hello there")).await.unwrap();
+                    if let Some(Ok(msg)) = stream.next().await {
+                        info!("Response from websocket: {}", msg);
+                    }
                     Ok(())
                 }
                 .boxed()
