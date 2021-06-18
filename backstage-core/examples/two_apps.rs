@@ -157,9 +157,7 @@ pub struct NecessaryResource {
     counter: usize,
 }
 
-struct Launcher {
-    service: Service,
-}
+struct Launcher;
 
 impl Launcher {
     pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
@@ -282,15 +280,15 @@ impl System for Launcher {
                 LauncherEvents::Report(res) => match res {
                     Ok(s) => {
                         info!("{} has shutdown!", s.service.name);
-                        this.write().await.service.update_microservice(s.service);
+                        rt.service_mut().update_microservice(s.service);
                     }
                     Err(e) => {
                         info!("{} has shutdown unexpectedly!", e.service.name);
-                        this.write().await.service.update_microservice(e.service);
+                        rt.service_mut().update_microservice(e.service);
                     }
                 },
                 LauncherEvents::Status(s) => {
-                    this.write().await.service.update_microservice(s);
+                    rt.service_mut().update_microservice(s);
                 }
             }
         }
@@ -317,8 +315,7 @@ async fn startup() -> anyhow::Result<()> {
     FullRuntime::new()
         .scope(|scope| {
             let service = Service::new("Launcher");
-            let launcher = Launcher { service };
-            scope.spawn_system_unsupervised(launcher);
+            scope.spawn_system_unsupervised(Launcher);
             scope.spawn_task(|mut rt| {
                 async move {
                     for _ in 0..3 {
