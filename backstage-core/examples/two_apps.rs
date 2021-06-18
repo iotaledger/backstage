@@ -314,7 +314,6 @@ async fn main() {
 async fn startup() -> anyhow::Result<()> {
     FullRuntime::new()
         .scope(|scope| {
-            let service = Service::new("Launcher");
             scope.spawn_system_unsupervised(Launcher);
             scope.spawn_task(|mut rt| {
                 async move {
