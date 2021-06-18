@@ -1,7 +1,6 @@
-use crate::{
-    ActorError, ActorScopedRuntime, BaseRuntime, Channel, Dependencies, Sender, Service, SupervisedActorScopedRuntime, SupervisorEvent,
-};
+use crate::{ActorError, ActorScopedRuntime, BaseRuntime, Channel, Dependencies, Sender, SupervisedActorScopedRuntime, SupervisorEvent};
 use async_trait::async_trait;
+use std::borrow::Cow;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor {
@@ -17,38 +16,27 @@ pub trait Actor {
     type SupervisorEvent;
 
     /// The main function for the actor
-    async fn run<'a>(self, rt: ActorScopedRuntime<'a, Self>, deps: Self::Dependencies) -> Result<Service, ActorError>
+    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, deps: Self::Dependencies) -> Result<(), ActorError>
     where
         Self: Sized;
 
     /// Run this actor with a supervisor
     /// Note: Redefine this method if your actor requires a supervisor handle to function!
     async fn run_supervised<'a, H, E>(
-        self,
-        rt: SupervisedActorScopedRuntime<'a, Self, H, E>,
+        &mut self,
+        rt: &mut SupervisedActorScopedRuntime<'a, Self, H, E>,
         deps: Self::Dependencies,
-    ) -> Result<Service, ActorError>
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
+        E: 'static + SupervisorEvent<Self> + Send + Sync + From<Self::SupervisorEvent>,
     {
-        self.run(rt.scope, deps).await
+        self.run(&mut rt.scope, deps).await
     }
 
-    /// Runs this actor then reports back to the supervisor with the result
-    async fn run_then_report<'a, H, E>(
-        self,
-        mut rt: SupervisedActorScopedRuntime<'a, Self, H, E>,
-        deps: Self::Dependencies,
-    ) -> anyhow::Result<()>
-    where
-        Self: Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
-    {
-        let mut supervisor = rt.supervisor_handle().clone();
-        let res = self.run_supervised(rt, deps).await;
-        supervisor.send(E::report(res)).await
+    /// Get this actor's name
+    fn name() -> Cow<'static, str> {
+        std::any::type_name::<Self>().into()
     }
 }

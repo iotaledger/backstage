@@ -69,45 +69,19 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let builder = quote::format_ident!("{}Builder", actor);
 
     let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut found_service = false;
     for input in fn_inputs {
         match input {
             syn::FnArg::Typed(mut t) => {
                 let name = &t.pat;
                 let ty = &t.ty;
                 if let syn::Type::Path(p) = ty.as_ref() {
-                    if p.path.is_ident("Service") {
-                        if found_service {
-                            panic!("Duplicate Service in build signature!");
-                        }
-                        found_service = true;
-                    } else {
-                        input_names.push(name.clone());
+                    input_names.push(name.clone());
 
-                        if let syn::Type::Path(prev_type) = t.ty.as_ref() {
-                            if let Some(seg) = p.path.segments.last() {
-                                if seg.ident.to_string() == "Option" {
-                                    if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
-                                        let ty = args.args.first().unwrap();
-                                        let doc_name = match name.as_ref() {
-                                            syn::Pat::Ident(i) => i.ident.to_string(),
-                                            _ => "???".to_string(),
-                                        };
-                                        let doc = format!("Provide the builder with the {} field", doc_name);
-                                        let add_fn = quote! {
-                                            #[doc=#doc]
-                                            #vis fn #name<I: Into<Option<#ty>>> (mut self, val: I) -> Self {
-                                                self.#name = val.into();
-                                                self
-                                            }
-                                        };
-                                        add_fns.push(add_fn);
-
-                                        input_unwraps.push(quote! {self.#name});
-                                    } else {
-                                        panic!("Invalid Option arg!");
-                                    }
-                                } else {
+                    if let syn::Type::Path(prev_type) = t.ty.as_ref() {
+                        if let Some(seg) = p.path.segments.last() {
+                            if seg.ident.to_string() == "Option" {
+                                if let syn::PathArguments::AngleBracketed(ref args) = seg.arguments {
+                                    let ty = args.args.first().unwrap();
                                     let doc_name = match name.as_ref() {
                                         syn::Pat::Ident(i) => i.ident.to_string(),
                                         _ => "???".to_string(),
@@ -115,31 +89,46 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                     let doc = format!("Provide the builder with the {} field", doc_name);
                                     let add_fn = quote! {
                                         #[doc=#doc]
-                                        #vis fn #name (mut self, val: #ty) -> Self {
-                                            self.#name.replace(val);
+                                        #vis fn #name<I: Into<Option<#ty>>> (mut self, val: I) -> Self {
+                                            self.#name = val.into();
                                             self
                                         }
                                     };
                                     add_fns.push(add_fn);
 
-                                    input_unwraps.push(
+                                    input_unwraps.push(quote! {self.#name});
+                                } else {
+                                    panic!("Invalid Option arg!");
+                                }
+                            } else {
+                                let doc_name = match name.as_ref() {
+                                    syn::Pat::Ident(i) => i.ident.to_string(),
+                                    _ => "???".to_string(),
+                                };
+                                let doc = format!("Provide the builder with the {} field", doc_name);
+                                let add_fn = quote! {
+                                    #[doc=#doc]
+                                    #vis fn #name (mut self, val: #ty) -> Self {
+                                        self.#name.replace(val);
+                                        self
+                                    }
+                                };
+                                add_fns.push(add_fn);
+
+                                input_unwraps.push(
                                         quote! {self.#name.unwrap_or_else(|| panic!("Config param {} was not provided!", stringify!(self.#name)))},
                                     );
 
-                                    t.ty = syn::parse_quote! {Option<#prev_type>};
-                                }
+                                t.ty = syn::parse_quote! {Option<#prev_type>};
                             }
                         }
-
-                        inputs.push(t);
                     }
+
+                    inputs.push(t);
                 }
             }
             _ => (),
         }
-    }
-    if !found_service {
-        panic!("Build function must contain a Service parameter (ex. service: Service)!");
     }
 
     let defaults = input_names
@@ -187,7 +176,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
         {
             type Built = #actor #generics;
 
-            fn build(self, service: Service) -> Self::Built #bounds
+            fn build(self) -> Self::Built #bounds
                 #block
 
         }

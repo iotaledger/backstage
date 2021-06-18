@@ -1,24 +1,26 @@
 use super::*;
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
-use std::collections::HashMap;
 pub use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
+use std::{collections::HashMap, sync::Arc};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::RwLock,
+};
 use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
 /// A websocket which awaits connections on a specified listen
 /// address and forwards messages to its supervisor
+#[derive(Debug)]
 pub struct Websocket {
-    service: Service,
     listen_address: SocketAddr,
     connections: HashMap<SocketAddr, TokioSender<Message>>,
 }
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build(service: Service, listen_address: SocketAddr) -> Websocket {
+pub fn build(listen_address: SocketAddr) -> Websocket {
     Websocket {
-        service,
         listen_address,
         connections: Default::default(),
     }
@@ -53,22 +55,20 @@ impl System for Websocket {
     type SupervisorEvent = (SocketAddr, Message);
 
     async fn run_supervised<'a, H, E>(
-        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SupervisedSystemScopedRuntime<'a, Self, H, E>,
+        this: Arc<RwLock<Self>>,
+        rt: &mut SupervisedSystemScopedRuntime<'a, Self, H, E>,
         _deps: (),
-    ) -> Result<Service, ActorError>
+    ) -> Result<(), ActorError>
     where
         Self: Send + Sync + Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
+        E: 'static + SupervisorEvent<Arc<RwLock<Self>>> + Send + Sync + From<Self::SupervisorEvent>,
     {
         let tcp_listener = {
-            let service = this.read().await.service.clone();
             TcpListener::bind(this.read().await.listen_address)
                 .await
-                .map_err(|_| ActorError::new(anyhow::anyhow!("Unable to bind to dashboard listen address").into(), service))?
+                .map_err(|_| ActorError::from(anyhow::anyhow!("Unable to bind to dashboard listen address")))?
         };
-        let mut listener_service = this.write().await.service.spawn("Listener");
         let connector_abort = rt.spawn_task(|mut rt| {
             async move {
                 loop {
@@ -76,10 +76,7 @@ impl System for Websocket {
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder {
-                                service: listener_service.spawn("Responder"),
-                                sender,
-                            });
+                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender });
                             rt.spawn_task(move |mut rt| {
                                 async move {
                                     while let Some(Ok(msg)) = receiver.next().await {
@@ -133,20 +130,15 @@ impl System for Websocket {
             }
         }
         connector_abort.abort();
-        Ok(this.read().await.service.clone())
+        Ok(())
     }
 
-    async fn run<'a>(
-        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        _rt: SystemScopedRuntime<'a, Self>,
-        _deps: (),
-    ) -> Result<Service, ActorError> {
-        Ok(this.read().await.service.clone())
+    async fn run<'a>(_this: Arc<RwLock<Self>>, _rt: &mut SystemScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError> {
+        Ok(())
     }
 }
 
 struct Responder {
-    service: Service,
     sender: SplitSink<WebSocketStream<TcpStream>, Message>,
 }
 
@@ -158,16 +150,13 @@ impl Actor for Responder {
     type Rt = BasicRuntime;
     type SupervisorEvent = ();
 
-    async fn run<'a>(mut self, mut rt: ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<Service, ActorError>
+    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
     where
         Self: Sized,
     {
         while let Some(msg) = rt.next_event().await {
-            self.sender
-                .send(msg)
-                .await
-                .map_err(|e| ActorError::new(anyhow::anyhow!(e).into(), self.service.clone()))?;
+            self.sender.send(msg).await.map_err(|e| ActorError::from(anyhow::anyhow!(e)))?;
         }
-        Ok(self.service)
+        Ok(())
     }
 }

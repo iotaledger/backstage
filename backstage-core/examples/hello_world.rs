@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use backstage::*;
 use futures::FutureExt;
@@ -11,9 +13,9 @@ pub enum HelloWorldError {
     SomeError,
 }
 
-impl Into<ActorErrorKind> for HelloWorldError {
-    fn into(self) -> ActorErrorKind {
-        ActorErrorKind::RuntimeError(ActorRequest::Finish)
+impl Into<ActorError> for HelloWorldError {
+    fn into(self) -> ActorError {
+        ActorError::RuntimeError(ActorRequest::Finish)
     }
 }
 
@@ -24,16 +26,14 @@ pub enum HelloWorldEvent {
 
 #[derive(Debug)]
 pub struct HelloWorld {
-    service: Service,
     name: String,
     num: u32,
 }
 
 #[build]
 #[derive(Debug, Clone)]
-pub fn build_hello_world(service: Service, name: String, num: Option<u32>) -> HelloWorld {
+pub fn build_hello_world(name: String, num: Option<u32>) -> HelloWorld {
     HelloWorld {
-        service,
         name,
         num: num.unwrap_or_default(),
     }
@@ -47,7 +47,7 @@ impl Actor for HelloWorld {
     type Rt = BasicRuntime;
     type SupervisorEvent = ();
 
-    async fn run<'a>(self, mut rt: ActorScopedRuntime<'a, Self>, _deps: Self::Dependencies) -> Result<Service, ActorError>
+    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: Self::Dependencies) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -55,35 +55,43 @@ impl Actor for HelloWorld {
             match evt {
                 HelloWorldEvent::Print(s) => {
                     info!("HelloWorld {} printing: {}", self.num, s);
-                    break;
+                    if rand::random() {
+                        panic!("Random panic attack!")
+                    }
                 }
             }
         }
-        Ok(self.service)
+        Ok(())
     }
 }
 
-struct Launcher {
-    service: Service,
-}
+struct Launcher;
 
 impl Launcher {
     pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherChildren::HelloWorld(event)).await
+        rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
     }
 }
 
 #[derive(Debug)]
-pub enum LauncherChildren {
+pub enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Status(Service),
-    Report(Result<Service, ActorError>),
+    Report(Result<SuccessReport<LauncherChildren>, ErrorReport<LauncherChildren>>),
     Shutdown { using_ctrl_c: bool },
 }
 
-impl SupervisorEvent for LauncherChildren {
-    fn report(res: Result<Service, ActorError>) -> Self {
-        Self::Report(res)
+#[derive(Debug)]
+pub enum LauncherChildren {
+    HelloWorld(HelloWorld),
+}
+
+impl SupervisorEvent<HelloWorld> for LauncherEvents {
+    fn report(res: Result<SuccessReport<HelloWorld>, ErrorReport<HelloWorld>>) -> anyhow::Result<Self> {
+        Ok(Self::Report(
+            res.map(|s| SuccessReport::new(LauncherChildren::HelloWorld(s.state), s.service))
+                .map_err(|e| ErrorReport::new(LauncherChildren::HelloWorld(e.state), e.service, e.error)),
+        ))
     }
 
     fn status(service: Service) -> Self {
@@ -91,7 +99,7 @@ impl SupervisorEvent for LauncherChildren {
     }
 }
 
-impl From<()> for LauncherChildren {
+impl From<()> for LauncherEvents {
     fn from(_: ()) -> Self {
         panic!()
     }
@@ -99,7 +107,7 @@ impl From<()> for LauncherChildren {
 
 #[async_trait]
 impl System for Launcher {
-    type ChildEvents = LauncherChildren;
+    type ChildEvents = LauncherEvents;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
     type Rt = FullRuntime;
@@ -107,58 +115,81 @@ impl System for Launcher {
 
     async fn run<'a>(
         this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        mut rt: SystemScopedRuntime<'a, Self>,
+        rt: &mut SystemScopedRuntime<'a, Self>,
         _deps: (),
-    ) -> Result<Service, ActorError>
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         {
-            let service = &mut this.write().await.service;
             let my_handle = rt.my_handle();
             rt.spawn_pool(my_handle, |pool| {
                 for i in 0..10 {
-                    let service = service.spawn(format!("Hello World {}", i));
-                    let (abort, handle) = pool.spawn(builder.clone().num(i).build(service));
+                    let (_abort, _handle) = pool.spawn(builder.clone().num(i).build());
                 }
             });
         }
         tokio::task::spawn(ctrl_c(rt.my_handle()));
         while let Some(evt) = rt.next_event().await {
             match evt {
-                LauncherChildren::HelloWorld(event) => {
+                LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool::<HelloWorld>() {
+                    if let Some(pool) = rt.pool::<HelloWorld>().await {
                         pool.write().await.send_all(event).await;
                     }
                 }
-                LauncherChildren::Shutdown { using_ctrl_c } => {
+                LauncherEvents::Shutdown { using_ctrl_c } => {
                     debug!("Exiting launcher");
                     break;
                 }
-                LauncherChildren::Report(res) => match res {
+                LauncherEvents::Report(res) => match res {
                     Ok(s) => {
-                        info!("{} has shutdown!", s.name);
-                        this.write().await.service.update_microservice(s);
+                        match s.state {
+                            LauncherChildren::HelloWorld(h) => {
+                                info!("{} {} has shutdown!", h.name, h.num);
+                            }
+                        }
+                        rt.service_mut().update_microservice(s.service).ok();
                     }
                     Err(e) => {
-                        info!("{} has shutdown unexpectedly!", e.service.name);
-                        this.write().await.service.update_microservice(e.service);
+                        match e.state {
+                            LauncherChildren::HelloWorld(ref h) => {
+                                info!("{} {} has shutdown unexpectedly!", h.name, h.num);
+                            }
+                        }
+                        rt.service_mut().update_microservice(e.service.clone()).ok();
+                        match e.error.request() {
+                            ActorRequest::Restart => {
+                                if let Some(_) = rt.service_mut().remove_microservice(&e.service.id) {
+                                    let num = match e.state {
+                                        LauncherChildren::HelloWorld(ref h) => {
+                                            info!("Restarting {} {}", h.name, h.num);
+                                            h.num
+                                        }
+                                    };
+                                    let my_handle = rt.my_handle();
+                                    rt.spawn_into_pool(builder.clone().num(num).build(), my_handle).await;
+                                }
+                            }
+                            ActorRequest::Reschedule(_) => todo!(),
+                            ActorRequest::Finish => (),
+                            ActorRequest::Panic => panic!("Received request to panic....so I did"),
+                        }
                     }
                 },
-                LauncherChildren::Status(s) => {
-                    this.write().await.service.update_microservice(s);
+                LauncherEvents::Status(s) => {
+                    rt.service_mut().update_microservice(s).ok();
                 }
             }
         }
-        Ok(this.read().await.service.clone())
+        Ok(())
     }
 }
 
-pub async fn ctrl_c(mut sender: TokioSender<LauncherChildren>) {
+pub async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
     tokio::signal::ctrl_c().await.unwrap();
-    let exit_program_event = LauncherChildren::Shutdown { using_ctrl_c: true };
+    let exit_program_event = LauncherEvents::Shutdown { using_ctrl_c: true };
     sender.send(exit_program_event).await.ok();
 }
 
@@ -171,20 +202,24 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("{}", info);
+    }));
     FullRuntime::new()
         .scope(|scope| {
-            let service = Service::new("Launcher");
-            let launcher = Launcher { service };
-            scope.spawn_system_unsupervised(launcher);
+            scope.spawn_system_unsupervised(Launcher);
             scope.spawn_task(|mut rt| {
                 async move {
-                    rt.system::<Launcher>()
-                        .unwrap()
-                        .read()
-                        .await
-                        .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
-                        .await
-                        .unwrap();
+                    for _ in 0..10 {
+                        rt.system::<Launcher>()
+                            .unwrap()
+                            .read()
+                            .await
+                            .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
+                            .await
+                            .unwrap();
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     Ok(())
                 }
                 .boxed()

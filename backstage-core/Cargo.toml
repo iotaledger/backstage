@@ -24,6 +24,7 @@ thiserror = "1.0"
 log = { version = "0.4", optional = true }
 daggy = "0.7"
 lru = "0.6"
+num-traits = "0.2"
 
 rand = { version = "0.8", optional = true }
 futures-util = { version = "0.3", optional = true }

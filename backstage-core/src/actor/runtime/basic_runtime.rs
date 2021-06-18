@@ -4,6 +4,7 @@ pub struct BasicRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
     pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
+    pub(crate) service: Service,
 }
 
 impl BasicRuntime {
@@ -19,12 +20,20 @@ impl Default for BasicRuntime {
             join_handles: Default::default(),
             shutdown_handles: Default::default(),
             senders: Map::new(),
+            service: Service::new("Runtime"),
         }
     }
 }
 
 #[async_trait]
 impl BaseRuntime for BasicRuntime {
+    fn new(service: Service) -> Self {
+        Self {
+            service,
+            ..Default::default()
+        }
+    }
+
     fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
         &self.join_handles
     }
@@ -49,9 +58,18 @@ impl BaseRuntime for BasicRuntime {
         &mut self.senders
     }
 
-    fn child(&self) -> Self {
+    fn service(&self) -> &Service {
+        &self.service
+    }
+
+    fn service_mut(&mut self) -> &mut Service {
+        &mut self.service
+    }
+
+    fn child<S: Into<String>>(&mut self, name: S) -> Self {
         Self {
             senders: self.senders.clone(),
+            service: self.service.spawn(name),
             ..Default::default()
         }
     }
@@ -63,6 +81,7 @@ impl From<FullRuntime> for BasicRuntime {
             join_handles: frt.join_handles,
             shutdown_handles: frt.shutdown_handles,
             senders: frt.senders,
+            service: frt.service,
             ..Default::default()
         }
     }
@@ -74,6 +93,7 @@ impl From<SystemsRuntime> for BasicRuntime {
             join_handles: srt.join_handles,
             shutdown_handles: srt.shutdown_handles,
             senders: srt.senders,
+            service: srt.service,
             ..Default::default()
         }
     }

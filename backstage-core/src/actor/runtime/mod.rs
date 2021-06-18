@@ -1,4 +1,4 @@
-use crate::{actor::shutdown_stream::ShutdownStream, Actor, Channel, Dependencies, Sender, SupervisorEvent, System};
+use crate::{actor::shutdown_stream::ShutdownStream, Actor, Channel, Dependencies, IdPool, Sender, Service, SupervisorEvent, System};
 use anymap::{any::CloneAny, Map};
 use async_trait::async_trait;
 use futures::{
@@ -34,6 +34,9 @@ mod system_runtime;
 /// manage actors as well as shut them down appropriately.
 #[async_trait]
 pub trait BaseRuntime: Send + Sync {
+    /// Create a new runtime with a given service
+    fn new(service: Service) -> Self;
+
     /// Get the join handles of this runtime's scoped tasks
     fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>>;
 
@@ -52,8 +55,49 @@ pub trait BaseRuntime: Send + Sync {
     /// Mutably get the anymap of senders (handles) for this runtime's scoped tasks
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
+    /// Get the service for this runtime
+    fn service(&self) -> &Service;
+
+    /// Mutably get the service for this runtime
+    fn service_mut(&mut self) -> &mut Service;
+
     /// Create a child of this runtime
-    fn child(&self) -> Self;
+    fn child<S: Into<String>>(&mut self, name: S) -> Self;
+
+    /// Spawn this runtime as the runtime of a given actor
+    async fn as_actor<A: 'static + Actor + Send + Sync>(mut actor: A) -> anyhow::Result<()>
+    where
+        Self: Into<A::Rt>,
+    {
+        let mut rt: A::Rt = Self::new(Service::new(A::name())).into();
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        rt.senders_mut().insert(sender.clone());
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        let deps = A::Dependencies::instantiate(&mut rt)
+            .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
+            .unwrap();
+        let res = {
+            let scope = RuntimeScope::new(&mut rt);
+            let mut actor_rt = ActorScopedRuntime::unsupervised(scope, receiver, oneshot_recv);
+            Abortable::new(actor.run(&mut actor_rt, deps), abort_registration).await
+        };
+        match res {
+            Ok(res) => {
+                rt.join().await;
+                match res {
+                    Ok(_) => Ok(()),
+                    Err(e) => anyhow::bail!(e),
+                }
+            }
+            Err(_) => {
+                log::debug!("Aborting children of actor!");
+                rt.abort();
+                anyhow::bail!("Aborted!")
+            }
+        }
+    }
 
     /// Create a new scope within this one
     async fn scope<O: Send + Sync, F: Send + FnOnce(&mut RuntimeScope<'_, Self>) -> O>(&mut self, f: F) -> anyhow::Result<O>
@@ -81,7 +125,7 @@ pub trait BaseRuntime: Send + Sync {
 
     /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
     /// shutdown handles instead.
-    fn abort(mut self)
+    fn abort(&mut self)
     where
         Self: Sized,
     {
@@ -137,6 +181,43 @@ pub trait SystemRuntime: BaseRuntime {
     /// Mutably get the anymap of systems for this runtime's scope
     fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
+    /// Spawn this runtime as the runtime of a given system
+    async fn as_system<S: 'static + System + Send + Sync>(system: S) -> anyhow::Result<()>
+    where
+        Self: Into<S::Rt>,
+    {
+        let mut rt: S::Rt = Self::new(Service::new(S::name())).into();
+        let system = Arc::new(RwLock::new(system));
+        rt.systems_mut().insert(system.clone());
+        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
+        rt.senders_mut().insert(sender.clone());
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        let deps = S::Dependencies::instantiate(&mut rt)
+            .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<S>(), e))
+            .unwrap();
+        let res = {
+            let scope = RuntimeScope::new(&mut rt);
+            let mut system_rt = SystemScopedRuntime::unsupervised(scope, receiver, oneshot_recv);
+            Abortable::new(S::run(system, &mut system_rt, deps), abort_registration).await
+        };
+        match res {
+            Ok(res) => {
+                rt.join().await;
+                match res {
+                    Ok(_) => Ok(()),
+                    Err(e) => anyhow::bail!(e),
+                }
+            }
+            Err(_) => {
+                log::debug!("Aborting children of actor!");
+                rt.abort();
+                anyhow::bail!("Aborted!")
+            }
+        }
+    }
+
     /// Get a shared reference to a system if it exists in this runtime's scope
     fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>>
     where
@@ -184,6 +265,7 @@ pub trait ResourceRuntime: BaseRuntime {
 }
 
 /// A runtime which manages pools of actors
+#[async_trait]
 pub trait PoolRuntime: BaseRuntime {
     /// Get the anymap of pools from this runtimes's scope
     fn pools(&self) -> &Map<dyn CloneAny + Send + Sync>;
@@ -192,12 +274,22 @@ pub trait PoolRuntime: BaseRuntime {
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
 
     /// Get the pool of a specified actor if it exists in this runtime's scope
-    fn pool<A>(&self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
+    async fn pool<A>(&mut self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
     where
         Self: 'static + Sized,
         A: 'static + Actor + Send + Sync,
     {
-        self.pools().get::<Arc<RwLock<ActorPool<A>>>>().map(|pool| Res(pool.clone()))
+        match self.pools().get::<Arc<RwLock<ActorPool<A>>>>().cloned() {
+            Some(arc) => {
+                if arc.write().await.verify() {
+                    Some(Res(arc))
+                } else {
+                    self.pools_mut().remove::<Arc<RwLock<ActorPool<A>>>>();
+                    None
+                }
+            }
+            None => None,
+        }
     }
 }
 
@@ -248,18 +340,27 @@ impl<A: Actor> DerefMut for Act<A> {
 
 /// A pool of actors which can be queried for actor handles
 pub struct ActorPool<A: Actor> {
-    handles: Vec<Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
+    handles: Vec<Option<Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>>,
     lru: LruCache<usize, Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>,
+    id_pool: IdPool<usize>,
 }
 
 impl<A: Actor> Clone for ActorPool<A> {
     fn clone(&self) -> Self {
-        let handles = self.handles.iter().map(|rc| Rc::new(RefCell::new(rc.borrow().clone()))).collect();
+        let handles = self
+            .handles
+            .iter()
+            .map(|opt_rc| opt_rc.as_ref().map(|rc| Rc::new(RefCell::new(rc.borrow().clone()))))
+            .collect();
         let mut lru = LruCache::unbounded();
         for (idx, lru_rc) in self.lru.iter().rev() {
             lru.put(*idx, Rc::new(RefCell::new(lru_rc.borrow().clone())));
         }
-        Self { handles: handles, lru }
+        Self {
+            handles,
+            lru,
+            id_pool: self.id_pool.clone(),
+        }
     }
 }
 
@@ -272,23 +373,27 @@ impl<A: Actor> Default for ActorPool<A> {
         Self {
             handles: Default::default(),
             lru: LruCache::unbounded(),
+            id_pool: Default::default(),
         }
     }
 }
 
 impl<A: Actor> ActorPool<A> {
     fn push(&mut self, handle: <A::Channel as Channel<A::Event>>::Sender) {
-        let idx = self.handles.len();
+        let id = self.id_pool.get_id();
         let handle_rc = Rc::new(RefCell::new(handle));
-        self.handles.push(handle_rc.clone());
-        self.lru.put(idx, handle_rc);
+        if id >= self.handles.len() {
+            self.handles.resize(id + 1, None);
+        }
+        self.handles[id] = Some(handle_rc.clone());
+        self.lru.put(id, handle_rc);
     }
 
     /// Get the least recently used actor handle from this pool
     pub fn get_lru(&mut self) -> Option<Act<A>> {
-        self.lru.pop_lru().map(|(idx, handle)| {
+        self.lru.pop_lru().map(|(id, handle)| {
             let res = handle.borrow().clone();
-            self.lru.put(idx, handle);
+            self.lru.put(id, handle);
             Act(res)
         })
     }
@@ -306,9 +411,8 @@ impl<A: Actor> ActorPool<A> {
     /// Get a random actor handle from this pool
     pub fn get_random(&mut self) -> Option<Act<A>> {
         let mut rng = rand::thread_rng();
-        self.handles
-            .get(rng.gen_range(0..self.handles.len()))
-            .map(|rc| Act(rc.borrow().clone()))
+        let handles = self.handles.iter().filter_map(|h| h.as_ref()).collect::<Vec<_>>();
+        handles.get(rng.gen_range(0..handles.len())).map(|rc| Act(rc.borrow().clone()))
     }
 
     #[cfg(feature = "rand_pool")]
@@ -325,7 +429,7 @@ impl<A: Actor> ActorPool<A> {
     pub fn iter(&mut self) -> std::vec::IntoIter<Act<A>> {
         self.handles
             .iter()
-            .map(|rc| Act(rc.borrow().clone()))
+            .filter_map(|opt_rc| opt_rc.as_ref().map(|rc| Act(rc.borrow().clone())))
             .collect::<Vec<_>>()
             .into_iter()
     }
@@ -339,5 +443,22 @@ impl<A: Actor> ActorPool<A> {
             handle.send(event.clone()).await?;
         }
         Ok(())
+    }
+
+    pub(crate) fn verify(&mut self) -> bool {
+        for (id, opt) in self.handles.iter_mut().enumerate() {
+            if opt.is_some() {
+                if opt.as_ref().unwrap().borrow().is_closed() {
+                    *opt = None;
+                    self.lru.pop(&id);
+                    self.id_pool.return_id(id);
+                }
+            }
+        }
+        if self.handles.iter().all(|opt| opt.is_none()) {
+            false
+        } else {
+            true
+        }
     }
 }

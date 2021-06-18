@@ -1,27 +1,10 @@
-use crate::Service;
 use anyhow::anyhow;
 use std::time::Duration;
 use thiserror::Error;
 
-/// An actor (or system)'s error result
-#[derive(Debug)]
-pub struct ActorError {
-    /// The kind of error that occurred
-    pub kind: ActorErrorKind,
-    /// The actor (or system)'s service
-    pub service: Service,
-}
-
-impl ActorError {
-    /// Create a new actor error from an error kind
-    pub fn new(kind: ActorErrorKind, service: Service) -> Self {
-        Self { kind, service }
-    }
-}
-
 /// Potential actor errors
 #[derive(Error, Debug)]
-pub enum ActorErrorKind {
+pub enum ActorError {
     /// Indicates that the data provided to the actor was bad
     #[error("Invalid data was given to the actor: {0}!")]
     InvalidData(String),
@@ -38,38 +21,38 @@ pub enum ActorErrorKind {
     },
 }
 
-impl ActorErrorKind {
+impl ActorError {
     /// Get the request from the error
     pub fn request(&self) -> &ActorRequest {
         match self {
-            ActorErrorKind::InvalidData(_) => &ActorRequest::Panic,
-            ActorErrorKind::RuntimeError(r) => r,
-            ActorErrorKind::Other { source: _, request: r } => r,
+            ActorError::InvalidData(_) => &ActorRequest::Panic,
+            ActorError::RuntimeError(r) => r,
+            ActorError::Other { source: _, request: r } => r,
         }
     }
 }
 
-impl From<std::borrow::Cow<'static, str>> for ActorErrorKind {
+impl From<std::borrow::Cow<'static, str>> for ActorError {
     fn from(cow: std::borrow::Cow<'static, str>) -> Self {
-        ActorErrorKind::Other {
+        ActorError::Other {
             source: anyhow!(cow),
             request: ActorRequest::Panic,
         }
     }
 }
 
-impl From<()> for ActorErrorKind {
+impl From<()> for ActorError {
     fn from(_: ()) -> Self {
-        ActorErrorKind::Other {
+        ActorError::Other {
             source: anyhow!("Error!"),
             request: ActorRequest::Finish,
         }
     }
 }
 
-impl From<anyhow::Error> for ActorErrorKind {
+impl From<anyhow::Error> for ActorError {
     fn from(e: anyhow::Error) -> Self {
-        ActorErrorKind::Other {
+        ActorError::Other {
             source: e,
             request: ActorRequest::Panic,
         }

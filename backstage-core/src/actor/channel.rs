@@ -7,7 +7,7 @@ pub trait Channel<E: 'static + Send + Sync> {
     /// The sender half of the channel
     type Sender: 'static + Sender<E> + Send + Sync + Clone;
     /// The receiver half of the channel
-    type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send;
+    type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send + Sync;
 
     /// Create a sender and receiver of the appropriate types
     fn new() -> (Self::Sender, Self::Receiver);

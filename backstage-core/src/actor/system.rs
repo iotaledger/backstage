@@ -1,8 +1,8 @@
 use crate::{
-    ActorError, Channel, Dependencies, Sender, Service, SupervisedSystemScopedRuntime, SupervisorEvent, SystemRuntime, SystemScopedRuntime,
+    ActorError, Channel, Dependencies, Sender, SupervisedSystemScopedRuntime, SupervisorEvent, SystemRuntime, SystemScopedRuntime,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 use tokio::sync::RwLock;
 
 /// A system is effectively a shared actor which groups other systems and actors and obfuscates them.
@@ -21,7 +21,7 @@ pub trait System {
     type SupervisorEvent;
 
     /// The main function for the system
-    async fn run<'a>(this: Arc<RwLock<Self>>, rt: SystemScopedRuntime<'a, Self>, deps: Self::Dependencies) -> Result<Service, ActorError>
+    async fn run<'a>(this: Arc<RwLock<Self>>, rt: &mut SystemScopedRuntime<'a, Self>, deps: Self::Dependencies) -> Result<(), ActorError>
     where
         Self: Sized;
 
@@ -29,30 +29,19 @@ pub trait System {
     /// Note: Redefine this method if your system requires a supervisor handle to function!
     async fn run_supervised<'a, H, E>(
         this: Arc<RwLock<Self>>,
-        rt: SupervisedSystemScopedRuntime<'a, Self, H, E>,
+        rt: &mut SupervisedSystemScopedRuntime<'a, Self, H, E>,
         deps: Self::Dependencies,
-    ) -> Result<Service, ActorError>
+    ) -> Result<(), ActorError>
     where
         Self: Send + Sync + Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
+        E: 'static + SupervisorEvent<Arc<RwLock<Self>>> + Send + Sync + From<Self::SupervisorEvent>,
     {
-        Self::run(this, rt.scope, deps).await
+        Self::run(this, &mut rt.scope, deps).await
     }
 
-    /// Runs this system then reports back to the supervisor with the result
-    async fn run_then_report<'a, H, E>(
-        this: Arc<RwLock<Self>>,
-        mut rt: SupervisedSystemScopedRuntime<'a, Self, H, E>,
-        deps: Self::Dependencies,
-    ) -> anyhow::Result<()>
-    where
-        Self: Send + Sync + Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent + Send + Sync + From<Self::SupervisorEvent>,
-    {
-        let mut supervisor = rt.supervisor_handle().clone();
-        let res = Self::run_supervised(this, rt, deps).await;
-        supervisor.send(E::report(res)).await
+    /// Get this system's name
+    fn name() -> Cow<'static, str> {
+        std::any::type_name::<Self>().into()
     }
 }

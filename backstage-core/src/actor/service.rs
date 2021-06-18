@@ -1,4 +1,5 @@
 use lazy_static::lazy_static;
+use num_traits::{FromPrimitive, NumAssignOps};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -41,19 +42,19 @@ impl Default for ServiceStatus {
 
 /// A pool of unique IDs which can be assigned to services
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct IdPool {
-    pool: Vec<u16>,
+pub struct IdPool<T: NumAssignOps + FromPrimitive + Copy> {
+    pool: Vec<T>,
 }
 
-impl IdPool {
+impl<T: NumAssignOps + FromPrimitive + Copy> IdPool<T> {
     /// Get a new unique ID
-    pub fn get_id(&mut self) -> u16 {
+    pub fn get_id(&mut self) -> T {
         if self.pool.len() == 0 {
-            self.pool.push(2);
-            1
+            self.pool.push(T::from_isize(2).unwrap());
+            T::from_isize(1).unwrap()
         } else if self.pool.len() == 1 {
             let id = self.pool[0];
-            self.pool[0] += 1;
+            self.pool[0] += T::from_isize(1).unwrap();
             id
         } else {
             self.pool.pop().unwrap()
@@ -61,7 +62,7 @@ impl IdPool {
     }
 
     /// Return an unused id
-    pub fn return_id(&mut self, id: u16) {
+    pub fn return_id(&mut self, id: T) {
         self.pool.push(id);
     }
 }
@@ -84,7 +85,7 @@ pub struct Service {
     /// Optional logging path
     pub log_path: Option<String>,
     /// A pool of unique ids
-    pub id_pool: IdPool,
+    pub id_pool: IdPool<u16>,
 }
 
 impl Service {
@@ -165,8 +166,8 @@ impl Service {
         self.microservices.get_mut(id).map(|s| s.status = status);
     }
     /// Delete a microservice
-    pub fn delete_microservice(&mut self, id: &u16) {
-        self.microservices.remove(id);
+    pub fn remove_microservice(&mut self, id: &u16) -> Option<Service> {
+        self.microservices.remove(id)
     }
     /// Check if the service is stopping
     pub fn is_stopping(&self) -> bool {

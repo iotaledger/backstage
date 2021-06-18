@@ -1,5 +1,3 @@
-use super::service::Service;
-
 /// An actor/system builder, which defines how you take some
 /// input data and create an `Actor` or `System` with it.
 pub trait Builder {
@@ -8,5 +6,5 @@ pub trait Builder {
 
     /// Create the built type with the builder data and a service
     /// provided by the supervisor.
-    fn build(self, service: Service) -> Self::Built;
+    fn build(self) -> Self::Built;
 }
