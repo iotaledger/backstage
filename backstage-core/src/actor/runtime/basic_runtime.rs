@@ -3,15 +3,8 @@ use super::*;
 pub struct BasicRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
-    pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
+    pub(crate) data: Map<dyn CloneAny + Send + Sync>,
     pub(crate) service: Service,
-}
-
-impl BasicRuntime {
-    /// Create a new, empty BasicRuntime
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl Default for BasicRuntime {
@@ -19,7 +12,7 @@ impl Default for BasicRuntime {
         Self {
             join_handles: Default::default(),
             shutdown_handles: Default::default(),
-            senders: Map::new(),
+            data: Map::new(),
             service: Service::new("Runtime"),
         }
     }
@@ -51,11 +44,11 @@ impl BaseRuntime for BasicRuntime {
     }
 
     fn senders(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.senders
+        &self.data
     }
 
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.senders
+        &mut self.data
     }
 
     fn service(&self) -> &Service {
@@ -66,9 +59,17 @@ impl BaseRuntime for BasicRuntime {
         &mut self.service
     }
 
+    fn dependency_channels(&self) -> &Map<dyn CloneAny + Send + Sync> {
+        &self.data
+    }
+
+    fn dependency_channels_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
+        &mut self.data
+    }
+
     fn child<S: Into<String>>(&mut self, name: S) -> Self {
         Self {
-            senders: self.senders.clone(),
+            data: self.data.clone(),
             service: self.service.spawn(name),
             ..Default::default()
         }
@@ -80,7 +81,7 @@ impl From<FullRuntime> for BasicRuntime {
         Self {
             join_handles: frt.join_handles,
             shutdown_handles: frt.shutdown_handles,
-            senders: frt.senders,
+            data: frt.data,
             service: frt.service,
             ..Default::default()
         }
@@ -92,7 +93,7 @@ impl From<SystemsRuntime> for BasicRuntime {
         Self {
             join_handles: srt.join_handles,
             shutdown_handles: srt.shutdown_handles,
-            senders: srt.senders,
+            data: srt.data,
             service: srt.service,
             ..Default::default()
         }

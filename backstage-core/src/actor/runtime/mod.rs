@@ -35,7 +35,9 @@ mod system_runtime;
 #[async_trait]
 pub trait BaseRuntime: Send + Sync {
     /// Create a new runtime with a given service
-    fn new(service: Service) -> Self;
+    fn new(service: Service) -> Self
+    where
+        Self: Sized;
 
     /// Get the join handles of this runtime's scoped tasks
     fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>>;
@@ -61,13 +63,20 @@ pub trait BaseRuntime: Send + Sync {
     /// Mutably get the service for this runtime
     fn service_mut(&mut self) -> &mut Service;
 
+    fn dependency_channels(&self) -> &Map<dyn CloneAny + Send + Sync>;
+
+    fn dependency_channels_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
+
     /// Create a child of this runtime
-    fn child<S: Into<String>>(&mut self, name: S) -> Self;
+    fn child<S: Into<String>>(&mut self, name: S) -> Self
+    where
+        Self: Sized;
 
     /// Spawn this runtime as the runtime of a given actor
     async fn as_actor<A: 'static + Actor + Send + Sync>(mut actor: A) -> anyhow::Result<()>
     where
         Self: Into<A::Rt>,
+        A::Dependencies: Dependencies<A::Rt>,
     {
         let mut rt: A::Rt = Self::new(Service::new(A::name())).into();
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
@@ -100,11 +109,13 @@ pub trait BaseRuntime: Send + Sync {
     }
 
     /// Create a new scope within this one
-    async fn scope<O: Send + Sync, F: Send + FnOnce(&mut RuntimeScope<'_, Self>) -> O>(&mut self, f: F) -> anyhow::Result<O>
+    async fn scope<O, F>(&mut self, f: F) -> anyhow::Result<O>
     where
         Self: 'static + Sized,
+        O: Send + Sync,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<'_, Self>) -> BoxFuture<'b, O>,
     {
-        let res = f(&mut RuntimeScope::new(self));
+        let res = f(&mut RuntimeScope::new(self)).await;
         self.join().await;
         Ok(res)
     }
@@ -141,7 +152,10 @@ pub trait BaseRuntime: Send + Sync {
     }
 
     /// Get an event handle of the given type, if it exists in this scope
-    fn event_handle<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + Send + Sync>(&self) -> Option<H> {
+    fn event_handle<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + Send + Sync>(&self) -> Option<H>
+    where
+        Self: Sized,
+    {
         self.senders()
             .get::<H>()
             .and_then(|handle| (!handle.is_closed()).then(|| handle.clone()))
@@ -185,6 +199,7 @@ pub trait SystemRuntime: BaseRuntime {
     async fn as_system<S: 'static + System + Send + Sync>(system: S) -> anyhow::Result<()>
     where
         Self: Into<S::Rt>,
+        S::Dependencies: Dependencies<S::Rt>,
     {
         let mut rt: S::Rt = Self::new(Service::new(S::name())).into();
         let system = Arc::new(RwLock::new(system));

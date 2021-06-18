@@ -241,7 +241,7 @@ impl System for Launcher {
     type SupervisorEvent = ();
 
     async fn run<'a>(
-        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
         rt: &mut SystemScopedRuntime<'a, Self>,
         _deps: (),
     ) -> Result<(), ActorError>
@@ -251,15 +251,17 @@ impl System for Launcher {
         let my_handle = rt.my_handle();
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(hello_world_builder.build(), my_handle.clone());
+        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await;
+        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await;
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })));
-        rt.spawn_actor(howdy_builder.build(), my_handle.clone());
-        let (_, mut websocket_handle) = rt.spawn_system(
-            prefabs::websocket::WebsocketBuilder::new()
-                .listen_address(([127, 0, 0, 1], 8000).into())
-                .build(),
-            my_handle.clone(),
-        );
+        let (_, mut websocket_handle) = rt
+            .spawn_system(
+                prefabs::websocket::WebsocketBuilder::new()
+                    .listen_address(([127, 0, 0, 1], 8000).into())
+                    .build(),
+                my_handle.clone(),
+            )
+            .await;
         tokio::task::spawn(ctrl_c(my_handle));
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -312,25 +314,28 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
-    FullRuntime::new()
+    FullRuntime::default()
         .scope(|scope| {
-            scope.spawn_system_unsupervised(Launcher);
-            scope.spawn_task(|mut rt| {
-                async move {
-                    for _ in 0..3 {
-                        rt.send_system_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
-                            .await
-                            .unwrap();
+            async move {
+                scope.spawn_system_unsupervised(Launcher).await;
+                scope.spawn_task(|mut rt| {
+                    async move {
+                        for _ in 0..3 {
+                            rt.send_system_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
+                                .await
+                                .unwrap();
+                        }
+                        let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
+                        stream.send(Message::text("Hello there")).await.unwrap();
+                        if let Some(Ok(msg)) = stream.next().await {
+                            info!("Response from websocket: {}", msg);
+                        }
+                        Ok(())
                     }
-                    let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
-                    stream.send(Message::text("Hello there")).await.unwrap();
-                    if let Some(Ok(msg)) = stream.next().await {
-                        info!("Response from websocket: {}", msg);
-                    }
-                    Ok(())
-                }
-                .boxed()
-            });
+                    .boxed()
+                });
+            }
+            .boxed()
         })
         .await?;
     Ok(())

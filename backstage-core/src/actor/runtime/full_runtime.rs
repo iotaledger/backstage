@@ -4,18 +4,8 @@ use super::*;
 pub struct FullRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
-    pub(crate) resources: Map<dyn CloneAny + Send + Sync>,
-    pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
-    pub(crate) systems: Map<dyn CloneAny + Send + Sync>,
-    pub(crate) pools: Map<dyn CloneAny + Send + Sync>,
+    pub(crate) data: Map<dyn CloneAny + Send + Sync>,
     pub(crate) service: Service,
-}
-
-impl FullRuntime {
-    /// Create a new, empty FullRuntime
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl Default for FullRuntime {
@@ -23,10 +13,7 @@ impl Default for FullRuntime {
         Self {
             join_handles: Default::default(),
             shutdown_handles: Default::default(),
-            resources: Map::new(),
-            senders: Map::new(),
-            systems: Map::new(),
-            pools: Map::new(),
+            data: Map::new(),
             service: Service::new("Runtime"),
         }
     }
@@ -56,10 +43,10 @@ impl BaseRuntime for FullRuntime {
     }
 
     fn senders(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.senders
+        &self.data
     }
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.senders
+        &mut self.data
     }
 
     fn service(&self) -> &Service {
@@ -70,12 +57,17 @@ impl BaseRuntime for FullRuntime {
         &mut self.service
     }
 
+    fn dependency_channels(&self) -> &Map<dyn CloneAny + Send + Sync> {
+        &self.data
+    }
+
+    fn dependency_channels_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
+        &mut self.data
+    }
+
     fn child<S: Into<String>>(&mut self, name: S) -> Self {
         Self {
-            resources: self.resources.clone(),
-            senders: self.senders.clone(),
-            systems: self.systems.clone(),
-            pools: self.pools.clone(),
+            data: self.data.clone(),
             service: self.service.spawn(name),
             ..Default::default()
         }
@@ -85,31 +77,31 @@ impl BaseRuntime for FullRuntime {
 #[async_trait]
 impl SystemRuntime for FullRuntime {
     fn systems(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.systems
+        &self.data
     }
 
     fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.systems
+        &mut self.data
     }
 }
 
 impl ResourceRuntime for FullRuntime {
     fn resources(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.resources
+        &self.data
     }
 
     fn resources_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.resources
+        &mut self.data
     }
 }
 
 impl PoolRuntime for FullRuntime {
     fn pools(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.pools
+        &self.data
     }
 
     fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.pools
+        &mut self.data
     }
 }
 
@@ -118,7 +110,7 @@ impl From<BasicRuntime> for FullRuntime {
         Self {
             join_handles: brt.join_handles,
             shutdown_handles: brt.shutdown_handles,
-            senders: brt.senders,
+            data: brt.data,
             service: brt.service,
             ..Default::default()
         }
@@ -130,8 +122,7 @@ impl From<SystemsRuntime> for FullRuntime {
         Self {
             join_handles: srt.join_handles,
             shutdown_handles: srt.shutdown_handles,
-            senders: srt.senders,
-            systems: srt.systems,
+            data: srt.data,
             service: srt.service,
             ..Default::default()
         }

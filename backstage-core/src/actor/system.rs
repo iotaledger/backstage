@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 #[async_trait]
 pub trait System {
     /// Allows specifying a system's startup dependencies. Ex. (Sys<OtherSystem>, Res<MyResource>)
-    type Dependencies: Dependencies<Self::Rt> + Send;
+    type Dependencies: Send + Sync;
     /// The type of event this system will receive and forward to its children
     type ChildEvents: 'static + Send + Sync;
     /// The type of channel this system will use to receive events

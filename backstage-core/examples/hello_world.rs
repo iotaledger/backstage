@@ -114,7 +114,7 @@ impl System for Launcher {
     type SupervisorEvent = ();
 
     async fn run<'a>(
-        this: std::sync::Arc<tokio::sync::RwLock<Self>>,
+        _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
         rt: &mut SystemScopedRuntime<'a, Self>,
         _deps: (),
     ) -> Result<(), ActorError>
@@ -124,10 +124,15 @@ impl System for Launcher {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         {
             let my_handle = rt.my_handle();
+            let builder = builder.clone();
             rt.spawn_pool(my_handle, |pool| {
-                for i in 0..10 {
-                    let (_abort, _handle) = pool.spawn(builder.clone().num(i).build());
+                async move {
+                    for i in 0..10 {
+                        let (_abort, _handle) = pool.spawn(builder.clone().num(i).build()).await;
+                    }
+                    Ok(())
                 }
+                .boxed()
             });
         }
         tokio::task::spawn(ctrl_c(rt.my_handle()));
@@ -139,7 +144,7 @@ impl System for Launcher {
                         pool.write().await.send_all(event).await;
                     }
                 }
-                LauncherEvents::Shutdown { using_ctrl_c } => {
+                LauncherEvents::Shutdown { using_ctrl_c: _ } => {
                     debug!("Exiting launcher");
                     break;
                 }
@@ -205,25 +210,28 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    FullRuntime::new()
+    FullRuntime::default()
         .scope(|scope| {
-            scope.spawn_system_unsupervised(Launcher);
-            scope.spawn_task(|mut rt| {
-                async move {
-                    for _ in 0..10 {
-                        rt.system::<Launcher>()
-                            .unwrap()
-                            .read()
-                            .await
-                            .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
-                            .await
-                            .unwrap();
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+            async move {
+                scope.spawn_system_unsupervised(Launcher).await;
+                scope.spawn_task(|mut rt| {
+                    async move {
+                        for _ in 0..10 {
+                            rt.system::<Launcher>()
+                                .unwrap()
+                                .read()
+                                .await
+                                .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
+                                .await
+                                .unwrap();
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                        }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                .boxed()
-            });
+                    .boxed()
+                });
+            }
+            .boxed()
         })
         .await?;
     Ok(())

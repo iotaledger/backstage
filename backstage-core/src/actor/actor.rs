@@ -5,7 +5,7 @@ use std::borrow::Cow;
 #[async_trait]
 pub trait Actor {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Dependencies: Dependencies<Self::Rt> + Send;
+    type Dependencies: Send + Sync;
     /// The type of event this actor will receive
     type Event: 'static + Send + Sync;
     /// The type of channel this actor will use to receive events

@@ -3,16 +3,8 @@ use super::*;
 pub struct SystemsRuntime {
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
-    pub(crate) senders: Map<dyn CloneAny + Send + Sync>,
-    pub(crate) systems: Map<dyn CloneAny + Send + Sync>,
+    pub(crate) data: Map<dyn CloneAny + Send + Sync>,
     pub(crate) service: Service,
-}
-
-impl SystemsRuntime {
-    /// Create a new, empty SystemsRuntime
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl Default for SystemsRuntime {
@@ -20,8 +12,7 @@ impl Default for SystemsRuntime {
         Self {
             join_handles: Default::default(),
             shutdown_handles: Default::default(),
-            senders: Map::new(),
-            systems: Map::new(),
+            data: Map::new(),
             service: Service::new("Runtime"),
         }
     }
@@ -53,11 +44,11 @@ impl BaseRuntime for SystemsRuntime {
     }
 
     fn senders(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.senders
+        &self.data
     }
 
     fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.senders
+        &mut self.data
     }
 
     fn service(&self) -> &Service {
@@ -68,10 +59,17 @@ impl BaseRuntime for SystemsRuntime {
         &mut self.service
     }
 
+    fn dependency_channels(&self) -> &Map<dyn CloneAny + Send + Sync> {
+        &self.data
+    }
+
+    fn dependency_channels_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
+        &mut self.data
+    }
+
     fn child<S: Into<String>>(&mut self, name: S) -> Self {
         Self {
-            senders: self.senders.clone(),
-            systems: self.systems.clone(),
+            data: self.data.clone(),
             service: self.service.spawn(name),
             ..Default::default()
         }
@@ -80,11 +78,11 @@ impl BaseRuntime for SystemsRuntime {
 
 impl SystemRuntime for SystemsRuntime {
     fn systems(&self) -> &Map<dyn CloneAny + Send + Sync> {
-        &self.systems
+        &self.data
     }
 
     fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync> {
-        &mut self.systems
+        &mut self.data
     }
 }
 
@@ -93,7 +91,7 @@ impl From<BasicRuntime> for SystemsRuntime {
         Self {
             join_handles: brt.join_handles,
             shutdown_handles: brt.shutdown_handles,
-            senders: brt.senders,
+            data: brt.data,
             service: brt.service,
             ..Default::default()
         }
@@ -105,8 +103,7 @@ impl From<FullRuntime> for SystemsRuntime {
         Self {
             join_handles: frt.join_handles,
             shutdown_handles: frt.shutdown_handles,
-            senders: frt.senders,
-            systems: frt.systems,
+            data: frt.data,
             service: frt.service,
             ..Default::default()
         }

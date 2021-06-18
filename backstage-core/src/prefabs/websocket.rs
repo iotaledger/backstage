@@ -76,7 +76,7 @@ impl System for Websocket {
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender });
+                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await;
                             rt.spawn_task(move |mut rt| {
                                 async move {
                                     while let Some(Ok(msg)) = receiver.next().await {
