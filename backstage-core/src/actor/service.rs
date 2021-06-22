@@ -1,17 +1,6 @@
-use lazy_static::lazy_static;
 use num_traits::{FromPrimitive, NumAssignOps};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::Arc,
-    time::SystemTime,
-};
-use tokio::sync::RwLock;
-
-lazy_static! {
-    /// Global service used by launcher actors
-    pub static ref SERVICE: Arc<RwLock<Service>> = Arc::new(RwLock::new(Service::new("Launcher")));
-}
+use std::time::SystemTime;
 
 /// The possible statuses a service (application) can be
 #[repr(u8)]
@@ -74,39 +63,16 @@ pub struct Service {
     pub status: ServiceStatus,
     /// The name of the actor
     pub name: String,
-    /// The unique ID of the actor
-    pub id: u16,
     /// The start timestamp, used to calculated uptime
     pub up_since: SystemTime,
     /// Accumulated downtime
     pub downtime_ms: u64,
-    /// Child services by id
-    pub microservices: HashMap<u16, Service>,
-    /// Optional logging path
-    pub log_path: Option<String>,
-    /// A pool of unique ids
-    pub id_pool: IdPool<u16>,
 }
 
 impl Service {
     /// Create a new Service
     pub fn new<S: Into<String>>(name: S) -> Self {
         Self::default().with_name(name)
-    }
-    /// Spawn a new microservice and return a clone of it
-    pub fn spawn<S: Into<String>>(&mut self, name: S) -> Self {
-        let id = self.id_pool.get_id();
-        self.microservices.insert(id, Self::default().with_name(name).with_id(id));
-        self.microservices.get(&id).unwrap().clone()
-    }
-    /// Set the id
-    pub fn with_id(mut self, id: u16) -> Self {
-        self.id = id;
-        self
-    }
-    /// Update the id
-    pub fn update_id(&mut self, id: u16) {
-        self.id = id;
     }
     /// Set the service status
     pub fn with_status(mut self, service_status: ServiceStatus) -> Self {
@@ -130,44 +96,6 @@ impl Service {
     pub fn with_downtime_ms(mut self, downtime_ms: u64) -> Self {
         self.downtime_ms = downtime_ms;
         self
-    }
-    /// Set the logging filepath
-    pub fn with_log(mut self, log_path: String) -> Self {
-        self.log_path = Some(log_path);
-        self
-    }
-    /// Insert a new microservice with a unique ID
-    pub fn insert_microservice(&mut self, mut microservice: Self) {
-        microservice.update_id(self.id_pool.get_id());
-        self.microservices.insert(microservice.id, microservice);
-    }
-    /// Update a microservice, if it exists. Returns the old value, or an error.
-    pub fn update_microservice(&mut self, microservice: Self) -> anyhow::Result<Self> {
-        match self.microservices.entry(microservice.id) {
-            Entry::Occupied(mut s) => Ok(s.insert(microservice)),
-            Entry::Vacant(_) => {
-                anyhow::bail!("No entry exists for id {}!", microservice.id)
-            }
-        }
-    }
-    /// Either Insert or Update a microservice, depending on whether it exists. Non-existing
-    /// microservices will generate a new unique ID. Returns the old entry if there was one.
-    pub fn insert_or_update_microservice(&mut self, microservice: Self) -> Option<Self> {
-        match self.microservices.entry(microservice.id) {
-            Entry::Occupied(mut s) => Some(s.insert(microservice)),
-            Entry::Vacant(_) => {
-                self.insert_microservice(microservice);
-                None
-            }
-        }
-    }
-    /// Update the status of a microservice
-    pub fn update_microservice_status(&mut self, id: &u16, status: ServiceStatus) {
-        self.microservices.get_mut(id).map(|s| s.status = status);
-    }
-    /// Delete a microservice
-    pub fn remove_microservice(&mut self, id: &u16) -> Option<Service> {
-        self.microservices.remove(id)
     }
     /// Check if the service is stopping
     pub fn is_stopping(&self) -> bool {
@@ -208,12 +136,8 @@ impl Default for Service {
         Self {
             status: Default::default(),
             name: Default::default(),
-            id: Default::default(),
             up_since: SystemTime::now(),
             downtime_ms: Default::default(),
-            microservices: Default::default(),
-            log_path: Default::default(),
-            id_pool: Default::default(),
         }
     }
 }

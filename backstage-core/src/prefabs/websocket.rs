@@ -51,7 +51,6 @@ impl System for Websocket {
     type ChildEvents = WebsocketChildren;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
-    type Rt = SystemsRuntime;
     type SupervisorEvent = (SocketAddr, Message);
 
     async fn run_supervised<'a, H, E>(
@@ -69,43 +68,46 @@ impl System for Websocket {
                 .await
                 .map_err(|_| ActorError::from(anyhow::anyhow!("Unable to bind to dashboard listen address")))?
         };
-        let connector_abort = rt.spawn_task(|mut rt| {
-            async move {
-                loop {
-                    if let Ok((socket, peer)) = tcp_listener.accept().await {
-                        let peer = socket.peer_addr().unwrap_or(peer);
-                        if let Ok(stream) = accept_async(socket).await {
-                            let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await;
-                            rt.spawn_task(move |mut rt| {
-                                async move {
-                                    while let Some(Ok(msg)) = receiver.next().await {
-                                        match msg {
-                                            Message::Close(_) => {
-                                                responder_abort.abort();
-                                                rt.send_system_event::<Websocket>(WebsocketChildren::Close(peer)).await?;
-                                                break;
-                                            }
-                                            msg => {
-                                                rt.send_system_event::<Websocket>(WebsocketChildren::Received((peer, msg))).await?;
+        let connector_abort = rt
+            .spawn_task(|rt| {
+                async move {
+                    loop {
+                        if let Ok((socket, peer)) = tcp_listener.accept().await {
+                            let peer = socket.peer_addr().unwrap_or(peer);
+                            if let Ok(stream) = accept_async(socket).await {
+                                let (sender, mut receiver) = stream.split();
+                                let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await;
+                                rt.spawn_task(move |rt| {
+                                    async move {
+                                        while let Some(Ok(msg)) = receiver.next().await {
+                                            match msg {
+                                                Message::Close(_) => {
+                                                    responder_abort.abort();
+                                                    rt.send_system_event::<Websocket>(WebsocketChildren::Close(peer)).await?;
+                                                    break;
+                                                }
+                                                msg => {
+                                                    rt.send_system_event::<Websocket>(WebsocketChildren::Received((peer, msg))).await?;
+                                                }
                                             }
                                         }
+                                        Ok(())
                                     }
-                                    Ok(())
-                                }
-                                .boxed()
-                            });
-                            rt.send_system_event::<Websocket>(WebsocketChildren::Connection(Connection {
-                                peer,
-                                sender: responder_handle,
-                            }))
-                            .await?;
+                                    .boxed()
+                                })
+                                .await;
+                                rt.send_system_event::<Websocket>(WebsocketChildren::Connection(Connection {
+                                    peer,
+                                    sender: responder_handle,
+                                }))
+                                .await?;
+                            }
                         }
                     }
                 }
-            }
-            .boxed()
-        });
+                .boxed()
+            })
+            .await;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 WebsocketChildren::Response((peer, msg)) => {
@@ -147,7 +149,6 @@ impl Actor for Responder {
     type Dependencies = ();
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
-    type Rt = BasicRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>

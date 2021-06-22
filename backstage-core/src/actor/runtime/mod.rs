@@ -1,15 +1,18 @@
-use crate::{actor::shutdown_stream::ShutdownStream, Actor, Channel, Dependencies, IdPool, Sender, Service, SupervisorEvent, System};
-use anymap::{any::CloneAny, Map};
-use async_trait::async_trait;
+use crate::{actor::shutdown_stream::ShutdownStream, Actor, Channel, IdPool, Sender, SupervisorEvent, System};
+use anymap::any::{Any, UncheckedAnyExt};
+use async_recursion::async_recursion;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
     StreamExt,
 };
 use lru::LruCache;
+use ptree::{write_tree, TreeItem};
 #[cfg(feature = "rand_pool")]
 use rand::Rng;
 use std::{
+    any::TypeId,
     cell::RefCell,
+    collections::HashMap,
     marker::PhantomData,
     ops::{Deref, DerefMut},
     rc::Rc,
@@ -20,292 +23,217 @@ use tokio::{
     task::JoinHandle,
 };
 
-pub use basic_runtime::*;
-pub use full_runtime::*;
-pub use scopes::*;
-pub use system_runtime::*;
-
-mod basic_runtime;
-mod full_runtime;
 mod scopes;
-mod system_runtime;
+pub use scopes::*;
 
-/// Defines the bare essentials of a scoped runtime which can spawn and
-/// manage actors as well as shut them down appropriately.
-#[async_trait]
-pub trait BaseRuntime: Send + Sync {
-    /// Create a new runtime with a given service
-    fn new(service: Service) -> Self
-    where
-        Self: Sized;
+/// An alias type indicating that this is a scope id
+pub type ScopeId = usize;
+type DataId = usize;
 
-    /// Get the join handles of this runtime's scoped tasks
-    fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>>;
+/// A scope, which marks data as usable for a given task
+pub struct Scope {
+    id: ScopeId,
+    data: HashMap<TypeId, DataId>,
+}
 
-    /// Mutably get the join handles of this runtime's scoped tasks
-    fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>>;
-
-    /// Get the shutdown handles of this runtime's scoped tasks
-    fn shutdown_handles(&self) -> &Vec<(Option<oneshot::Sender<()>>, AbortHandle)>;
-
-    /// Mutably get the shutdown handles of this runtime's scoped tasks
-    fn shutdown_handles_mut(&mut self) -> &mut Vec<(Option<oneshot::Sender<()>>, AbortHandle)>;
-
-    /// Get the anymap of senders (handles) for this runtime's scoped tasks
-    fn senders(&self) -> &Map<dyn CloneAny + Send + Sync>;
-
-    /// Mutably get the anymap of senders (handles) for this runtime's scoped tasks
-    fn senders_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
-
-    /// Get the service for this runtime
-    fn service(&self) -> &Service;
-
-    /// Mutably get the service for this runtime
-    fn service_mut(&mut self) -> &mut Service;
-
-    fn dependency_channels(&self) -> &Map<dyn CloneAny + Send + Sync>;
-
-    fn dependency_channels_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
-
-    /// Create a child of this runtime
-    fn child<S: Into<String>>(&mut self, name: S) -> Self
-    where
-        Self: Sized;
-
-    /// Spawn this runtime as the runtime of a given actor
-    async fn as_actor<A: 'static + Actor + Send + Sync>(mut actor: A) -> anyhow::Result<()>
-    where
-        Self: Into<A::Rt>,
-        A::Dependencies: Dependencies<A::Rt>,
-    {
-        let mut rt: A::Rt = Self::new(Service::new(A::name())).into();
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        rt.senders_mut().insert(sender.clone());
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let deps = A::Dependencies::instantiate(&mut rt)
-            .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
-            .unwrap();
-        let res = {
-            let scope = RuntimeScope::new(&mut rt);
-            let mut actor_rt = ActorScopedRuntime::unsupervised(scope, receiver, oneshot_recv);
-            Abortable::new(actor.run(&mut actor_rt, deps), abort_registration).await
-        };
-        match res {
-            Ok(res) => {
-                rt.join().await;
-                match res {
-                    Ok(_) => Ok(()),
-                    Err(e) => anyhow::bail!(e),
-                }
-            }
-            Err(_) => {
-                log::debug!("Aborting children of actor!");
-                rt.abort();
-                anyhow::bail!("Aborted!")
-            }
+impl Scope {
+    fn new(id: usize, parent: Option<&Scope>) -> Self {
+        Scope {
+            id,
+            data: parent.map(|p| p.data.clone()).unwrap_or_default(),
         }
-    }
-
-    /// Create a new scope within this one
-    async fn scope<O, F>(&mut self, f: F) -> anyhow::Result<O>
-    where
-        Self: 'static + Sized,
-        O: Send + Sync,
-        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<'_, Self>) -> BoxFuture<'b, O>,
-    {
-        let res = f(&mut RuntimeScope::new(self)).await;
-        self.join().await;
-        Ok(res)
-    }
-
-    /// Shutdown the tasks in this runtime's scope
-    fn shutdown(&mut self) {
-        for handle in self.shutdown_handles_mut().iter_mut() {
-            handle.0.take().map(|h| h.send(()));
-        }
-    }
-
-    /// Await the tasks in this runtime's scope
-    async fn join(&mut self) {
-        for handle in self.join_handles_mut().drain(..) {
-            handle.await.ok();
-        }
-    }
-
-    /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
-    /// shutdown handles instead.
-    fn abort(&mut self)
-    where
-        Self: Sized,
-    {
-        for handles in self.shutdown_handles_mut().iter_mut() {
-            if let Some(shutdown_handle) = handles.0.take() {
-                if let Err(_) = shutdown_handle.send(()) {
-                    handles.1.abort();
-                }
-            } else {
-                handles.1.abort();
-            }
-        }
-    }
-
-    /// Get an event handle of the given type, if it exists in this scope
-    fn event_handle<H: 'static + Sender<E> + Clone + Send + Sync, E: 'static + Send + Sync>(&self) -> Option<H>
-    where
-        Self: Sized,
-    {
-        self.senders()
-            .get::<H>()
-            .and_then(|handle| (!handle.is_closed()).then(|| handle.clone()))
-    }
-
-    /// Get an actor's event handle, if it exists in this scope.
-    /// Note: This will only return a handle if the actor exists outside of a pool.
-    fn actor_event_handle<A: Actor>(&self) -> Option<Act<A>>
-    where
-        Self: Sized,
-    {
-        self.senders()
-            .get::<<A::Channel as Channel<A::Event>>::Sender>()
-            .and_then(|handle| (!handle.is_closed()).then(|| Act(handle.clone())))
-    }
-
-    /// Send an event to a given actor, if it exists in this scope
-    async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let handle = self
-            .senders_mut()
-            .get_mut::<<A::Channel as Channel<A::Event>>::Sender>()
-            .and_then(|handle| (!handle.is_closed()).then(|| handle))
-            .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
-        Sender::<A::Event>::send(handle, event).await
     }
 }
 
-/// A runtime which manages systems in addition to actors
-#[async_trait]
-pub trait SystemRuntime: BaseRuntime {
-    /// Get the anymap of systems for this runtime's scope
-    fn systems(&self) -> &Map<dyn CloneAny + Send + Sync>;
+/// The central registry that stores all data for the application.
+/// Data is accessable via scopes which track its location within
+/// the global dyn vector. Two id pools manage the reusable indexes
+/// for this data.
+pub struct Registry {
+    data: Vec<Option<Box<dyn Any + Send + Sync>>>,
+    data_source: HashMap<ScopeId, DataId>,
+    parents: HashMap<ScopeId, ScopeId>,
+    children: HashMap<ScopeId, Vec<ScopeId>>,
+    scopes: HashMap<ScopeId, Scope>,
+    scope_pool: IdPool<ScopeId>,
+    data_pool: IdPool<DataId>,
+}
 
-    /// Mutably get the anymap of systems for this runtime's scope
-    fn systems_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            data: Vec::with_capacity(100),
+            data_source: Default::default(),
+            parents: Default::default(),
+            children: Default::default(),
+            scopes: Default::default(),
+            scope_pool: Default::default(),
+            data_pool: Default::default(),
+        }
+    }
+}
 
-    /// Spawn this runtime as the runtime of a given system
-    async fn as_system<S: 'static + System + Send + Sync>(system: S) -> anyhow::Result<()>
-    where
-        Self: Into<S::Rt>,
-        S::Dependencies: Dependencies<S::Rt>,
-    {
-        let mut rt: S::Rt = Self::new(Service::new(S::name())).into();
-        let system = Arc::new(RwLock::new(system));
-        rt.systems_mut().insert(system.clone());
-        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        rt.senders_mut().insert(sender.clone());
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let deps = S::Dependencies::instantiate(&mut rt)
-            .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<S>(), e))
-            .unwrap();
-        let res = {
-            let scope = RuntimeScope::new(&mut rt);
-            let mut system_rt = SystemScopedRuntime::unsupervised(scope, receiver, oneshot_recv);
-            Abortable::new(S::run(system, &mut system_rt, deps), abort_registration).await
-        };
-        match res {
-            Ok(res) => {
-                rt.join().await;
-                match res {
-                    Ok(_) => Ok(()),
-                    Err(e) => anyhow::bail!(e),
+impl Registry {
+    /// Create a new scope with an optional parent
+    pub fn new_scope<P: Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
+        let scope_id = self.scope_pool.get_id();
+        //log::debug!("Creating scope {}", scope_id);
+        let parent = parent.into();
+        if let Some(parent_id) = parent {
+            self.parents.insert(scope_id, parent_id);
+            self.children.entry(parent_id).or_default().push(scope_id);
+        }
+        let scope = Scope::new(scope_id, parent.and_then(|p| self.scopes.get(&p)));
+        self.scopes.insert(scope_id, scope);
+        scope_id
+    }
+
+    /// Drop a scope and all of its children recursively
+    #[async_recursion]
+    pub async fn drop_scope(&mut self, scope_id: &ScopeId) {
+        if let Some(children) = self.children.remove(scope_id) {
+            let children = children
+                .iter()
+                .map(|id| self.scopes.get(id).map(|s| s.id))
+                .filter_map(|v| v)
+                .collect::<Vec<_>>();
+            for child in children.iter() {
+                self.drop_scope(&child).await;
+            }
+        }
+        self.scopes.remove(scope_id);
+        if let Some(parent) = self.parents.remove(scope_id) {
+            self.children.get_mut(&parent).unwrap().retain(|id| id != scope_id);
+        }
+        self.scope_pool.return_id(*scope_id);
+    }
+
+    /// Add some arbitrary data to a scope and its children recursively
+    pub fn add_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
+        log::debug!("Adding {} to scope {}", std::any::type_name::<T>(), scope_id);
+        let scope = self
+            .scopes
+            .get_mut(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        let data_id = self.data_pool.get_id();
+        if self.data.len() <= data_id {
+            self.data.resize_with(data_id + 11, || None);
+        }
+        self.data[data_id].replace(Box::new(data));
+        self.data_source.insert(*scope_id, data_id);
+        scope.data.insert(TypeId::of::<T>(), data_id);
+        if let Some(children) = self.children.get(scope_id).cloned() {
+            for child in children.iter() {
+                self.propagate_data::<T>(child, Propagation::Add(data_id));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove some data from this scope and its children.
+    /// NOTE: This will only remove data if this scope originally added it! Otherwise,
+    /// this fn will return an error.
+    pub fn remove_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
+        log::debug!("Removing {} from scope {}", std::any::type_name::<T>(), scope_id);
+        if let Some(data_id) = self
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.data.get(&TypeId::of::<T>()))
+            .and_then(|data_id| {
+                self.data_source
+                    .get(data_id)
+                    .and_then(|source| (source == scope_id).then(|| *data_id))
+            })
+        {
+            let data = self.data[data_id].take();
+            Ok(data.map(|data| {
+                self.data_pool.return_id(data_id);
+                if let Some(children) = self.children.get(scope_id).cloned() {
+                    for child in children.iter() {
+                        self.propagate_data::<T>(child, Propagation::Remove);
+                    }
+                }
+                *unsafe { data.downcast_unchecked::<T>() }
+            }))
+        } else {
+            anyhow::bail!("This scope does not own this data!")
+        }
+    }
+
+    fn propagate_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId, prop: Propagation) {
+        log::debug!("Propagating {} to scope {}", std::any::type_name::<T>(), scope_id);
+        if let Some(scope) = self.scopes.get_mut(scope_id) {
+            match prop {
+                Propagation::Add(data_id) => {
+                    scope.data.insert(TypeId::of::<T>(), data_id);
+                }
+                Propagation::Remove => {
+                    scope.data.remove(&TypeId::of::<T>());
                 }
             }
-            Err(_) => {
-                log::debug!("Aborting children of actor!");
-                rt.abort();
-                anyhow::bail!("Aborted!")
+        }
+        if let Some(children) = self.children.get(scope_id).cloned() {
+            for child in children.iter() {
+                self.propagate_data::<T>(child, prop);
             }
         }
     }
 
-    /// Get a shared reference to a system if it exists in this runtime's scope
-    fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>>
-    where
-        Self: Sized,
-    {
-        self.systems().get::<Arc<RwLock<S>>>().map(|sys| Sys(sys.clone()))
+    /// Get a reference to some arbitrary data from the given scope
+    pub fn get_data<T: 'static + Send + Sync>(&self, scope_id: &ScopeId) -> Option<&T> {
+        self.scopes
+            .get(scope_id)
+            .and_then(|scope| scope.data.get(&TypeId::of::<T>()))
+            .and_then(|data_id| self.data[*data_id].as_ref())
+            .map(|t| unsafe { t.downcast_ref_unchecked::<T>() })
     }
 
-    /// Get a system's event handle if the system exists in this runtime's scope
-    fn system_event_handle<S: System>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender>
-    where
-        Self: Sized,
-    {
-        self.senders()
-            .get::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
-            .and_then(|handle| (!handle.is_closed()).then(|| handle.clone()))
-    }
-
-    /// Send an event to a system if it exists within this runtime's scope
-    async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
-    where
-        Self: Sized,
-    {
-        let handle = self
-            .senders_mut()
-            .get_mut::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
-            .and_then(|handle| (!handle.is_closed()).then(|| handle))
-            .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
-        Sender::<S::ChildEvents>::send(handle, event).await
+    /// Get a mutable reference to some arbitrary data from the given scope
+    pub fn get_data_mut<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId) -> Option<&mut T> {
+        self.scopes
+            .get(scope_id)
+            .and_then(|scope| scope.data.get(&TypeId::of::<T>()).cloned())
+            .and_then(move |data_id| self.data[data_id].as_mut().map(|t| unsafe { t.downcast_mut_unchecked::<T>() }))
     }
 }
 
-/// A runtime which manages shared resources
-pub trait ResourceRuntime: BaseRuntime {
-    /// Get the runtime scope's shared resources anymap
-    fn resources(&self) -> &Map<dyn CloneAny + Send + Sync>;
+#[derive(Clone)]
+pub(crate) struct PrintableRegistry<'a>(&'a Registry, ScopeId);
 
-    /// Mutably get the runtime scope's shared resources anymap
-    fn resources_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
+impl<'a> TreeItem for PrintableRegistry<'a> {
+    type Child = Self;
 
-    /// Get a shared resource if it exists in this runtime's scope
-    fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>> {
-        self.resources().get::<R>().map(|res| Res(res.clone()))
+    fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
+        let PrintableRegistry(_, scope_id) = self;
+        write!(f, "Scope {}", scope_id)
+    }
+
+    fn children(&self) -> std::borrow::Cow<[Self::Child]> {
+        let PrintableRegistry(registry, scope_id) = self;
+        registry
+            .children
+            .get(scope_id)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|&c| PrintableRegistry(registry.clone(), c))
+            .collect::<Vec<_>>()
+            .into()
     }
 }
 
-/// A runtime which manages pools of actors
-#[async_trait]
-pub trait PoolRuntime: BaseRuntime {
-    /// Get the anymap of pools from this runtimes's scope
-    fn pools(&self) -> &Map<dyn CloneAny + Send + Sync>;
-
-    /// Mutably get the anymap of pools from this runtimes's scope
-    fn pools_mut(&mut self) -> &mut Map<dyn CloneAny + Send + Sync>;
-
-    /// Get the pool of a specified actor if it exists in this runtime's scope
-    async fn pool<A>(&mut self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
-    where
-        Self: 'static + Sized,
-        A: 'static + Actor + Send + Sync,
-    {
-        match self.pools().get::<Arc<RwLock<ActorPool<A>>>>().cloned() {
-            Some(arc) => {
-                if arc.write().await.verify() {
-                    Some(Res(arc))
-                } else {
-                    self.pools_mut().remove::<Arc<RwLock<ActorPool<A>>>>();
-                    None
-                }
-            }
-            None => None,
-        }
+impl<'a> std::fmt::Display for PrintableRegistry<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+        write_tree(self, &mut buf).ok();
+        write!(f, "{}", String::from_utf8_lossy(&buf.into_inner()))
     }
+}
+
+#[derive(Copy, Clone)]
+enum Propagation {
+    Add(DataId),
+    Remove,
 }
 
 /// A shared resource

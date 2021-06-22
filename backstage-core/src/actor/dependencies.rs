@@ -1,28 +1,32 @@
+use crate::{Act, Actor, Res, RuntimeScope, Sys, System};
+use async_trait::async_trait;
+use std::marker::PhantomData;
 use tokio::sync::broadcast;
 
-use crate::{Act, Actor, BaseRuntime, Res, ResourceRuntime, Sys, System, SystemRuntime};
-use std::marker::PhantomData;
-
+/// A dependency's status
 pub enum DepStatus<T> {
+    /// The dependency is ready to be used
     Ready(T),
+    /// The dependency is not ready, here is a channel to await
     Waiting(broadcast::Receiver<PhantomData<T>>),
 }
 
 /// Defines dependencies that an actor or system can check for
-pub trait Dependencies<Rt: BaseRuntime> {
+#[async_trait]
+pub trait Dependencies {
     /// Request a notification when a specific resource is ready
-    fn request(rt: &mut Rt) -> DepStatus<Self>
+    async fn request(scope: &RuntimeScope) -> DepStatus<Self>
     where
         Self: 'static + Send + Sync + Sized,
     {
-        match Self::instantiate(rt) {
+        match Self::instantiate(scope).await {
             Ok(dep) => DepStatus::Ready(dep),
             Err(_) => DepStatus::Waiting(
-                if let Some(sender) = rt.dependency_channels().get::<broadcast::Sender<PhantomData<Self>>>() {
+                if let Some(sender) = scope.get_data::<broadcast::Sender<PhantomData<Self>>>().await {
                     sender.subscribe()
                 } else {
                     let (sender, receiver) = broadcast::channel::<PhantomData<Self>>(8);
-                    rt.dependency_channels_mut().insert(sender);
+                    scope.add_data(sender).await;
                     receiver
                 },
             ),
@@ -30,44 +34,55 @@ pub trait Dependencies<Rt: BaseRuntime> {
     }
 
     /// Instantiate instances of some dependencies
-    fn instantiate(rt: &Rt) -> anyhow::Result<Self>
+    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self>
     where
         Self: Sized;
 }
 
-impl<Rt: SystemRuntime, S: 'static + System + Send + Sync> Dependencies<Rt> for Sys<S> {
-    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
-        rt.system()
+#[async_trait]
+impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
+    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+        scope
+            .system()
+            .await
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 }
 
-impl<Rt: BaseRuntime, A: Actor + Send + Sync> Dependencies<Rt> for Act<A> {
-    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
-        rt.actor_event_handle()
+#[async_trait]
+impl<A: Actor + Send + Sync> Dependencies for Act<A> {
+    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+        scope
+            .actor_event_handle()
+            .await
             .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))
     }
 }
 
-impl<Rt: ResourceRuntime, R: 'static + Send + Sync + Clone> Dependencies<Rt> for Res<R> {
-    fn instantiate(rt: &Rt) -> anyhow::Result<Self> {
-        rt.resource()
+#[async_trait]
+impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
+    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+        scope
+            .resource()
+            .await
             .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))
     }
 }
 
-impl<Rt: BaseRuntime> Dependencies<Rt> for () {
-    fn instantiate(_rt: &Rt) -> anyhow::Result<Self> {
+#[async_trait]
+impl Dependencies for () {
+    async fn instantiate(_scope: &RuntimeScope) -> anyhow::Result<Self> {
         Ok(())
     }
 }
 
 macro_rules! impl_dependencies {
     ($($gen:ident),+) => {
-        impl<Rt: BaseRuntime, $($gen),+> Dependencies<Rt> for ($($gen),+,)
-        where $($gen: Dependencies<Rt> + Send + Sync),+
+        #[async_trait]
+        impl<$($gen),+> Dependencies for ($($gen),+,)
+        where $($gen: Dependencies + Send + Sync),+
         {
-            fn request(scope: &mut Rt) -> DepStatus<Self>
+            async fn request(scope: &RuntimeScope) -> DepStatus<Self>
             where
                 Self: 'static + Send + Sync,
             {
@@ -76,9 +91,9 @@ macro_rules! impl_dependencies {
                 let mut ready = 0;
                 $(
                     total += 1;
-                    let status = $gen::request(scope);
+                    let status = $gen::request(scope).await;
                     match status {
-                        DepStatus::Ready(dep) => {
+                        DepStatus::Ready(_) => {
                             ready += 1;
                         }
                         DepStatus::Waiting(receiver) => {
@@ -104,9 +119,9 @@ macro_rules! impl_dependencies {
                 }
             }
 
-            fn instantiate(rt: &Rt) -> anyhow::Result<Self>
+            async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self>
             {
-                Ok(($($gen::instantiate(rt)?),+,))
+                Ok(($($gen::instantiate(scope).await?),+,))
             }
         }
     };

@@ -70,7 +70,6 @@ impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
-    type Rt = BasicRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
@@ -124,7 +123,6 @@ impl Actor for Howdy {
     type Dependencies = (Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>);
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
-    type Rt = FullRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(
@@ -141,7 +139,10 @@ impl Actor for Howdy {
                     info!("Howdy printing: {}", s);
                     counter.write().await.counter += 1;
                     info!("Printed {} times", counter.read().await.counter);
-                    hello_world.send(HelloWorldEvent::Print(s)).await;
+                    hello_world
+                        .send(HelloWorldEvent::Print(s))
+                        .await
+                        .expect("Failed to pass along message!");
                 }
             }
         }
@@ -160,11 +161,11 @@ pub struct NecessaryResource {
 struct Launcher;
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
+    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::Howdy(event)).await
     }
 }
@@ -237,7 +238,6 @@ impl System for Launcher {
     type ChildEvents = LauncherEvents;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
-    type Rt = FullRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(
@@ -248,12 +248,12 @@ impl System for Launcher {
     where
         Self: Sized,
     {
-        let my_handle = rt.my_handle();
+        let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
         rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await;
         rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await;
-        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })));
+        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         let (_, mut websocket_handle) = rt
             .spawn_system(
                 prefabs::websocket::WebsocketBuilder::new()
@@ -282,16 +282,12 @@ impl System for Launcher {
                 LauncherEvents::Report(res) => match res {
                     Ok(s) => {
                         info!("{} has shutdown!", s.service.name);
-                        rt.service_mut().update_microservice(s.service);
                     }
                     Err(e) => {
                         info!("{} has shutdown unexpectedly!", e.service.name);
-                        rt.service_mut().update_microservice(e.service);
                     }
                 },
-                LauncherEvents::Status(s) => {
-                    rt.service_mut().update_microservice(s);
-                }
+                LauncherEvents::Status(s) => {}
             }
         }
 
@@ -314,11 +310,11 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
-    FullRuntime::default()
-        .scope(|scope| {
-            async move {
-                scope.spawn_system_unsupervised(Launcher).await;
-                scope.spawn_task(|mut rt| {
+    RuntimeScope::launch(|scope| {
+        async move {
+            scope.spawn_system_unsupervised(Launcher).await;
+            scope
+                .spawn_task(|rt| {
                     async move {
                         for _ in 0..3 {
                             rt.send_system_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
@@ -333,10 +329,13 @@ async fn startup() -> anyhow::Result<()> {
                         Ok(())
                     }
                     .boxed()
-                });
-            }
-            .boxed()
-        })
-        .await?;
+                })
+                .await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            log::debug!("Tree:\n{}", scope)
+        }
+        .boxed()
+    })
+    .await?;
     Ok(())
 }

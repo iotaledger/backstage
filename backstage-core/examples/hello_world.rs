@@ -44,7 +44,6 @@ impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
-    type Rt = BasicRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: Self::Dependencies) -> Result<(), ActorError>
@@ -68,7 +67,7 @@ impl Actor for HelloWorld {
 struct Launcher;
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &mut RuntimeScope<'_, FullRuntime>) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
     }
 }
@@ -110,7 +109,6 @@ impl System for Launcher {
     type ChildEvents = LauncherEvents;
     type Dependencies = ();
     type Channel = TokioChannel<Self::ChildEvents>;
-    type Rt = FullRuntime;
     type SupervisorEvent = ();
 
     async fn run<'a>(
@@ -123,7 +121,7 @@ impl System for Launcher {
     {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         {
-            let my_handle = rt.my_handle();
+            let my_handle = rt.my_handle().await;
             let builder = builder.clone();
             rt.spawn_pool(my_handle, |pool| {
                 async move {
@@ -133,49 +131,47 @@ impl System for Launcher {
                     Ok(())
                 }
                 .boxed()
-            });
+            })
+            .await
+            .expect("Failed to create actor pool!");
         }
-        tokio::task::spawn(ctrl_c(rt.my_handle()));
+        tokio::task::spawn(ctrl_c(rt.my_handle().await));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
                     if let Some(pool) = rt.pool::<HelloWorld>().await {
-                        pool.write().await.send_all(event).await;
+                        pool.write().await.send_all(event).await.expect("Failed to pass along message!");
                     }
                 }
                 LauncherEvents::Shutdown { using_ctrl_c: _ } => {
                     debug!("Exiting launcher");
+                    log::debug!("Tree:\n{}", rt);
                     break;
                 }
                 LauncherEvents::Report(res) => match res {
-                    Ok(s) => {
-                        match s.state {
-                            LauncherChildren::HelloWorld(h) => {
-                                info!("{} {} has shutdown!", h.name, h.num);
-                            }
+                    Ok(s) => match s.state {
+                        LauncherChildren::HelloWorld(h) => {
+                            info!("{} {} has shutdown!", h.name, h.num);
                         }
-                        rt.service_mut().update_microservice(s.service).ok();
-                    }
+                    },
                     Err(e) => {
                         match e.state {
                             LauncherChildren::HelloWorld(ref h) => {
                                 info!("{} {} has shutdown unexpectedly!", h.name, h.num);
                             }
                         }
-                        rt.service_mut().update_microservice(e.service.clone()).ok();
+                        //log::debug!("Tree:\n{}", rt);
                         match e.error.request() {
                             ActorRequest::Restart => {
-                                if let Some(_) = rt.service_mut().remove_microservice(&e.service.id) {
-                                    let num = match e.state {
-                                        LauncherChildren::HelloWorld(ref h) => {
-                                            info!("Restarting {} {}", h.name, h.num);
-                                            h.num
-                                        }
-                                    };
-                                    let my_handle = rt.my_handle();
-                                    rt.spawn_into_pool(builder.clone().num(num).build(), my_handle).await;
-                                }
+                                let num = match e.state {
+                                    LauncherChildren::HelloWorld(ref h) => {
+                                        info!("Restarting {} {}", h.name, h.num);
+                                        h.num
+                                    }
+                                };
+                                let my_handle = rt.my_handle().await;
+                                rt.spawn_into_pool(builder.clone().num(num).build(), my_handle).await;
                             }
                             ActorRequest::Reschedule(_) => todo!(),
                             ActorRequest::Finish => (),
@@ -183,9 +179,7 @@ impl System for Launcher {
                         }
                     }
                 },
-                LauncherEvents::Status(s) => {
-                    rt.service_mut().update_microservice(s).ok();
-                }
+                LauncherEvents::Status(_) => {}
             }
         }
         Ok(())
@@ -210,18 +204,19 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    FullRuntime::default()
-        .scope(|scope| {
-            async move {
-                scope.spawn_system_unsupervised(Launcher).await;
-                scope.spawn_task(|mut rt| {
+    RuntimeScope::launch(|scope| {
+        async move {
+            scope.spawn_system_unsupervised(Launcher).await;
+            scope
+                .spawn_task(|rt| {
                     async move {
-                        for _ in 0..10 {
+                        for i in 0..10 {
                             rt.system::<Launcher>()
+                                .await
                                 .unwrap()
                                 .read()
                                 .await
-                                .send_to_hello_world(HelloWorldEvent::Print("foo".to_owned()), &mut rt)
+                                .send_to_hello_world(HelloWorldEvent::Print(format!("foo {}", i)), &rt)
                                 .await
                                 .unwrap();
                             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -229,10 +224,11 @@ async fn startup() -> anyhow::Result<()> {
                         Ok(())
                     }
                     .boxed()
-                });
-            }
-            .boxed()
-        })
-        .await?;
+                })
+                .await;
+        }
+        .boxed()
+    })
+    .await?;
     Ok(())
 }

@@ -1,67 +1,287 @@
 use super::*;
 use crate::{ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, Service, SuccessReport};
-use futures::FutureExt;
+use futures::{
+    future::{AbortRegistration, Aborted},
+    Future, FutureExt,
+};
 use std::{fmt::Debug, panic::AssertUnwindSafe};
 use tokio::sync::broadcast;
 
 /// A runtime which defines a particular scope and functionality to
 /// create tasks within it.
-pub struct RuntimeScope<'a, Rt> {
-    /// The underlying runtime. Most functionality is forwarded to the scope,
-    /// but this may still be useful in certain situations.
-    pub rt: &'a mut Rt,
+pub struct RuntimeScope {
+    scope_id: ScopeId,
+    registry: Arc<RwLock<Registry>>,
+    service: Service,
+    join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
+    shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
 }
 
-impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
-    pub(crate) fn new(rt: &'a mut Rt) -> Self {
-        Self { rt }
+impl std::fmt::Display for RuntimeScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let registry_lock = tokio::task::block_in_place(|| futures::executor::block_on(self.registry.read()));
+        write!(f, "{}", PrintableRegistry(registry_lock.deref(), self.scope_id))
+    }
+}
+
+impl RuntimeScope {
+    /// Get the scope id
+    pub fn id(&self) -> ScopeId {
+        self.scope_id
     }
 
-    /// Spawn a new, plain task with the same runtime as this scope
-    pub fn spawn_task<F>(&mut self, f: F) -> AbortHandle
+    /// Launch a new root runtime scope
+    pub async fn launch<F, O>(f: F) -> anyhow::Result<O>
     where
-        Rt: BaseRuntime,
-        for<'b> F: 'static + Send + FnOnce(RuntimeScope<'b, Rt>) -> BoxFuture<'b, anyhow::Result<()>>,
+        O: Send + Sync,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope) -> BoxFuture<'b, O>,
     {
-        let child_rt = self.rt.child("Task");
-        self.common_spawn_task(child_rt, f)
+        let mut registry = Registry::default();
+        let scope_id = registry.new_scope(None);
+        let mut scope = Self {
+            scope_id,
+            registry: Arc::new(RwLock::new(registry)),
+            service: Service::new("Launcher"),
+            join_handles: Default::default(),
+            shutdown_handles: Default::default(),
+        };
+        let res = f(&mut scope).await;
+        scope.join().await;
+        Ok(res)
     }
 
-    /// Spawn a new, plain task with a specified runtime
-    pub fn spawn_task_with_runtime<TaskRt, F>(&mut self, f: F) -> AbortHandle
+    pub(crate) async fn new<P: Into<Option<usize>>, S: Into<String>, O: Into<Option<S>>>(
+        registry: Arc<RwLock<Registry>>,
+        parent_scope_id: P,
+        name: O,
+    ) -> Self {
+        let scope_id = registry.write().await.new_scope(parent_scope_id);
+        let name = name.into().map(Into::into).unwrap_or_else(|| format!("Scope {}", scope_id));
+        log::debug!("Created scope with name: {}", name);
+        Self {
+            scope_id,
+            registry,
+            service: Service::new(name),
+            join_handles: Default::default(),
+            shutdown_handles: Default::default(),
+        }
+    }
+
+    pub(crate) async fn child<S: Into<String>, O: Into<Option<S>>>(&self, name: O) -> Self {
+        // Self::new(self.registry.clone(), self.scope_id, name).await
+        let scope_id = self.registry.write().await.new_scope(self.scope_id);
+        let name = name.into().map(Into::into).unwrap_or_else(|| format!("Scope {}", scope_id));
+        log::debug!("Created child scope {} -> {}", self.service.name, name);
+        Self {
+            scope_id,
+            registry: self.registry.clone(),
+            service: Service::new(name),
+            join_handles: Default::default(),
+            shutdown_handles: Default::default(),
+        }
+    }
+
+    pub(crate) async fn child_name_with<F: FnOnce(ScopeId) -> String>(&self, name_fn: F) -> Self {
+        let scope_id = self.registry.write().await.new_scope(self.scope_id);
+        let name = name_fn(scope_id);
+        log::debug!("Created child scope {} -> {}", self.service.name, name);
+        Self {
+            scope_id,
+            registry: self.registry.clone(),
+            service: Service::new(name),
+            join_handles: Default::default(),
+            shutdown_handles: Default::default(),
+        }
+    }
+
+    /// Create a new scope within this one
+    pub async fn scope<O, F>(&mut self, f: F) -> anyhow::Result<O>
     where
-        Rt: BaseRuntime + Into<TaskRt>,
-        TaskRt: 'static + BaseRuntime,
-        for<'b> F: 'static + Send + FnOnce(RuntimeScope<'b, TaskRt>) -> BoxFuture<'b, anyhow::Result<()>>,
+        O: Send + Sync,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope) -> BoxFuture<'b, O>,
     {
-        let child_rt: TaskRt = self.rt.child("Task").into();
-        self.common_spawn_task(child_rt, f)
+        let mut child_scope = self.child::<String, _>(None).await;
+        let res = f(&mut child_scope).await;
+        child_scope.join().await;
+        Ok(res)
     }
 
-    fn common_spawn_task<ChildRt, F>(&mut self, mut child_rt: ChildRt, f: F) -> AbortHandle
+    pub(crate) async fn add_data<T: 'static + Send + Sync>(&self, data: T) {
+        self.registry.write().await.add_data(&self.scope_id, data).ok();
+    }
+
+    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {
+        self.registry.read().await.get_data(&self.scope_id).cloned()
+    }
+
+    pub(crate) async fn remove_data<T: 'static + Send + Sync>(&self) -> Option<T> {
+        self.registry.write().await.remove_data(&self.scope_id).ok().flatten()
+    }
+
+    pub(crate) fn service(&self) -> &Service {
+        &self.service
+    }
+
+    pub(crate) fn service_mut(&mut self) -> &mut Service {
+        &mut self.service
+    }
+
+    /// Shutdown the tasks in this runtime's scope
+    fn shutdown(&mut self) {
+        log::debug!("Shutting down scope {}", self.scope_id);
+        for handle in self.shutdown_handles.iter_mut() {
+            handle.0.take().map(|h| h.send(()));
+        }
+    }
+
+    /// Await the tasks in this runtime's scope
+    async fn join(&mut self) {
+        log::debug!("Joining scope {}", self.scope_id);
+        for handle in self.join_handles.drain(..) {
+            handle.await.ok();
+        }
+        self.registry.write().await.drop_scope(&self.scope_id).await;
+    }
+
+    /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
+    /// shutdown handles instead.
+    fn abort(&mut self)
     where
-        for<'b> F: 'static + Send + FnOnce(RuntimeScope<'b, ChildRt>) -> BoxFuture<'b, anyhow::Result<()>>,
-        Rt: BaseRuntime,
-        ChildRt: 'static + BaseRuntime,
+        Self: Sized,
+    {
+        log::debug!("Aborting scope {}", self.scope_id);
+        for handles in self.shutdown_handles.iter_mut() {
+            if let Some(shutdown_handle) = handles.0.take() {
+                if let Err(_) = shutdown_handle.send(()) {
+                    handles.1.abort();
+                }
+            } else {
+                handles.1.abort();
+            }
+        }
+    }
+
+    /// Get the join handles of this runtime's scoped tasks
+    pub(crate) fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
+        &self.join_handles
+    }
+
+    /// Mutably get the join handles of this runtime's scoped tasks
+    pub(crate) fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>> {
+        &mut self.join_handles
+    }
+
+    /// Get the shutdown handles of this runtime's scoped tasks
+    pub(crate) fn shutdown_handles(&self) -> &Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
+        &self.shutdown_handles
+    }
+
+    /// Mutably get the shutdown handles of this runtime's scoped tasks
+    pub(crate) fn shutdown_handles_mut(&mut self) -> &mut Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
+        &mut self.shutdown_handles
+    }
+
+    /// Get an actor's event handle, if it exists in this scope.
+    /// Note: This will only return a handle if the actor exists outside of a pool.
+    pub async fn actor_event_handle<A: Actor>(&self) -> Option<Act<A>> {
+        self.get_data::<<A::Channel as Channel<A::Event>>::Sender>()
+            .await
+            .and_then(|handle| (!handle.is_closed()).then(|| Act(handle)))
+    }
+
+    /// Send an event to a given actor, if it exists in this scope
+    pub async fn send_actor_event<A: Actor>(&self, event: A::Event) -> anyhow::Result<()> {
+        let mut handle = self
+            .get_data::<<A::Channel as Channel<A::Event>>::Sender>()
+            .await
+            .and_then(|handle| (!handle.is_closed()).then(|| handle))
+            .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
+        Sender::<A::Event>::send(&mut handle, event).await
+    }
+
+    /// Get a shared reference to a system if it exists in this runtime's scope
+    pub async fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>> {
+        self.get_data::<Arc<RwLock<S>>>().await.map(|sys| Sys(sys))
+    }
+
+    /// Get a system's event handle if the system exists in this runtime's scope
+    pub async fn system_event_handle<S: System>(&self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender> {
+        self.get_data::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
+            .await
+            .and_then(|handle| (!handle.is_closed()).then(|| handle))
+    }
+
+    /// Send an event to a system if it exists within this runtime's scope
+    pub async fn send_system_event<S: System>(&self, event: S::ChildEvents) -> anyhow::Result<()> {
+        let mut handle = self
+            .system_event_handle::<S>()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No channel for this system!"))?;
+        Sender::<S::ChildEvents>::send(&mut handle, event).await
+    }
+
+    /// Get a shared resource if it exists in this runtime's scope
+    pub async fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>> {
+        self.get_data::<R>().await.map(|res| Res(res))
+    }
+
+    /// Add a shared resource and get a reference to it
+    pub async fn add_resource<R: 'static + Send + Sync + Clone>(&self, resource: R) -> Res<R> {
+        self.add_data(resource.clone()).await;
+        if let Some(broadcaster) = self
+            .registry
+            .write()
+            .await
+            .get_data_mut::<broadcast::Sender<PhantomData<Res<R>>>>(&self.scope_id)
+        {
+            log::debug!("Broadcasting creation of Res<{}>", std::any::type_name::<R>());
+            broadcaster.send(PhantomData).ok();
+        }
+        Res(resource)
+    }
+
+    /// Get the pool of a specified actor if it exists in this runtime's scope
+    pub async fn pool<A>(&mut self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
+    where
+        Self: 'static + Sized,
+        A: 'static + Actor + Send + Sync,
+    {
+        match self.get_data::<Arc<RwLock<ActorPool<A>>>>().await {
+            Some(arc) => {
+                if arc.write().await.verify() {
+                    Some(Res(arc))
+                } else {
+                    self.remove_data::<Arc<RwLock<ActorPool<A>>>>().await;
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Spawn a new, plain task
+    pub async fn spawn_task<F>(&mut self, f: F) -> AbortHandle
+    where
+        for<'b> F: 'static + Send + FnOnce(&'b mut RuntimeScope) -> BoxFuture<'b, anyhow::Result<()>>,
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let mut child_scope = self.child_name_with(|scope_id| format!("Task {}", scope_id)).await;
         let child_task = tokio::spawn(async move {
-            let scope = RuntimeScope::new(&mut child_rt);
-            let res = Abortable::new(f(scope), abort_registration).await;
+            let res = Abortable::new(f(&mut child_scope), abort_registration).await;
             match res {
                 Ok(res) => {
-                    child_rt.join().await;
+                    child_scope.join().await;
                     res
                 }
                 Err(_) => {
                     log::debug!("Aborting children of task!");
-                    child_rt.abort();
+                    child_scope.abort();
                     anyhow::bail!("Aborted!")
                 }
             }
         });
-        self.rt.join_handles_mut().push(child_task);
-        self.rt.shutdown_handles_mut().push((None, abort_handle.clone()));
+        self.join_handles_mut().push(child_task);
+        self.shutdown_handles_mut().push((None, abort_handle.clone()));
         abort_handle
     }
 
@@ -69,165 +289,49 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
     pub async fn spawn_actor<A, H, E>(
         &mut self,
         mut actor: A,
-        mut supervisor_handle: H,
+        supervisor_handle: H,
     ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
-        Rt: BaseRuntime + Into<A::Rt>,
         A: 'static + Actor + Send + Sync,
-        A::Dependencies: Dependencies<Rt> + Dependencies<A::Rt>,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync + From<A::SupervisorEvent>,
     {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.rt.senders_mut().insert(sender.clone());
-        let dep_status = A::Dependencies::request(self.rt);
-        let mut child_rt = self.rt.child(A::name()).into();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let child_task = tokio::spawn(async move {
-            let deps = match dep_status {
-                DepStatus::Ready(deps) => deps,
-                DepStatus::Waiting(mut recv) => {
-                    log::info!(
-                        "{} waiting for dependencies {}",
-                        std::any::type_name::<A>(),
-                        std::any::type_name::<A::Dependencies>()
-                    );
-                    if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<A>());
-                    }
-                    log::info!("{} acquired dependencies!", std::any::type_name::<A>());
-                    // Unfortunately, if dependencies get added after this scope is spawned, they aren't propagated downward
-                    // so somehow we either need to do that or pass the resource over the broadcast channel...
-                    // which is kind of weird because then dependencies can be available via
-                    // the associated type but not the runtime...blegh
-                    A::Dependencies::instantiate(&mut child_rt)
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
-                        .unwrap()
-                }
-            };
-            let res = {
-                if let Some(broadcaster) = child_rt.dependency_channels_mut().get::<broadcast::Sender<PhantomData<Act<A>>>>() {
-                    log::debug!("Broadcasting creation of Act<{}>", std::any::type_name::<A>());
-                    broadcaster.send(PhantomData).ok();
-                }
-                let mut actor_rt =
-                    ActorScopedRuntime::supervised(RuntimeScope::new(&mut child_rt), receiver, oneshot_recv, supervisor_handle.clone());
-                Abortable::new(
-                    AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
-                    abort_registration,
-                )
-                .await
-                .ok()
-                .map(Result::ok)
-            };
-            match res {
-                Some(res) => match res {
-                    Some(res) => {
-                        child_rt.join().await;
-                        match res {
-                            Ok(_) => match E::report_ok(SuccessReport::new(actor, child_rt.service().clone())) {
-                                Ok(evt) => supervisor_handle.send(evt).await,
-                                Err(e) => {
-                                    log::error!("{}", e);
-                                    anyhow::bail!(e)
-                                }
-                            },
-                            Err(e) => match E::report_err(ErrorReport::new(actor, child_rt.service().clone(), e)) {
-                                Ok(evt) => supervisor_handle.send(evt).await,
-                                Err(e) => {
-                                    log::error!("{}", e);
-                                    anyhow::bail!(e)
-                                }
-                            },
-                        }
-                    }
-                    None => match E::report_err(ErrorReport::new(
-                        actor,
-                        child_rt.service().clone(),
-                        ActorError::RuntimeError(ActorRequest::Restart),
-                    )) {
-                        Ok(evt) => supervisor_handle.send(evt).await,
-                        Err(e) => {
-                            log::error!("{}", e);
-                            anyhow::bail!(e)
-                        }
-                    },
-                },
-                None => {
-                    log::debug!("Aborting children of actor!");
-                    child_rt.abort();
-                    match E::report_ok(SuccessReport::new(actor, child_rt.service().clone())) {
-                        Ok(evt) => supervisor_handle.send(evt).await,
-                        Err(e) => {
-                            log::error!("{}", e);
-                            anyhow::bail!(e)
-                        }
-                    }
-                }
-            }
-        });
-        self.rt.join_handles_mut().push(child_task);
+        self.add_data(sender.clone()).await;
+        let child_scope = self.child(A::name()).await;
+        let abort_handle = self
+            .common_spawn::<A, _, Act<A>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut actor_rt = ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    Abortable::new(
+                        AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
+            })
+            .await;
         (abort_handle, sender)
     }
 
     /// Spawn a new actor with no supervisor
     pub async fn spawn_actor_unsupervised<A>(&mut self, mut actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
-        Rt: BaseRuntime + Into<A::Rt>,
         A: 'static + Actor + Send + Sync,
-        A::Dependencies: Dependencies<Rt> + Dependencies<A::Rt>,
     {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.rt.senders_mut().insert(sender.clone());
-        let dep_status = A::Dependencies::request(self.rt);
-        let mut child_rt = self.rt.child(A::name()).into();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let child_task = tokio::spawn(async move {
-            let deps = match dep_status {
-                DepStatus::Ready(deps) => deps,
-                DepStatus::Waiting(mut recv) => {
-                    log::info!(
-                        "{} waiting for dependencies {}",
-                        std::any::type_name::<A>(),
-                        std::any::type_name::<A::Dependencies>()
-                    );
-                    if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<A>());
-                    }
-                    log::info!("{} acquired dependencies!", std::any::type_name::<A>());
-                    A::Dependencies::instantiate(&mut child_rt)
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<A>(), e))
-                        .unwrap()
-                }
-            };
-            let res = {
-                if let Some(broadcaster) = child_rt.dependency_channels_mut().get::<broadcast::Sender<PhantomData<Act<A>>>>() {
-                    log::debug!("Broadcasting creation of Act<{}>", std::any::type_name::<A>());
-                    broadcaster.send(PhantomData).ok();
-                }
-                let mut actor_rt = ActorScopedRuntime::unsupervised(RuntimeScope::new(&mut child_rt), receiver, oneshot_recv);
-                Abortable::new(actor.run(&mut actor_rt, deps), abort_registration).await
-            };
-            match res {
-                Ok(res) => {
-                    child_rt.join().await;
-                    match res {
-                        Ok(_) => Ok(()),
-                        Err(e) => anyhow::bail!(e),
-                    }
-                }
-                Err(_) => {
-                    log::debug!("Aborting children of actor!");
-                    child_rt.abort();
-                    anyhow::bail!("Aborted!")
-                }
-            }
-        });
-        self.rt.join_handles_mut().push(child_task);
+        self.add_data(sender.clone()).await;
+        let child_scope = self.child(A::name()).await;
+        let abort_handle = self
+            .common_spawn::<A, _, Act<A>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut actor_rt = ActorScopedRuntime::unsupervised(&mut child_scope, receiver, oneshot_recv);
+                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
+                };
+                Self::handle_res_unsupervised::<A>(res, &mut child_scope).await
+            })
+            .await;
         (abort_handle, sender)
     }
 
@@ -235,81 +339,148 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
     pub async fn spawn_system<S, H, E>(
         &mut self,
         system: S,
-        mut supervisor_handle: H,
+        supervisor_handle: H,
     ) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
     where
-        Rt: SystemRuntime + Into<S::Rt>,
         S: 'static + System + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync + From<S::SupervisorEvent>,
-        S::Dependencies: Dependencies<Rt> + Dependencies<S::Rt>,
     {
         let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
         let system = Arc::new(RwLock::new(system));
-        self.rt.senders_mut().insert(sender.clone());
-        self.rt.systems_mut().insert(system.clone());
-        let dep_status = S::Dependencies::request(self.rt);
-        let mut child_rt = self.rt.child(S::name()).into();
+        self.add_data(sender.clone()).await;
+        self.add_data(system.clone()).await;
+        let child_scope = self.child(S::name()).await;
+        let abort_handle = self
+            .common_spawn::<S, _, Sys<S>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut system_rt =
+                        SystemScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    Abortable::new(
+                        AssertUnwindSafe(System::run_supervised(system.clone(), &mut system_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                Self::handle_res(res, &mut child_scope, supervisor_handle, system).await
+            })
+            .await;
+        (abort_handle, sender)
+    }
+
+    /// Spawn a new system with no supervisor
+    pub async fn spawn_system_unsupervised<S>(&mut self, system: S) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
+    where
+        S: 'static + System + Send + Sync,
+    {
+        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
+        let system = Arc::new(RwLock::new(system));
+        self.add_data(sender.clone()).await;
+        self.add_data(system.clone()).await;
+        let child_scope = self.child(S::name()).await;
+        let abort_handle = self
+            .common_spawn::<S, _, Sys<S>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut system_rt = SystemScopedRuntime::unsupervised(&mut child_scope, receiver, oneshot_recv);
+                    Abortable::new(
+                        AssertUnwindSafe(System::run(system, &mut system_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                Self::handle_res_unsupervised::<S>(res, &mut child_scope).await
+            })
+            .await;
+        (abort_handle, sender)
+    }
+
+    async fn common_spawn<
+        T,
+        Deps: 'static + Dependencies + Send + Sync,
+        B: 'static + Send + Sync,
+        F: 'static + Send + Sync + FnOnce(RuntimeScope, Deps, oneshot::Receiver<()>, AbortRegistration) -> O,
+        O: Send + Future<Output = anyhow::Result<()>>,
+    >(
+        &mut self,
+        child_scope: RuntimeScope,
+        run_fn: F,
+    ) -> AbortHandle {
+        log::debug!("Spawning {}", std::any::type_name::<T>());
+        let dep_status = Deps::request(self).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        self.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
         let child_task = tokio::spawn(async move {
             let deps = match dep_status {
                 DepStatus::Ready(deps) => deps,
                 DepStatus::Waiting(mut recv) => {
                     log::info!(
                         "{} waiting for dependencies {}",
-                        std::any::type_name::<S>(),
-                        std::any::type_name::<S::Dependencies>()
+                        std::any::type_name::<T>(),
+                        std::any::type_name::<Deps>()
                     );
                     if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<S>());
+                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<T>());
                     }
-                    log::info!("{} acquired dependencies!", std::any::type_name::<S>());
-                    S::Dependencies::instantiate(&mut child_rt)
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<S>(), e))
+                    log::info!("{} acquired dependencies!", std::any::type_name::<T>());
+                    Deps::instantiate(&child_scope)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<T>(), e))
                         .unwrap()
                 }
             };
-            let res = {
-                if let Some(broadcaster) = child_rt.dependency_channels_mut().get::<broadcast::Sender<PhantomData<Sys<S>>>>() {
-                    log::debug!("Broadcasting creation of Sys<{}>", std::any::type_name::<S>());
+            {
+                let mut lock = child_scope.registry.write().await;
+                if let Some(broadcaster) = lock.get_data_mut::<broadcast::Sender<PhantomData<B>>>(&child_scope.scope_id) {
+                    log::debug!("Broadcasting creation of {}", std::any::type_name::<B>());
                     broadcaster.send(PhantomData).ok();
                 }
-                let mut system_rt =
-                    SystemScopedRuntime::supervised(RuntimeScope::new(&mut child_rt), receiver, oneshot_recv, supervisor_handle.clone());
-                Abortable::new(
-                    AssertUnwindSafe(S::run_supervised(system.clone(), &mut system_rt, deps)).catch_unwind(),
-                    abort_registration,
-                )
-                .await
-                .ok()
-                .map(Result::ok)
-            };
-            match res {
-                Some(res) => match res {
-                    Some(res) => {
-                        child_rt.join().await;
-                        match res {
-                            Ok(_) => match E::report_ok(SuccessReport::new(system, child_rt.service().clone())) {
-                                Ok(evt) => supervisor_handle.send(evt).await,
-                                Err(e) => {
-                                    log::error!("{}", e);
-                                    anyhow::bail!(e)
-                                }
-                            },
-                            Err(e) => match E::report_err(ErrorReport::new(system, child_rt.service().clone(), e)) {
-                                Ok(evt) => supervisor_handle.send(evt).await,
-                                Err(e) => {
-                                    log::error!("{}", e);
-                                    anyhow::bail!(e)
-                                }
-                            },
-                        }
+            }
+            run_fn(child_scope, deps, oneshot_recv, abort_registration).await
+        });
+        self.join_handles_mut().push(child_task);
+        abort_handle
+    }
+
+    pub(crate) async fn handle_res<T, H, E>(
+        res: Result<std::thread::Result<Result<(), ActorError>>, Aborted>,
+        child_scope: &mut RuntimeScope,
+        mut supervisor_handle: H,
+        state: T,
+    ) -> anyhow::Result<()>
+    where
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent<T> + Send + Sync,
+    {
+        match res.ok().map(Result::ok) {
+            Some(res) => match res {
+                Some(res) => {
+                    child_scope.join().await;
+                    match res {
+                        Ok(_) => match E::report_ok(SuccessReport::new(state, child_scope.service().clone())) {
+                            Ok(evt) => supervisor_handle.send(evt).await,
+                            Err(e) => {
+                                log::error!("{}", e);
+                                anyhow::bail!(e)
+                            }
+                        },
+                        Err(e) => match E::report_err(ErrorReport::new(state, child_scope.service().clone(), e)) {
+                            Ok(evt) => supervisor_handle.send(evt).await,
+                            Err(e) => {
+                                log::error!("{}", e);
+                                anyhow::bail!(e)
+                            }
+                        },
                     }
-                    None => match E::report_err(ErrorReport::new(
-                        system,
-                        child_rt.service().clone(),
+                }
+                // TODO: Maybe abort the children here?
+                // or alternatively allow for restarting in the same scope?
+                None => {
+                    child_scope.abort();
+                    child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
+                    match E::report_err(ErrorReport::new(
+                        state,
+                        child_scope.service().clone(),
                         ActorError::RuntimeError(ActorRequest::Restart),
                     )) {
                         Ok(evt) => supervisor_handle.send(evt).await,
@@ -317,95 +488,60 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
                             log::error!("{}", e);
                             anyhow::bail!(e)
                         }
-                    },
-                },
-                None => {
-                    log::debug!("Aborting children of system!");
-                    child_rt.abort();
-                    match E::report_ok(SuccessReport::new(system, child_rt.service().clone())) {
-                        Ok(evt) => supervisor_handle.send(evt).await,
-                        Err(e) => {
-                            log::error!("{}", e);
-                            anyhow::bail!(e)
-                        }
+                    }
+                }
+            },
+            None => {
+                log::debug!("Aborting children of {}!", std::any::type_name::<T>());
+                child_scope.abort();
+                child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
+                match E::report_ok(SuccessReport::new(state, child_scope.service().clone())) {
+                    Ok(evt) => supervisor_handle.send(evt).await,
+                    Err(e) => {
+                        log::error!("{}", e);
+                        anyhow::bail!(e)
                     }
                 }
             }
-        });
-        self.rt.join_handles_mut().push(child_task);
-        (abort_handle, sender)
+        }
     }
 
-    /// Spawn a new system with no supervisor
-    pub async fn spawn_system_unsupervised<S>(&mut self, system: S) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
-    where
-        Rt: SystemRuntime + Into<S::Rt>,
-        S: 'static + System + Send + Sync,
-        S::Dependencies: Dependencies<Rt> + Dependencies<S::Rt>,
-    {
-        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let system = Arc::new(RwLock::new(system));
-        self.rt.senders_mut().insert(sender.clone());
-        self.rt.systems_mut().insert(system.clone());
-        let dep_status = S::Dependencies::request(self.rt);
-        let mut child_rt = self.rt.child(S::name()).into();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.rt.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let child_task = tokio::spawn(async move {
-            let deps = match dep_status {
-                DepStatus::Ready(deps) => deps,
-                DepStatus::Waiting(mut recv) => {
-                    log::info!(
-                        "{} waiting for dependencies {}",
-                        std::any::type_name::<S>(),
-                        std::any::type_name::<S::Dependencies>()
-                    );
-                    if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<S>());
-                    }
-                    log::info!("{} acquired dependencies!", std::any::type_name::<S>());
-                    S::Dependencies::instantiate(&mut child_rt)
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<S>(), e))
-                        .unwrap()
-                }
-            };
-            let res = {
-                if let Some(broadcaster) = child_rt.dependency_channels_mut().get::<broadcast::Sender<PhantomData<Sys<S>>>>() {
-                    log::debug!("Broadcasting creation of Sys<{}>", std::any::type_name::<S>());
-                    broadcaster.send(PhantomData).ok();
-                }
-                let mut system_rt = SystemScopedRuntime::unsupervised(RuntimeScope::new(&mut child_rt), receiver, oneshot_recv);
-                Abortable::new(S::run(system, &mut system_rt, deps), abort_registration).await
-            };
-            match res {
+    pub(crate) async fn handle_res_unsupervised<T>(
+        res: Result<std::thread::Result<Result<(), ActorError>>, Aborted>,
+        child_scope: &mut RuntimeScope,
+    ) -> anyhow::Result<()> {
+        match res {
+            Ok(res) => match res {
                 Ok(res) => {
-                    child_rt.join().await;
+                    child_scope.join().await;
                     match res {
                         Ok(_) => Ok(()),
                         Err(e) => anyhow::bail!(e),
                     }
                 }
                 Err(_) => {
-                    log::debug!("Aborting children of system!");
-                    child_rt.abort();
-                    anyhow::bail!("Aborted!")
+                    child_scope.abort();
+                    child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
+                    anyhow::bail!("Panicked!")
                 }
+            },
+            Err(_) => {
+                log::debug!("Aborting children of {}!", std::any::type_name::<T>());
+                child_scope.abort();
+                child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
+                anyhow::bail!("Aborted!")
             }
-        });
-        self.rt.join_handles_mut().push(child_task);
-        (abort_handle, sender)
+        }
     }
 
     /// Spawn a new pool of actors of a given type
-    pub fn spawn_pool<A, H, E, I, F>(&mut self, supervisor_handle: I, f: F)
+    pub async fn spawn_pool<A, H, E, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
-        Rt: PoolRuntime,
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
         I: Into<Option<H>>,
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Rt, A, H, E>) -> BoxFuture<'b, anyhow::Result<()>>,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, H, E>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
         let mut pool = ActorPool::default();
         let mut scoped_pool = ScopedActorPool {
@@ -414,25 +550,39 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
             supervisor_handle: supervisor_handle.into(),
             _evt: PhantomData,
         };
-        f(&mut scoped_pool);
-        self.rt.pools_mut().insert(Arc::new(RwLock::new(pool)));
+        f(&mut scoped_pool).await?;
+        self.add_data(Arc::new(RwLock::new(pool))).await;
+        Ok(())
     }
 
     /// Spawn a new actor into a pool, creating a pool if needed
     pub async fn spawn_into_pool<A: 'static + Actor, H, E, I: Into<Option<H>>>(
         &mut self,
-        actor: A,
+        mut actor: A,
         supervisor_handle: I,
     ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
-        Rt: PoolRuntime + Into<A::Rt>,
         A: 'static + Actor + Send + Sync,
-        A::Dependencies: Dependencies<Rt> + Dependencies<A::Rt>,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync + From<A::SupervisorEvent> + Debug,
         I: Into<Option<H>>,
     {
-        let (abort_handle, sender) = self.spawn_actor(actor, supervisor_handle.into()).await;
+        let supervisor_handle = supervisor_handle.into();
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let child_scope = self.child(A::name()).await;
+        let abort_handle = self
+            .common_spawn::<A, _, Act<A>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut actor_rt = ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    Abortable::new(
+                        AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
+            })
+            .await;
         match self.pool::<A>().await {
             Some(res) => {
                 res.write().await.push(sender.clone());
@@ -440,64 +590,10 @@ impl<'a, Rt: 'static> RuntimeScope<'a, Rt> {
             None => {
                 let mut pool = ActorPool::<A>::default();
                 pool.push(sender.clone());
-                self.rt.pools_mut().insert(Arc::new(RwLock::new(pool)));
+                self.add_data(Arc::new(RwLock::new(pool))).await;
             }
         };
         (abort_handle, sender)
-    }
-
-    /// Add a shared resource and get a reference to it
-    pub fn add_resource<R: 'static + Send + Sync + Clone>(&mut self, resource: R) -> Res<R>
-    where
-        Rt: ResourceRuntime,
-    {
-        self.rt.resources_mut().insert(resource.clone());
-        if let Some(broadcaster) = self.rt.dependency_channels_mut().get::<broadcast::Sender<PhantomData<Res<R>>>>() {
-            log::debug!("Broadcasting creation of Res<{}>", std::any::type_name::<R>());
-            broadcaster.send(PhantomData).ok();
-        }
-        Res(resource)
-    }
-
-    /// Get a shared resource if it exists in the scope
-    pub fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>>
-    where
-        Rt: ResourceRuntime,
-    {
-        self.rt.resource()
-    }
-
-    /// Get a system reference if it exists in the scope
-    pub fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>>
-    where
-        Rt: SystemRuntime,
-    {
-        self.rt.system()
-    }
-
-    /// Get a pool of actors if it exists in the scope
-    pub async fn pool<A>(&mut self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
-    where
-        Rt: PoolRuntime,
-        A: 'static + Actor + Send + Sync,
-    {
-        self.rt.pool::<A>().await
-    }
-
-    /// Send an event to an actor in this scope
-    pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()>
-    where
-        Rt: BaseRuntime,
-    {
-        self.rt.send_actor_event::<A>(event).await
-    }
-
-    /// Send an event to a system in this scope
-    pub async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()>
-    where
-        Rt: SystemRuntime,
-    {
-        self.rt.send_system_event::<S>(event).await
     }
 }
 
@@ -506,7 +602,7 @@ pub struct ActorScopedRuntime<'a, A: Actor>
 where
     A::Event: 'static,
 {
-    scope: RuntimeScope<'a, A::Rt>,
+    scope: &'a mut RuntimeScope,
     receiver: ShutdownStream<<A::Channel as Channel<A::Event>>::Receiver>,
 }
 
@@ -524,28 +620,28 @@ where
 
 impl<'a, A: Actor> ActorScopedRuntime<'a, A> {
     pub(crate) fn unsupervised(
-        runtime: RuntimeScope<'a, A::Rt>,
+        scope: &'a mut RuntimeScope,
         receiver: <A::Channel as Channel<A::Event>>::Receiver,
         shutdown: oneshot::Receiver<()>,
     ) -> Self {
         Self {
-            scope: runtime,
+            scope,
             receiver: ShutdownStream::new(shutdown, receiver),
         }
     }
 
     pub(crate) fn supervised<H, E>(
-        runtime: RuntimeScope<'a, A::Rt>,
+        scope: &'a mut RuntimeScope,
         receiver: <A::Channel as Channel<A::Event>>::Receiver,
         shutdown: oneshot::Receiver<()>,
         supervisor_handle: H,
-    ) -> SupervisedActorScopedRuntime<'a, A, H, E>
+    ) -> SupervisedActorScopedRuntime<A, H, E>
     where
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
     {
         SupervisedActorScopedRuntime {
-            scope: Self::unsupervised(runtime, receiver, shutdown),
+            scope: Self::unsupervised(scope, receiver, shutdown),
             supervisor_handle,
             _event: PhantomData,
         }
@@ -557,23 +653,23 @@ impl<'a, A: Actor> ActorScopedRuntime<'a, A> {
     }
 
     /// Get this actors's handle
-    pub fn my_handle(&self) -> Act<A> {
-        self.scope.rt.actor_event_handle::<A>().unwrap()
+    pub async fn my_handle(&self) -> Act<A> {
+        self.scope.actor_event_handle::<A>().await.unwrap()
     }
 
     /// Shutdown this actor
     pub fn shutdown(&mut self) {
-        self.scope.rt.shutdown()
+        self.scope.shutdown();
     }
 
     /// Get the runtime's service
-    pub fn service(&self) -> &Service {
-        self.scope.rt.service()
+    pub async fn service(&self) -> &Service {
+        self.scope.service()
     }
 
     /// Mutably get the runtime's service
-    pub fn service_mut(&mut self) -> &mut Service {
-        self.scope.rt.service_mut()
+    pub async fn service_mut(&mut self) -> &mut Service {
+        self.scope.service_mut()
     }
 }
 
@@ -589,7 +685,7 @@ where
 }
 
 impl<'a, A: Actor> Deref for ActorScopedRuntime<'a, A> {
-    type Target = RuntimeScope<'a, A::Rt>;
+    type Target = RuntimeScope;
 
     fn deref(&self) -> &Self::Target {
         &self.scope
@@ -604,7 +700,7 @@ impl<'a, A: Actor> DerefMut for ActorScopedRuntime<'a, A> {
 
 impl<'a, A: Actor> Drop for ActorScopedRuntime<'a, A> {
     fn drop(&mut self) {
-        self.scope.rt.shutdown();
+        self.shutdown();
     }
 }
 
@@ -635,7 +731,7 @@ pub struct SystemScopedRuntime<'a, S: System>
 where
     S::ChildEvents: 'static,
 {
-    scope: RuntimeScope<'a, S::Rt>,
+    scope: &'a mut RuntimeScope,
     receiver: ShutdownStream<<S::Channel as Channel<S::ChildEvents>>::Receiver>,
 }
 
@@ -653,18 +749,18 @@ where
 
 impl<'a, S: System> SystemScopedRuntime<'a, S> {
     pub(crate) fn unsupervised(
-        runtime: RuntimeScope<'a, S::Rt>,
+        scope: &'a mut RuntimeScope,
         receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
         shutdown: oneshot::Receiver<()>,
     ) -> Self {
         Self {
-            scope: runtime,
+            scope,
             receiver: ShutdownStream::new(shutdown, receiver),
         }
     }
 
     pub(crate) fn supervised<H, E>(
-        runtime: RuntimeScope<'a, S::Rt>,
+        scope: &'a mut RuntimeScope,
         receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
         shutdown: oneshot::Receiver<()>,
         supervisor_handle: H,
@@ -674,7 +770,7 @@ impl<'a, S: System> SystemScopedRuntime<'a, S> {
         E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
     {
         SupervisedSystemScopedRuntime {
-            scope: Self::unsupervised(runtime, receiver, shutdown),
+            scope: Self::unsupervised(scope, receiver, shutdown),
             supervisor_handle,
             _event: PhantomData,
         }
@@ -686,23 +782,23 @@ impl<'a, S: System> SystemScopedRuntime<'a, S> {
     }
 
     /// Get this system's handle
-    pub fn my_handle(&self) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
-        self.scope.rt.system_event_handle::<S>().unwrap()
+    pub async fn my_handle(&self) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
+        self.scope.system_event_handle::<S>().await.unwrap()
     }
 
     /// Shutdown this system
     pub fn shutdown(&mut self) {
-        self.scope.rt.shutdown()
+        self.scope.shutdown();
     }
 
     /// Get the runtime's service
     pub fn service(&self) -> &Service {
-        self.scope.rt.service()
+        self.scope.service()
     }
 
     /// Mutably get the runtime's service
     pub fn service_mut(&mut self) -> &mut Service {
-        self.scope.rt.service_mut()
+        self.scope.service_mut()
     }
 }
 
@@ -719,12 +815,12 @@ where
 
 impl<'a, S: System> Drop for SystemScopedRuntime<'a, S> {
     fn drop(&mut self) {
-        self.scope.rt.shutdown();
+        self.shutdown();
     }
 }
 
 impl<'a, S: System> Deref for SystemScopedRuntime<'a, S> {
-    type Target = RuntimeScope<'a, S::Rt>;
+    type Target = RuntimeScope;
 
     fn deref(&self) -> &Self::Target {
         &self.scope
@@ -734,6 +830,12 @@ impl<'a, S: System> Deref for SystemScopedRuntime<'a, S> {
 impl<'a, S: System> DerefMut for SystemScopedRuntime<'a, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.scope
+    }
+}
+
+impl<'a, S: System> std::fmt::Display for SystemScopedRuntime<'a, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.scope)
     }
 }
 
@@ -760,32 +862,46 @@ where
 }
 
 /// A scope for an actor pool, which only allows spawning of the specified actor
-pub struct ScopedActorPool<'a, 'b, Rt: BaseRuntime, A: Actor, H, E>
+pub struct ScopedActorPool<'a, A: Actor, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent<A> + Send + Sync,
 {
-    scope: &'a mut RuntimeScope<'b, Rt>,
+    scope: &'a mut RuntimeScope,
     pool: &'a mut ActorPool<A>,
     supervisor_handle: Option<H>,
     _evt: PhantomData<E>,
 }
 
-impl<'a, 'b, Rt, A, H, E> ScopedActorPool<'a, 'b, Rt, A, H, E>
+impl<'a, A, H, E> ScopedActorPool<'a, A, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent<A> + Send + Sync + std::fmt::Debug + From<A::SupervisorEvent>,
-    Rt: 'static + BaseRuntime + Into<A::Rt>,
     A: Actor,
-    A::Dependencies: Dependencies<Rt> + Dependencies<A::Rt>,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn(&mut self, actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
         A: 'static + Send + Sync,
     {
-        let (abort_handle, sender) = self.scope.spawn_actor(actor, self.supervisor_handle.clone()).await;
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.pool.push(sender.clone());
+        let child_scope = self.scope.child(A::name()).await;
+        let supervisor_handle = self.supervisor_handle.clone();
+        let abort_handle = self
+            .scope
+            .common_spawn::<A, _, Act<A>, _, _>(child_scope, |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut actor_rt = ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    Abortable::new(
+                        AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                RuntimeScope::handle_res(res, &mut child_scope, supervisor_handle, actor).await
+            })
+            .await;
         (abort_handle, sender)
     }
 }
