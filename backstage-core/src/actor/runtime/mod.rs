@@ -51,7 +51,7 @@ impl Scope {
 /// for this data.
 pub struct Registry {
     data: Vec<Option<Box<dyn Any + Send + Sync>>>,
-    data_source: HashMap<ScopeId, DataId>,
+    data_source: HashMap<DataId, ScopeId>,
     parents: HashMap<ScopeId, ScopeId>,
     children: HashMap<ScopeId, Vec<ScopeId>>,
     scopes: HashMap<ScopeId, Scope>,
@@ -102,6 +102,11 @@ impl Registry {
             }
         }
         self.scopes.remove(scope_id);
+        for (&data_id, _) in self.data_source.iter().filter(|&(_, id)| id == scope_id) {
+            if self.data[data_id].take().is_some() {
+                self.data_pool.return_id(data_id);
+            }
+        }
         if let Some(parent) = self.parents.remove(scope_id) {
             self.children.get_mut(&parent).unwrap().retain(|id| id != scope_id);
         }
@@ -120,7 +125,7 @@ impl Registry {
             self.data.resize_with(data_id + 11, || None);
         }
         self.data[data_id].replace(Box::new(data));
-        self.data_source.insert(*scope_id, data_id);
+        self.data_source.insert(data_id, *scope_id);
         scope.data.insert(TypeId::of::<T>(), data_id);
         if let Some(children) = self.children.get(scope_id).cloned() {
             for child in children.iter() {
