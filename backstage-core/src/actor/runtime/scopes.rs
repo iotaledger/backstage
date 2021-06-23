@@ -267,15 +267,26 @@ impl RuntimeScope {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child_name_with(|scope_id| format!("Task {}", scope_id)).await;
         let child_task = tokio::spawn(async move {
-            let res = Abortable::new(f(&mut child_scope), abort_registration).await;
+            let res = Abortable::new(AssertUnwindSafe(f(&mut child_scope)).catch_unwind(), abort_registration).await;
             match res {
-                Ok(res) => {
-                    child_scope.join().await;
-                    res
-                }
+                Ok(res) => match res {
+                    Ok(res) => {
+                        child_scope.join().await;
+                        match res {
+                            Ok(_) => Ok(()),
+                            Err(e) => anyhow::bail!(e),
+                        }
+                    }
+                    Err(_) => {
+                        child_scope.abort();
+                        child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
+                        anyhow::bail!("Panicked!")
+                    }
+                },
                 Err(_) => {
                     log::debug!("Aborting children of task!");
                     child_scope.abort();
+                    child_scope.registry.write().await.drop_scope(&child_scope.scope_id).await;
                     anyhow::bail!("Aborted!")
                 }
             }

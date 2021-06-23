@@ -108,7 +108,9 @@ impl Registry {
             }
         }
         if let Some(parent) = self.parents.remove(scope_id) {
-            self.children.get_mut(&parent).unwrap().retain(|id| id != scope_id);
+            if let Some(siblings) = self.children.get_mut(&parent) {
+                siblings.retain(|id| id != scope_id);
+            }
         }
         self.scope_pool.return_id(*scope_id);
     }
