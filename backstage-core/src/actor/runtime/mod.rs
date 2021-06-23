@@ -209,8 +209,17 @@ impl<'a> TreeItem for PrintableRegistry<'a> {
     type Child = Self;
 
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
-        let PrintableRegistry(_, scope_id) = self;
-        write!(f, "Scope {}", scope_id)
+        let PrintableRegistry(registry, scope_id) = self;
+        write!(
+            f,
+            "Scope {}, Data {:?}",
+            scope_id,
+            registry
+                .data_source
+                .iter()
+                .filter_map(|(data, id)| (id == scope_id).then(|| data))
+                .collect::<Vec<_>>()
+        )
     }
 
     fn children(&self) -> std::borrow::Cow<[Self::Child]> {
