@@ -120,22 +120,20 @@ impl System for Launcher {
         Self: Sized,
     {
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-        {
-            let my_handle = rt.my_handle().await;
-            let builder = builder.clone();
-            rt.spawn_pool(my_handle, |pool| {
-                async move {
-                    for i in 0..10 {
-                        let (_abort, _handle) = pool.spawn(builder.clone().num(i).build()).await;
-                    }
-                    Ok(())
+        let my_handle = rt.my_handle().await;
+        rt.spawn_pool(my_handle.clone(), |pool| {
+            async move {
+                for i in 0..10 {
+                    let (_abort, _handle) = pool.spawn(builder.clone().num(i).build()).await;
                 }
-                .boxed()
-            })
-            .await
-            .expect("Failed to create actor pool!");
-        }
-        tokio::task::spawn(ctrl_c(rt.my_handle().await));
+                Ok(())
+            }
+            .boxed()
+        })
+        .await
+        .expect("Failed to create actor pool!");
+
+        tokio::task::spawn(ctrl_c(my_handle.clone()));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
@@ -164,14 +162,12 @@ impl System for Launcher {
                         //log::debug!("Tree:\n{}", rt);
                         match e.error.request() {
                             ActorRequest::Restart => {
-                                let num = match e.state {
-                                    LauncherChildren::HelloWorld(ref h) => {
+                                match e.state {
+                                    LauncherChildren::HelloWorld(h) => {
                                         info!("Restarting {} {}", h.name, h.num);
-                                        h.num
+                                        rt.spawn_into_pool(h, my_handle.clone()).await;
                                     }
                                 };
-                                let my_handle = rt.my_handle().await;
-                                rt.spawn_into_pool(builder.clone().num(num).build(), my_handle).await;
                             }
                             ActorRequest::Reschedule(_) => todo!(),
                             ActorRequest::Finish => (),
