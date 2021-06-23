@@ -173,18 +173,24 @@ where
         let (sender, receiver) = TokioChannel::new();
         let mut registry = Registry::default();
         let scope_id = registry.new_scope(None);
+        let child_scope_id = registry.new_scope(scope_id);
         let mut actor = RegistryActor { registry };
+        let actor_registry = ActorRegistry { handle: sender };
         let mut scope = RuntimeScope {
             scope_id,
-            registry: ActorRegistry { handle: sender },
+            registry: actor_registry.clone(),
             service: Service::new("Registry"),
             join_handles: Default::default(),
             shutdown_handles: Default::default(),
         };
-        let mut child_scope = scope.child(name).await;
+        let mut child_scope = RuntimeScope {
+            scope_id: child_scope_id,
+            registry: actor_registry,
+            service: Service::new(name),
+            join_handles: Default::default(),
+            shutdown_handles: Default::default(),
+        };
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        // This doesn't work because we are trying to create a new scope (which involves calling the registry)
-        // before the registry actor actually exists
         tokio::spawn(async move {
             let mut actor_rt = ActorScopedRuntime::unsupervised(&mut scope, receiver, oneshot_recv);
             actor.run(&mut actor_rt, ()).await;
@@ -196,7 +202,6 @@ where
     }
 
     async fn new_scope<P: Send + Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
-        log::debug!("Actor Registry spawning new scope");
         let (request, recv) = RegistryActorRequest::new(RequestType::NewScope(parent.into()));
         self.handle.send(Box::new(request)).await;
         if let ResponseType::NewScope(r) = recv.await.unwrap() {
@@ -207,7 +212,6 @@ where
     }
 
     async fn drop_scope(&mut self, scope_id: &ScopeId) {
-        log::debug!("Actor Registry dropping a scope");
         let (request, recv) = RegistryActorRequest::new(RequestType::DropScope(*scope_id));
         self.handle.send(Box::new(request)).await;
         if let ResponseType::DropScope = recv.await.unwrap() {
@@ -217,7 +221,6 @@ where
     }
 
     async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
-        log::debug!("Actor Registry adding data");
         let (request, recv) = RegistryActorRequest::new(RequestType::AddData {
             scope_id: *scope_id,
             data_type: TypeId::of::<T>(),
@@ -232,7 +235,6 @@ where
     }
 
     async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
-        log::debug!("Actor Registry removing data");
         let (request, recv) = RegistryActorRequest::new(RequestType::RemoveData {
             scope_id: *scope_id,
             data_type: TypeId::of::<T>(),
@@ -246,7 +248,6 @@ where
     }
 
     async fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<T> {
-        log::debug!("Actor Registry getting data");
         let (request, recv) = RegistryActorRequest::new(RequestType::GetData {
             scope_id: *scope_id,
             data_type: TypeId::of::<T>(),
