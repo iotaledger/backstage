@@ -5,8 +5,8 @@ pub use channel::*;
 pub use dependencies::*;
 pub use events::*;
 pub use result::*;
-pub use runtime::*;
 pub use service::*;
+pub use shutdown_stream::*;
 pub use system::*;
 
 mod actor;
@@ -15,7 +15,6 @@ mod channel;
 mod dependencies;
 mod events;
 mod result;
-mod runtime;
 mod service;
 mod shutdown_stream;
 mod system;

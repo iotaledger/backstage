@@ -1,10 +1,9 @@
-use std::time::Duration;
-
 use async_trait::async_trait;
-use backstage::*;
+use backstage::prelude::*;
 use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -46,7 +45,11 @@ impl Actor for HelloWorld {
     type Channel = TokioChannel<Self::Event>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: Self::Dependencies) -> Result<(), ActorError>
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        _deps: Self::Dependencies,
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -67,7 +70,11 @@ impl Actor for HelloWorld {
 struct Launcher;
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world<Reg: 'static + RegistryAccess + Send + Sync>(
+        &self,
+        event: HelloWorldEvent,
+        rt: &mut RuntimeScope<Reg>,
+    ) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
     }
 }
@@ -111,9 +118,9 @@ impl System for Launcher {
     type Channel = TokioChannel<Self::ChildEvents>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        rt: &mut SystemScopedRuntime<'a, Self>,
+        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
@@ -144,7 +151,7 @@ impl System for Launcher {
                 }
                 LauncherEvents::Shutdown { using_ctrl_c: _ } => {
                     debug!("Exiting launcher");
-                    log::debug!("Tree:\n{}", rt);
+                    //log::debug!("Tree:\n{}", rt);
                     break;
                 }
                 LauncherEvents::Report(res) => match res {
@@ -200,7 +207,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::launch(|scope| {
+    RuntimeScope::<ArcedRegistry>::launch(|scope| {
         async move {
             scope.spawn_system_unsupervised(Launcher).await;
             scope
@@ -212,7 +219,7 @@ async fn startup() -> anyhow::Result<()> {
                                 .unwrap()
                                 .read()
                                 .await
-                                .send_to_hello_world(HelloWorldEvent::Print(format!("foo {}", i)), &rt)
+                                .send_to_hello_world(HelloWorldEvent::Print(format!("foo {}", i)), rt)
                                 .await
                                 .unwrap();
                             tokio::time::sleep(Duration::from_secs(1)).await;

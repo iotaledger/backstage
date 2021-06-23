@@ -1,5 +1,7 @@
+use super::{ActorError, Channel, Dependencies, Sender, SupervisorEvent};
 use crate::{
-    ActorError, Channel, Dependencies, Registry, RuntimeScope, Sender, SupervisedSystemScopedRuntime, SupervisorEvent, SystemScopedRuntime,
+    prelude::RegistryAccess,
+    runtime::{Registry, RuntimeScope, SupervisedSystemScopedRuntime, SystemScopedRuntime},
 };
 use async_trait::async_trait;
 use futures::{
@@ -16,22 +18,26 @@ pub trait System {
     /// Allows specifying a system's startup dependencies. Ex. (Sys<OtherSystem>, Res<MyResource>)
     type Dependencies: Dependencies + Send + Sync;
     /// The type of event this system will receive and forward to its children
-    type ChildEvents: 'static + Send + Sync + Debug;
+    type ChildEvents: 'static + Send + Sync;
     /// The type of channel this system will use to receive events
     type Channel: Channel<Self::ChildEvents> + Send;
     /// An optional custom event type which can be sent to the supervisor
     type SupervisorEvent;
 
     /// The main function for the system
-    async fn run<'a>(this: Arc<RwLock<Self>>, rt: &mut SystemScopedRuntime<'a, Self>, deps: Self::Dependencies) -> Result<(), ActorError>
+    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+        this: Arc<RwLock<Self>>,
+        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
+        deps: Self::Dependencies,
+    ) -> Result<(), ActorError>
     where
         Self: Sized;
 
     /// Run this system with a supervisor
     /// Note: Redefine this method if your system requires a supervisor handle to function!
-    async fn run_supervised<'a, H, E>(
+    async fn run_supervised<'a, Reg: RegistryAccess + Send + Sync, H, E>(
         this: Arc<RwLock<Self>>,
-        rt: &mut SupervisedSystemScopedRuntime<'a, Self, H, E>,
+        rt: &mut SupervisedSystemScopedRuntime<'a, Self, Reg, H, E>,
         deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -48,11 +54,11 @@ pub trait System {
     }
 
     /// Start with this system as the root scope
-    async fn start_as_root(self) -> anyhow::Result<()>
+    async fn start_as_root<Reg: 'static + RegistryAccess + Send + Sync>(self) -> anyhow::Result<()>
     where
         Self: 'static + Sized + Send + Sync,
     {
-        let mut scope = RuntimeScope::new(Arc::new(RwLock::new(Registry::default())), None, Self::name()).await;
+        let mut scope = Reg::instantiate(Self::name()).await;
         let system = Arc::new(RwLock::new(self));
         scope.add_data(system.clone()).await;
         let (sender, receiver) = <Self::Channel as Channel<Self::ChildEvents>>::new();
@@ -60,7 +66,7 @@ pub trait System {
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         scope.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
-        let deps = Self::Dependencies::instantiate(&scope)
+        let deps = Self::Dependencies::instantiate(&mut scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<Self>(), e))
             .unwrap();

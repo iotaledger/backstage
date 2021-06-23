@@ -1,4 +1,9 @@
 use super::*;
+use crate::{
+    actor::{build, Actor, ActorError, Builder, Sender, SupervisorEvent, System, TokioChannel, TokioSender},
+    prelude::RegistryAccess,
+    runtime::{ActorScopedRuntime, SupervisedSystemScopedRuntime, SystemScopedRuntime},
+};
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
 pub use std::net::SocketAddr;
@@ -53,9 +58,9 @@ impl System for Websocket {
     type Channel = TokioChannel<Self::ChildEvents>;
     type SupervisorEvent = (SocketAddr, Message);
 
-    async fn run_supervised<'a, H, E>(
+    async fn run_supervised<'a, Reg: RegistryAccess + Send + Sync, H, E>(
         this: Arc<RwLock<Self>>,
-        rt: &mut SupervisedSystemScopedRuntime<'a, Self, H, E>,
+        rt: &mut SupervisedSystemScopedRuntime<'a, Self, Reg, H, E>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
@@ -135,7 +140,11 @@ impl System for Websocket {
         Ok(())
     }
 
-    async fn run<'a>(_this: Arc<RwLock<Self>>, _rt: &mut SystemScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError> {
+    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+        _this: Arc<RwLock<Self>>,
+        _rt: &mut SystemScopedRuntime<'a, Self, Reg>,
+        _deps: (),
+    ) -> Result<(), ActorError> {
         Ok(())
     }
 }
@@ -151,7 +160,11 @@ impl Actor for Responder {
     type Channel = TokioChannel<Self::Event>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
+    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        _deps: (),
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {

@@ -33,7 +33,7 @@ pub trait Receiver<E: Send> {
 /// A tokio mpsc channel implementation
 pub struct TokioChannel<E>(PhantomData<E>);
 
-impl<E: 'static + Send + Debug + Sync> Channel<E> for TokioChannel<E> {
+impl<E: 'static + Send + Sync> Channel<E> for TokioChannel<E> {
     type Sender = TokioSender<E>;
 
     type Receiver = TokioReceiver<E>;
@@ -48,16 +48,16 @@ impl<E: 'static + Send + Debug + Sync> Channel<E> for TokioChannel<E> {
 #[derive(Debug)]
 pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
 
-impl<E: 'static + Send + Debug + Sync> Clone for TokioSender<E> {
+impl<E: 'static + Send + Sync> Clone for TokioSender<E> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
 #[async_trait]
-impl<E: 'static + Send + Debug + Sync> Sender<E> for TokioSender<E> {
+impl<E: 'static + Send + Sync> Sender<E> for TokioSender<E> {
     async fn send(&mut self, event: E) -> anyhow::Result<()> {
-        self.0.send(event).map_err(|e| anyhow::anyhow!(e))
+        self.0.send(event).map_err(|e| anyhow::anyhow!(e.to_string()))
     }
 
     fn is_closed(&self) -> bool {

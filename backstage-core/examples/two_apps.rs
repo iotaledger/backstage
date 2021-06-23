@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use backstage::{prefabs::websocket::*, *};
+use backstage::{prefabs::websocket::*, prelude::*};
 use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,11 @@ impl Actor for HelloWorld {
     type Channel = TokioChannel<Self::Event>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(&mut self, rt: &mut ActorScopedRuntime<'a, Self>, _deps: ()) -> Result<(), ActorError>
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        _deps: (),
+    ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
@@ -125,9 +129,9 @@ impl Actor for Howdy {
     type Channel = TokioChannel<Self::Event>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
         (counter, mut hello_world): Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -161,11 +165,19 @@ pub struct NecessaryResource {
 struct Launcher;
 
 impl Launcher {
-    pub async fn send_to_hello_world(&self, event: HelloWorldEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
+    pub async fn send_to_hello_world<Reg: 'static + RegistryAccess + Send + Sync>(
+        &self,
+        event: HelloWorldEvent,
+        rt: &mut RuntimeScope<Reg>,
+    ) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
     }
 
-    pub async fn send_to_howdy(&self, event: HowdyEvent, rt: &RuntimeScope) -> anyhow::Result<()> {
+    pub async fn send_to_howdy<Reg: 'static + RegistryAccess + Send + Sync>(
+        &self,
+        event: HowdyEvent,
+        rt: &mut RuntimeScope<Reg>,
+    ) -> anyhow::Result<()> {
         rt.send_system_event::<Self>(LauncherEvents::Howdy(event)).await
     }
 }
@@ -240,9 +252,9 @@ impl System for Launcher {
     type Channel = TokioChannel<Self::ChildEvents>;
     type SupervisorEvent = ();
 
-    async fn run<'a>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        rt: &mut SystemScopedRuntime<'a, Self>,
+        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
@@ -256,9 +268,7 @@ impl System for Launcher {
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         let (_, mut websocket_handle) = rt
             .spawn_system(
-                prefabs::websocket::WebsocketBuilder::new()
-                    .listen_address(([127, 0, 0, 1], 8000).into())
-                    .build(),
+                WebsocketBuilder::new().listen_address(([127, 0, 0, 1], 8000).into()).build(),
                 my_handle.clone(),
             )
             .await;
@@ -310,7 +320,7 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
-    RuntimeScope::launch(|scope| {
+    RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
             scope.spawn_system_unsupervised(Launcher).await;
             scope
@@ -332,7 +342,7 @@ async fn startup() -> anyhow::Result<()> {
                 })
                 .await;
             tokio::time::sleep(Duration::from_secs(1)).await;
-            log::debug!("Tree:\n{}", scope)
+            //log::debug!("Tree:\n{}", scope)
         }
         .boxed()
     })

@@ -1,4 +1,4 @@
-use crate::{ActorError, Service};
+use super::{ActorError, Service};
 
 /// Defines an event's ability to be sent to a supervisor as either a report or status update
 pub trait SupervisorEvent<T> {

@@ -1,4 +1,8 @@
-use crate::{Act, Actor, Res, RuntimeScope, Sys, System};
+use super::{Actor, System};
+use crate::{
+    prelude::RegistryAccess,
+    runtime::{Act, Res, RuntimeScope, Sys},
+};
 use async_trait::async_trait;
 use std::marker::PhantomData;
 use tokio::sync::broadcast;
@@ -15,7 +19,7 @@ pub enum DepStatus<T> {
 #[async_trait]
 pub trait Dependencies {
     /// Request a notification when a specific resource is ready
-    async fn request(scope: &RuntimeScope) -> DepStatus<Self>
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> DepStatus<Self>
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -34,14 +38,14 @@ pub trait Dependencies {
     }
 
     /// Instantiate instances of some dependencies
-    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self>
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
     where
         Self: Sized;
 }
 
 #[async_trait]
 impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
-    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
             .system()
             .await
@@ -51,7 +55,7 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
 
 #[async_trait]
 impl<A: Actor + Send + Sync> Dependencies for Act<A> {
-    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
             .actor_event_handle()
             .await
@@ -61,7 +65,7 @@ impl<A: Actor + Send + Sync> Dependencies for Act<A> {
 
 #[async_trait]
 impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
-    async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self> {
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
         scope
             .resource()
             .await
@@ -71,7 +75,7 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
 
 #[async_trait]
 impl Dependencies for () {
-    async fn instantiate(_scope: &RuntimeScope) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         Ok(())
     }
 }
@@ -82,7 +86,7 @@ macro_rules! impl_dependencies {
         impl<$($gen),+> Dependencies for ($($gen),+,)
         where $($gen: Dependencies + Send + Sync),+
         {
-            async fn request(scope: &RuntimeScope) -> DepStatus<Self>
+            async fn request<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> DepStatus<Self>
             where
                 Self: 'static + Send + Sync,
             {
@@ -119,7 +123,7 @@ macro_rules! impl_dependencies {
                 }
             }
 
-            async fn instantiate(scope: &RuntimeScope) -> anyhow::Result<Self>
+            async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self>
             {
                 Ok(($($gen::instantiate(scope).await?),+,))
             }

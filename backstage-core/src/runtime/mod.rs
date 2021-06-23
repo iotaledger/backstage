@@ -1,6 +1,6 @@
-use crate::{actor::shutdown_stream::ShutdownStream, Actor, Channel, IdPool, Sender, SupervisorEvent, System};
-use anymap::any::{Any, UncheckedAnyExt};
-use async_recursion::async_recursion;
+use crate::actor::{Actor, Channel, IdPool, Sender, System};
+use anymap::any::{Any, CloneAny, UncheckedAnyExt};
+use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
     StreamExt,
@@ -25,6 +25,8 @@ use tokio::{
 
 mod scopes;
 pub use scopes::*;
+mod access;
+pub use access::*;
 
 /// An alias type indicating that this is a scope id
 pub type ScopeId = usize;
@@ -45,12 +47,29 @@ impl Scope {
     }
 }
 
+#[async_trait]
+pub trait RegistryAccess: Clone {
+    async fn instantiate<S: Into<String> + Send>(name: S) -> RuntimeScope<Self>
+    where
+        Self: Send + Sized;
+
+    async fn new_scope<P: Send + Into<Option<ScopeId>>>(&mut self, parent: P) -> usize;
+
+    async fn drop_scope(&mut self, scope_id: &ScopeId);
+
+    async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()>;
+
+    async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
+
+    async fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<T>;
+}
+
 /// The central registry that stores all data for the application.
 /// Data is accessable via scopes which track its location within
 /// the global dyn vector. Two id pools manage the reusable indexes
 /// for this data.
 pub struct Registry {
-    data: Vec<Option<Box<dyn Any + Send + Sync>>>,
+    data: Vec<Option<Box<dyn CloneAny + Send + Sync>>>,
     data_source: HashMap<DataId, ScopeId>,
     parents: HashMap<ScopeId, ScopeId>,
     children: HashMap<ScopeId, Vec<ScopeId>>,
@@ -75,7 +94,7 @@ impl Default for Registry {
 
 impl Registry {
     /// Create a new scope with an optional parent
-    pub fn new_scope<P: Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
+    pub(crate) fn new_scope<P: Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
         let scope_id = self.scope_pool.get_id();
         //log::debug!("Creating scope {}", scope_id);
         let parent = parent.into();
@@ -89,8 +108,7 @@ impl Registry {
     }
 
     /// Drop a scope and all of its children recursively
-    #[async_recursion]
-    pub async fn drop_scope(&mut self, scope_id: &ScopeId) {
+    pub(crate) fn drop_scope(&mut self, scope_id: &ScopeId) {
         if let Some(children) = self.children.remove(scope_id) {
             let children = children
                 .iter()
@@ -98,7 +116,7 @@ impl Registry {
                 .filter_map(|v| v)
                 .collect::<Vec<_>>();
             for child in children.iter() {
-                self.drop_scope(&child).await;
+                self.drop_scope(&child);
             }
         }
         self.scopes.remove(scope_id);
@@ -116,7 +134,7 @@ impl Registry {
     }
 
     /// Add some arbitrary data to a scope and its children recursively
-    pub fn add_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
+    pub(crate) fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
         log::debug!("Adding {} to scope {}", std::any::type_name::<T>(), scope_id);
         let scope = self
             .scopes
@@ -137,10 +155,36 @@ impl Registry {
         Ok(())
     }
 
+    pub(crate) fn add_data_raw(
+        &mut self,
+        scope_id: &ScopeId,
+        data_type: TypeId,
+        data: Box<dyn CloneAny + Send + Sync>,
+    ) -> anyhow::Result<()> {
+        log::debug!("Adding raw data to scope {}", scope_id);
+        let scope = self
+            .scopes
+            .get_mut(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        let data_id = self.data_pool.get_id();
+        if self.data.len() <= data_id {
+            self.data.resize_with(data_id + 11, || None);
+        }
+        self.data[data_id].replace(data);
+        self.data_source.insert(data_id, *scope_id);
+        scope.data.insert(data_type, data_id);
+        if let Some(children) = self.children.get(scope_id).cloned() {
+            for child in children.iter() {
+                self.propagate_data_raw(child, data_type, Propagation::Add(data_id));
+            }
+        }
+        Ok(())
+    }
+
     /// Remove some data from this scope and its children.
     /// NOTE: This will only remove data if this scope originally added it! Otherwise,
     /// this fn will return an error.
-    pub fn remove_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
+    pub(crate) fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
         log::debug!("Removing {} from scope {}", std::any::type_name::<T>(), scope_id);
         if let Some(data_id) = self
             .scopes
@@ -167,7 +211,38 @@ impl Registry {
         }
     }
 
-    fn propagate_data<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId, prop: Propagation) {
+    pub(crate) fn remove_data_raw(
+        &mut self,
+        scope_id: &ScopeId,
+        data_type: TypeId,
+    ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>> {
+        log::debug!("Removing raw data from scope {}", scope_id);
+        if let Some(data_id) = self
+            .scopes
+            .get(scope_id)
+            .and_then(|scope| scope.data.get(&data_type))
+            .and_then(|data_id| {
+                self.data_source
+                    .get(data_id)
+                    .and_then(|source| (source == scope_id).then(|| *data_id))
+            })
+        {
+            let data = self.data[data_id].take();
+            Ok(data.map(|data| {
+                self.data_pool.return_id(data_id);
+                if let Some(children) = self.children.get(scope_id).cloned() {
+                    for child in children.iter() {
+                        self.propagate_data_raw(child, data_type, Propagation::Remove);
+                    }
+                }
+                data
+            }))
+        } else {
+            anyhow::bail!("This scope does not own this data!")
+        }
+    }
+
+    fn propagate_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, prop: Propagation) {
         log::debug!("Propagating {} to scope {}", std::any::type_name::<T>(), scope_id);
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             match prop {
@@ -186,8 +261,27 @@ impl Registry {
         }
     }
 
+    fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
+        log::debug!("Propagating raw data to scope {}", scope_id);
+        if let Some(scope) = self.scopes.get_mut(scope_id) {
+            match prop {
+                Propagation::Add(data_id) => {
+                    scope.data.insert(data_type, data_id);
+                }
+                Propagation::Remove => {
+                    scope.data.remove(&data_type);
+                }
+            }
+        }
+        if let Some(children) = self.children.get(scope_id).cloned() {
+            for child in children.iter() {
+                self.propagate_data_raw(child, data_type, prop);
+            }
+        }
+    }
+
     /// Get a reference to some arbitrary data from the given scope
-    pub fn get_data<T: 'static + Send + Sync>(&self, scope_id: &ScopeId) -> Option<&T> {
+    pub(crate) fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> Option<&T> {
         self.scopes
             .get(scope_id)
             .and_then(|scope| scope.data.get(&TypeId::of::<T>()))
@@ -195,8 +289,15 @@ impl Registry {
             .map(|t| unsafe { t.downcast_ref_unchecked::<T>() })
     }
 
+    pub(crate) fn get_data_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> Option<&Box<dyn CloneAny + Send + Sync>> {
+        self.scopes
+            .get(scope_id)
+            .and_then(|scope| scope.data.get(&data_type))
+            .and_then(|data_id| self.data[*data_id].as_ref())
+    }
+
     /// Get a mutable reference to some arbitrary data from the given scope
-    pub fn get_data_mut<T: 'static + Send + Sync>(&mut self, scope_id: &ScopeId) -> Option<&mut T> {
+    pub(crate) fn get_data_mut<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<&mut T> {
         self.scopes
             .get(scope_id)
             .and_then(|scope| scope.data.get(&TypeId::of::<T>()).cloned())
