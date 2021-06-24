@@ -309,6 +309,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     )
                     .await
                 };
+                child_scope.shutdown().await;
                 Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
             })
             .await;
@@ -329,6 +330,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     let mut actor_rt = ActorScopedRuntime::unsupervised(&mut child_scope, receiver, oneshot_recv);
                     Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
                 };
+                child_scope.shutdown().await;
                 Self::handle_res_unsupervised::<A>(res, &mut child_scope).await
             })
             .await;
@@ -362,6 +364,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     )
                     .await
                 };
+                child_scope.shutdown().await;
                 Self::handle_res(res, &mut child_scope, supervisor_handle, system).await
             })
             .await;
@@ -388,6 +391,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     )
                     .await
                 };
+                child_scope.shutdown().await;
                 Self::handle_res_unsupervised::<S>(res, &mut child_scope).await
             })
             .await;
@@ -693,12 +697,6 @@ impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync> DerefMut for Act
     }
 }
 
-impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync> Drop for ActorScopedRuntime<'a, A, Reg> {
-    fn drop(&mut self) {
-        tokio::task::block_in_place(|| futures::executor::block_on(self.shutdown()));
-    }
-}
-
 impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync, H, E> Deref for SupervisedActorScopedRuntime<'a, A, Reg, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
@@ -800,12 +798,6 @@ where
     /// Get this systems's supervisor handle
     pub fn supervisor_handle(&mut self) -> &mut H {
         &mut self.supervisor_handle
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> Drop for SystemScopedRuntime<'a, S, Reg> {
-    fn drop(&mut self) {
-        tokio::task::block_in_place(|| futures::executor::block_on(self.shutdown()));
     }
 }
 
