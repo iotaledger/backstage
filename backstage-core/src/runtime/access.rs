@@ -1,4 +1,4 @@
-use crate::actor::{Service, TokioChannel, TokioSender};
+use crate::actor::{Service, ServiceStatus, TokioChannel, TokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 use tokio::sync::Mutex;
@@ -40,8 +40,12 @@ impl RegistryAccess for ArcedRegistry {
         .await
     }
 
-    async fn new_scope<P: Send + Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
-        self.registry.write().await.new_scope(parent)
+    async fn new_scope<P: Send + Into<Option<ScopeId>>, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
+        &mut self,
+        parent: P,
+        name_fn: F,
+    ) -> usize {
+        self.registry.write().await.new_scope(parent, name_fn)
     }
 
     async fn drop_scope(&mut self, scope_id: &ScopeId) {
@@ -59,10 +63,45 @@ impl RegistryAccess for ArcedRegistry {
     async fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<T> {
         self.registry.read().await.get_data(scope_id).cloned()
     }
+
+    async fn get_service(&mut self, scope_id: &ScopeId) -> Option<Service> {
+        self.registry.read().await.get_service(scope_id)
+    }
+
+    async fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+        self.registry.write().await.update_status(scope_id, status)
+    }
+
+    async fn add_shutdown_handle(
+        &mut self,
+        scope_id: &ScopeId,
+        shutdown_handle: Option<oneshot::Sender<()>>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<()> {
+        self.registry
+            .write()
+            .await
+            .add_shutdown_handle(scope_id, shutdown_handle, abort_handle)
+    }
+
+    async fn shutdown(&mut self, scope_id: &ScopeId) {
+        self.registry.write().await.shutdown(scope_id)
+    }
+
+    async fn abort(&mut self, scope_id: &ScopeId) {
+        self.registry.write().await.abort(scope_id)
+    }
+
+    async fn print(&mut self, scope_id: &ScopeId) {
+        self.registry.read().await.print(scope_id)
+    }
 }
 
 pub enum RequestType {
-    NewScope(Option<ScopeId>),
+    NewScope {
+        parent: Option<ScopeId>,
+        name_fn: Box<dyn Send + Sync + FnOnce(ScopeId) -> String>,
+    },
     DropScope(ScopeId),
     AddData {
         scope_id: ScopeId,
@@ -77,6 +116,19 @@ pub enum RequestType {
         scope_id: ScopeId,
         data_type: TypeId,
     },
+    GetService(ScopeId),
+    UpdateStatus {
+        scope_id: ScopeId,
+        status: ServiceStatus,
+    },
+    AddShutdownHandle {
+        scope_id: ScopeId,
+        shutdown_handle: Option<oneshot::Sender<()>>,
+        abort_handle: AbortHandle,
+    },
+    Shutdown(ScopeId),
+    Abort(ScopeId),
+    Print(ScopeId),
 }
 
 pub enum ResponseType {
@@ -85,6 +137,12 @@ pub enum ResponseType {
     AddData(anyhow::Result<()>),
     RemoveData(anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>>),
     GetData(Option<Box<dyn CloneAny + Send + Sync>>),
+    GetService(Option<Service>),
+    UpdateStatus(anyhow::Result<()>),
+    AddShutdownHandle(anyhow::Result<()>),
+    Shutdown,
+    Abort,
+    Print,
 }
 
 pub struct RegistryActorRequest {
@@ -109,11 +167,8 @@ where
     Self: Send,
 {
     type Dependencies = ();
-
-    type Event = Box<RegistryActorRequest>;
-
+    type Event = RegistryActorRequest;
     type Channel = TokioChannel<Self::Event>;
-
     type SupervisorEvent = ();
 
     async fn run<'a, Reg: RegistryAccess + Send + Sync>(
@@ -126,7 +181,7 @@ where
     {
         while let Some(e) = rt.next_event().await {
             let res = match e.req {
-                RequestType::NewScope(parent) => ResponseType::NewScope(self.registry.new_scope(parent)),
+                RequestType::NewScope { parent, name_fn } => ResponseType::NewScope(self.registry.new_scope(parent, name_fn)),
                 RequestType::DropScope(scope_id) => {
                     self.registry.drop_scope(&scope_id);
                     ResponseType::DropScope
@@ -140,15 +195,38 @@ where
                 RequestType::GetData { scope_id, data_type } => {
                     ResponseType::GetData(self.registry.get_data_raw(&scope_id, data_type).cloned())
                 }
+                RequestType::GetService(scope_id) => ResponseType::GetService(self.registry.get_service(&scope_id)),
+                RequestType::UpdateStatus { scope_id, status } => {
+                    ResponseType::UpdateStatus(self.registry.update_status(&scope_id, status))
+                }
+                RequestType::AddShutdownHandle {
+                    scope_id,
+                    shutdown_handle,
+                    abort_handle,
+                } => ResponseType::AddShutdownHandle(self.registry.add_shutdown_handle(&scope_id, shutdown_handle, abort_handle)),
+                RequestType::Shutdown(scope_id) => {
+                    self.registry.shutdown(&scope_id);
+                    ResponseType::Shutdown
+                }
+                RequestType::Abort(scope_id) => {
+                    self.registry.abort(&scope_id);
+                    ResponseType::Abort
+                }
+                RequestType::Print(scope_id) => {
+                    self.registry.print(&scope_id);
+                    ResponseType::Print
+                }
             };
             e.responder.send(res);
         }
+        log::debug!("Registry actor shutting down!");
+        self.registry.print(&0);
         Ok(())
     }
 }
 
 pub struct ActorRegistry {
-    handle: TokioSender<Box<RegistryActorRequest>>,
+    handle: TokioSender<RegistryActorRequest>,
 }
 
 impl Clone for ActorRegistry {
@@ -172,23 +250,19 @@ where
     {
         let (sender, receiver) = TokioChannel::new();
         let mut registry = Registry::default();
-        let scope_id = registry.new_scope(None);
-        let child_scope_id = registry.new_scope(scope_id);
+        let scope_id = registry.new_scope(None, |_| "Registry".to_string());
+        let child_scope_id = registry.new_scope(scope_id, |_| name.into());
         let mut actor = RegistryActor { registry };
         let actor_registry = ActorRegistry { handle: sender };
         let mut scope = RuntimeScope {
             scope_id,
             registry: actor_registry.clone(),
-            service: Service::new("Registry"),
             join_handles: Default::default(),
-            shutdown_handles: Default::default(),
         };
         let mut child_scope = RuntimeScope {
             scope_id: child_scope_id,
             registry: actor_registry,
-            service: Service::new(name),
             join_handles: Default::default(),
-            shutdown_handles: Default::default(),
         };
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         tokio::spawn(async move {
@@ -201,9 +275,16 @@ where
         child_scope
     }
 
-    async fn new_scope<P: Send + Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
-        let (request, recv) = RegistryActorRequest::new(RequestType::NewScope(parent.into()));
-        self.handle.send(Box::new(request)).await;
+    async fn new_scope<P: Send + Into<Option<ScopeId>>, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
+        &mut self,
+        parent: P,
+        name_fn: F,
+    ) -> usize {
+        let (request, recv) = RegistryActorRequest::new(RequestType::NewScope {
+            parent: parent.into(),
+            name_fn: Box::new(name_fn),
+        });
+        self.handle.send(request).await;
         if let ResponseType::NewScope(r) = recv.await.unwrap() {
             r
         } else {
@@ -213,7 +294,7 @@ where
 
     async fn drop_scope(&mut self, scope_id: &ScopeId) {
         let (request, recv) = RegistryActorRequest::new(RequestType::DropScope(*scope_id));
-        self.handle.send(Box::new(request)).await;
+        self.handle.send(request).await;
         if let ResponseType::DropScope = recv.await.unwrap() {
         } else {
             panic!("Wrong response type!")
@@ -226,7 +307,7 @@ where
             data_type: TypeId::of::<T>(),
             data: Box::new(data),
         });
-        self.handle.send(Box::new(request)).await;
+        self.handle.send(request).await;
         if let ResponseType::AddData(r) = recv.await.unwrap() {
             r
         } else {
@@ -239,7 +320,7 @@ where
             scope_id: *scope_id,
             data_type: TypeId::of::<T>(),
         });
-        self.handle.send(Box::new(request)).await;
+        self.handle.send(request).await;
         if let ResponseType::RemoveData(r) = recv.await.unwrap() {
             r.map(|o| o.map(|d| *unsafe { d.downcast_unchecked::<T>() }))
         } else {
@@ -252,9 +333,78 @@ where
             scope_id: *scope_id,
             data_type: TypeId::of::<T>(),
         });
-        self.handle.send(Box::new(request)).await;
+        self.handle.send(request).await;
         if let ResponseType::GetData(r) = recv.await.unwrap() {
             r.map(|d| *unsafe { d.downcast_unchecked::<T>() })
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn get_service(&mut self, scope_id: &ScopeId) -> Option<Service> {
+        let (request, recv) = RegistryActorRequest::new(RequestType::GetService(*scope_id));
+        self.handle.send(request).await;
+        if let ResponseType::GetService(r) = recv.await.unwrap() {
+            r
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+        let (request, recv) = RegistryActorRequest::new(RequestType::UpdateStatus {
+            scope_id: *scope_id,
+            status,
+        });
+        self.handle.send(request).await;
+        if let ResponseType::UpdateStatus(r) = recv.await.unwrap() {
+            r
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn add_shutdown_handle(
+        &mut self,
+        scope_id: &ScopeId,
+        shutdown_handle: Option<oneshot::Sender<()>>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<()> {
+        let (request, recv) = RegistryActorRequest::new(RequestType::AddShutdownHandle {
+            scope_id: *scope_id,
+            shutdown_handle,
+            abort_handle,
+        });
+        self.handle.send(request).await;
+        if let ResponseType::AddShutdownHandle(r) = recv.await.unwrap() {
+            r
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn shutdown(&mut self, scope_id: &ScopeId) {
+        let (request, recv) = RegistryActorRequest::new(RequestType::Shutdown(*scope_id));
+        self.handle.send(request).await;
+        if let ResponseType::Shutdown = recv.await.unwrap() {
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn abort(&mut self, scope_id: &ScopeId) {
+        let (request, recv) = RegistryActorRequest::new(RequestType::Abort(*scope_id));
+        self.handle.send(request).await;
+        if let ResponseType::Abort = recv.await.unwrap() {
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn print(&mut self, scope_id: &ScopeId) {
+        let (request, recv) = RegistryActorRequest::new(RequestType::Print(*scope_id));
+        self.handle.send(request).await;
+        if let ResponseType::Print = recv.await.unwrap() {
         } else {
             panic!("Wrong response type!")
         }

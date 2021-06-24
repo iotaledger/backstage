@@ -1,5 +1,5 @@
-use crate::actor::{Actor, Channel, IdPool, Sender, System};
-use anymap::any::{Any, CloneAny, UncheckedAnyExt};
+use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, System};
+use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
@@ -35,14 +35,44 @@ type DataId = usize;
 /// A scope, which marks data as usable for a given task
 pub struct Scope {
     id: ScopeId,
+    // TODO: Maybe use a stack here to allow overwriting parent's
+    // data without deleting it from the child scope?
+    // Of course this means figuring out how to propagate removal properly
     data: HashMap<TypeId, DataId>,
+    service: Service,
+    shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
 }
 
 impl Scope {
-    fn new(id: usize, parent: Option<&Scope>) -> Self {
+    fn new(id: usize, parent: Option<&Scope>, name: String) -> Self {
         Scope {
             id,
             data: parent.map(|p| p.data.clone()).unwrap_or_default(),
+            service: Service::new(name),
+            shutdown_handles: Default::default(),
+        }
+    }
+
+    /// Shutdown the tasks in this scope
+    fn shutdown(&mut self) {
+        log::debug!("Shutting down scope {} ({})", self.id, self.service.name);
+        for handle in self.shutdown_handles.iter_mut() {
+            handle.0.take().map(|h| h.send(()));
+        }
+    }
+
+    /// Abort the tasks in this scope. This will shutdown tasks that have
+    /// shutdown handles instead.
+    fn abort(&mut self) {
+        log::debug!("Aborting scope {} ({})", self.id, self.service.name);
+        for handles in self.shutdown_handles.iter_mut() {
+            if let Some(shutdown_handle) = handles.0.take() {
+                if let Err(_) = shutdown_handle.send(()) {
+                    handles.1.abort();
+                }
+            } else {
+                handles.1.abort();
+            }
         }
     }
 }
@@ -53,7 +83,11 @@ pub trait RegistryAccess: Clone {
     where
         Self: Send + Sized;
 
-    async fn new_scope<P: Send + Into<Option<ScopeId>>>(&mut self, parent: P) -> usize;
+    async fn new_scope<P: Send + Into<Option<ScopeId>>, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
+        &mut self,
+        parent: P,
+        name_fn: F,
+    ) -> usize;
 
     async fn drop_scope(&mut self, scope_id: &ScopeId);
 
@@ -62,6 +96,23 @@ pub trait RegistryAccess: Clone {
     async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
 
     async fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<T>;
+
+    async fn get_service(&mut self, scope_id: &ScopeId) -> Option<Service>;
+
+    async fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
+
+    async fn add_shutdown_handle(
+        &mut self,
+        scope_id: &ScopeId,
+        shutdown_handle: Option<oneshot::Sender<()>>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<()>;
+
+    async fn shutdown(&mut self, scope_id: &ScopeId);
+
+    async fn abort(&mut self, scope_id: &ScopeId);
+
+    async fn print(&mut self, scope_id: &ScopeId);
 }
 
 /// The central registry that stores all data for the application.
@@ -94,7 +145,7 @@ impl Default for Registry {
 
 impl Registry {
     /// Create a new scope with an optional parent
-    pub(crate) fn new_scope<P: Into<Option<ScopeId>>>(&mut self, parent: P) -> usize {
+    pub(crate) fn new_scope<P: Into<Option<ScopeId>>, F: FnOnce(ScopeId) -> String>(&mut self, parent: P, name_fn: F) -> usize {
         let scope_id = self.scope_pool.get_id();
         //log::debug!("Creating scope {}", scope_id);
         let parent = parent.into();
@@ -102,13 +153,14 @@ impl Registry {
             self.parents.insert(scope_id, parent_id);
             self.children.entry(parent_id).or_default().push(scope_id);
         }
-        let scope = Scope::new(scope_id, parent.and_then(|p| self.scopes.get(&p)));
+        let scope = Scope::new(scope_id, parent.and_then(|p| self.scopes.get(&p)), name_fn(scope_id));
         self.scopes.insert(scope_id, scope);
         scope_id
     }
 
     /// Drop a scope and all of its children recursively
     pub(crate) fn drop_scope(&mut self, scope_id: &ScopeId) {
+        log::debug!("Dropping scope {}", scope_id);
         if let Some(children) = self.children.remove(scope_id) {
             let children = children
                 .iter()
@@ -303,6 +355,41 @@ impl Registry {
             .and_then(|scope| scope.data.get(&TypeId::of::<T>()).cloned())
             .and_then(move |data_id| self.data[data_id].as_mut().map(|t| unsafe { t.downcast_mut_unchecked::<T>() }))
     }
+
+    pub(crate) fn get_service(&self, scope_id: &ScopeId) -> Option<Service> {
+        self.scopes.get(scope_id).map(|scope| scope.service.clone())
+    }
+
+    pub(crate) fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+        self.scopes
+            .get_mut(scope_id)
+            .map(|scope| scope.service.update_status(status))
+            .ok_or_else(|| anyhow::anyhow!("Scope {} does not exist!", scope_id))
+    }
+
+    pub(crate) fn add_shutdown_handle(
+        &mut self,
+        scope_id: &ScopeId,
+        shutdown_handle: Option<oneshot::Sender<()>>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<()> {
+        self.scopes
+            .get_mut(scope_id)
+            .map(|scope| scope.shutdown_handles.push((shutdown_handle, abort_handle)))
+            .ok_or_else(|| anyhow::anyhow!("Scope {} does not exist!", scope_id))
+    }
+
+    pub(crate) fn shutdown(&mut self, scope_id: &ScopeId) {
+        self.scopes.get_mut(scope_id).map(|scope| scope.shutdown());
+    }
+
+    pub(crate) fn abort(&mut self, scope_id: &ScopeId) {
+        self.scopes.get_mut(scope_id).map(|scope| scope.abort());
+    }
+
+    pub(crate) fn print(&self, scope_id: &ScopeId) {
+        log::debug!("Registry ({}):\n{}", scope_id, PrintableRegistry(self, *scope_id))
+    }
 }
 
 #[derive(Clone)]
@@ -313,16 +400,31 @@ impl<'a> TreeItem for PrintableRegistry<'a> {
 
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
         let PrintableRegistry(registry, scope_id) = self;
-        write!(
-            f,
-            "Scope {}, Data {:?}",
-            scope_id,
-            registry
-                .data_source
-                .iter()
-                .filter_map(|(data, id)| (id == scope_id).then(|| data))
-                .collect::<Vec<_>>()
-        )
+        if let Some(scope) = registry.scopes.get(&scope_id) {
+            write!(
+                f,
+                "{} ({}), Uptime {} ms, Data {:?}",
+                scope_id,
+                scope.service.name,
+                scope.service.up_since.elapsed().unwrap().as_millis(),
+                registry
+                    .data_source
+                    .iter()
+                    .filter_map(|(data, id)| (id == scope_id).then(|| data))
+                    .collect::<Vec<_>>()
+            )
+        } else {
+            write!(
+                f,
+                "{}, Data {:?}",
+                scope_id,
+                registry
+                    .data_source
+                    .iter()
+                    .filter_map(|(data, id)| (id == scope_id).then(|| data))
+                    .collect::<Vec<_>>()
+            )
+        }
     }
 
     fn children(&self) -> std::borrow::Cow<[Self::Child]> {

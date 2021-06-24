@@ -14,16 +14,7 @@ use tokio::sync::broadcast;
 pub struct RuntimeScope<Reg: RegistryAccess> {
     pub(crate) scope_id: ScopeId,
     pub(crate) registry: Reg,
-    pub(crate) service: Service,
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
-    pub(crate) shutdown_handles: Vec<(Option<oneshot::Sender<()>>, AbortHandle)>,
-}
-
-impl std::fmt::Display for RuntimeScope<ArcedRegistry> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let registry_lock = tokio::task::block_in_place(|| futures::executor::block_on(self.registry.read()));
-        write!(f, "{}", PrintableRegistry(registry_lock.deref(), self.scope_id))
-    }
 }
 
 impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
@@ -50,42 +41,50 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         parent_scope_id: P,
         name: O,
     ) -> Self {
-        let scope_id = registry.new_scope(parent_scope_id).await;
-        let name = name.into().map(Into::into).unwrap_or_else(|| format!("Scope {}", scope_id));
-        log::debug!("Created scope with name: {}", name);
+        let name_opt = name.into().map(Into::into);
+        let scope_id = registry
+            .new_scope(parent_scope_id, |id| name_opt.unwrap_or_else(|| format!("Scope {}", id)))
+            .await;
         Self {
             scope_id,
             registry,
-            service: Service::new(name),
             join_handles: Default::default(),
-            shutdown_handles: Default::default(),
+        }
+    }
+
+    pub(crate) async fn new_name_with<P: Into<Option<usize>> + Send, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
+        mut registry: Reg,
+        parent_scope_id: P,
+        name_fn: F,
+    ) -> Self {
+        let scope_id = registry.new_scope(parent_scope_id, name_fn).await;
+        Self {
+            scope_id,
+            registry,
+            join_handles: Default::default(),
         }
     }
 
     pub(crate) async fn child<S: Into<String>, O: Into<Option<S>>>(&mut self, name: O) -> Self {
         // Self::new(self.registry.clone(), self.scope_id, name).await
-        let scope_id = self.registry.new_scope(self.scope_id).await;
-        let name = name.into().map(Into::into).unwrap_or_else(|| format!("Scope {}", scope_id));
-        log::debug!("Created child scope {} -> {}", self.service.name, name);
+        let name_opt = name.into().map(Into::into);
+        let scope_id = self
+            .registry
+            .new_scope(self.scope_id, |id| name_opt.unwrap_or_else(|| format!("Scope {}", id)))
+            .await;
         Self {
             scope_id,
             registry: self.registry.clone(),
-            service: Service::new(name),
             join_handles: Default::default(),
-            shutdown_handles: Default::default(),
         }
     }
 
-    pub(crate) async fn child_name_with<F: FnOnce(ScopeId) -> String>(&mut self, name_fn: F) -> Self {
-        let scope_id = self.registry.new_scope(self.scope_id).await;
-        let name = name_fn(scope_id);
-        log::debug!("Created child scope {} -> {}", self.service.name, name);
+    pub(crate) async fn child_name_with<F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(&mut self, name_fn: F) -> Self {
+        let scope_id = self.registry.new_scope(self.scope_id, name_fn).await;
         Self {
             scope_id,
             registry: self.registry.clone(),
-            service: Service::new(name),
             join_handles: Default::default(),
-            shutdown_handles: Default::default(),
         }
     }
 
@@ -113,24 +112,19 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         self.registry.remove_data(&self.scope_id).await.ok().flatten()
     }
 
-    pub(crate) fn service(&self) -> &Service {
-        &self.service
+    pub(crate) async fn service(&mut self) -> Service {
+        self.registry.get_service(&self.scope_id).await.expect("My scope is missing...")
     }
 
-    pub(crate) fn service_mut(&mut self) -> &mut Service {
-        &mut self.service
-    }
-
-    /// Shutdown the tasks in this runtime's scope
-    fn shutdown(&mut self) {
-        log::debug!("Shutting down scope {}", self.scope_id);
-        for handle in self.shutdown_handles.iter_mut() {
-            handle.0.take().map(|h| h.send(()));
-        }
+    pub(crate) async fn update_status(&mut self, status: ServiceStatus) {
+        self.registry
+            .update_status(&self.scope_id, status)
+            .await
+            .expect("My scope is missing...")
     }
 
     /// Await the tasks in this runtime's scope
-    async fn join(&mut self) {
+    pub(crate) async fn join(&mut self) {
         log::debug!("Joining scope {}", self.scope_id);
         for handle in self.join_handles.drain(..) {
             handle.await.ok();
@@ -138,22 +132,26 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         self.registry.drop_scope(&self.scope_id).await;
     }
 
+    /// Shutdown the tasks in this runtime's scope
+    async fn shutdown(&mut self) {
+        self.registry.shutdown(&self.scope_id).await;
+    }
+
     /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
     /// shutdown handles instead.
-    fn abort(&mut self)
+    async fn abort(&mut self)
     where
         Self: Sized,
     {
-        log::debug!("Aborting scope {}", self.scope_id);
-        for handles in self.shutdown_handles.iter_mut() {
-            if let Some(shutdown_handle) = handles.0.take() {
-                if let Err(_) = shutdown_handle.send(()) {
-                    handles.1.abort();
-                }
-            } else {
-                handles.1.abort();
-            }
-        }
+        self.registry.abort(&self.scope_id).await;
+    }
+
+    pub async fn print(&mut self) {
+        self.registry.print(&self.scope_id).await;
+    }
+
+    pub async fn print_root(&mut self) {
+        self.registry.print(&0).await;
     }
 
     /// Get the join handles of this runtime's scoped tasks
@@ -166,14 +164,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         &mut self.join_handles
     }
 
-    /// Get the shutdown handles of this runtime's scoped tasks
-    pub(crate) fn shutdown_handles(&self) -> &Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
-        &self.shutdown_handles
-    }
-
-    /// Mutably get the shutdown handles of this runtime's scoped tasks
-    pub(crate) fn shutdown_handles_mut(&mut self) -> &mut Vec<(Option<oneshot::Sender<()>>, AbortHandle)> {
-        &mut self.shutdown_handles
+    pub(crate) async fn add_shutdown_handle(&mut self, shutdown_handle: Option<oneshot::Sender<()>>, abort_handle: AbortHandle) {
+        self.registry
+            .add_shutdown_handle(&self.scope_id, shutdown_handle, abort_handle)
+            .await
+            .expect("My scope is missing...");
     }
 
     /// Get an actor's event handle, if it exists in this scope.
@@ -272,21 +267,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                         }
                     }
                     Err(_) => {
-                        child_scope.abort();
+                        child_scope.abort().await;
                         child_scope.registry.drop_scope(&child_scope.scope_id).await;
                         anyhow::bail!("Panicked!")
                     }
                 },
                 Err(_) => {
                     log::debug!("Aborting children of task!");
-                    child_scope.abort();
+                    child_scope.abort().await;
                     child_scope.registry.drop_scope(&child_scope.scope_id).await;
                     anyhow::bail!("Aborted!")
                 }
             }
         });
         self.join_handles_mut().push(child_task);
-        self.shutdown_handles_mut().push((None, abort_handle.clone()));
+        self.add_shutdown_handle(None, abort_handle.clone()).await;
         abort_handle
     }
 
@@ -414,7 +409,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let dep_status = Deps::request(self).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        self.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        self.add_shutdown_handle(Some(oneshot_send), abort_handle.clone()).await;
         let child_task = tokio::spawn(async move {
             let deps = match dep_status {
                 DepStatus::Ready(deps) => deps,
@@ -460,19 +455,20 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<T> + Send + Sync,
     {
+        let service = child_scope.service().await;
         match res.ok().map(Result::ok) {
             Some(res) => match res {
                 Some(res) => {
                     child_scope.join().await;
                     match res {
-                        Ok(_) => match E::report_ok(SuccessReport::new(state, child_scope.service().clone())) {
+                        Ok(_) => match E::report_ok(SuccessReport::new(state, service)) {
                             Ok(evt) => supervisor_handle.send(evt).await,
                             Err(e) => {
                                 log::error!("{}", e);
                                 anyhow::bail!(e)
                             }
                         },
-                        Err(e) => match E::report_err(ErrorReport::new(state, child_scope.service().clone(), e)) {
+                        Err(e) => match E::report_err(ErrorReport::new(state, service, e)) {
                             Ok(evt) => supervisor_handle.send(evt).await,
                             Err(e) => {
                                 log::error!("{}", e);
@@ -484,13 +480,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 // TODO: Maybe abort the children here?
                 // or alternatively allow for restarting in the same scope?
                 None => {
-                    child_scope.abort();
+                    child_scope.abort().await;
                     child_scope.registry.drop_scope(&child_scope.scope_id).await;
-                    match E::report_err(ErrorReport::new(
-                        state,
-                        child_scope.service().clone(),
-                        ActorError::RuntimeError(ActorRequest::Restart),
-                    )) {
+                    match E::report_err(ErrorReport::new(state, service, ActorError::RuntimeError(ActorRequest::Restart))) {
                         Ok(evt) => supervisor_handle.send(evt).await,
                         Err(e) => {
                             log::error!("{}", e);
@@ -501,9 +493,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             },
             None => {
                 log::debug!("Aborting children of {}!", std::any::type_name::<T>());
-                child_scope.abort();
+                child_scope.abort().await;
                 child_scope.registry.drop_scope(&child_scope.scope_id).await;
-                match E::report_ok(SuccessReport::new(state, child_scope.service().clone())) {
+                match E::report_ok(SuccessReport::new(state, service)) {
                     Ok(evt) => supervisor_handle.send(evt).await,
                     Err(e) => {
                         log::error!("{}", e);
@@ -528,14 +520,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     }
                 }
                 Err(_) => {
-                    child_scope.abort();
+                    child_scope.abort().await;
                     child_scope.registry.drop_scope(&child_scope.scope_id).await;
                     anyhow::bail!("Panicked!")
                 }
             },
             Err(_) => {
                 log::debug!("Aborting children of {}!", std::any::type_name::<T>());
-                child_scope.abort();
+                child_scope.abort().await;
                 child_scope.registry.drop_scope(&child_scope.scope_id).await;
                 anyhow::bail!("Aborted!")
             }
@@ -666,18 +658,13 @@ impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync> ActorScopedRunti
     }
 
     /// Shutdown this actor
-    pub fn shutdown(&mut self) {
-        self.scope.shutdown();
+    pub async fn shutdown(&mut self) {
+        self.scope.shutdown().await;
     }
 
     /// Get the runtime's service
-    pub async fn service(&self) -> &Service {
-        self.scope.service()
-    }
-
-    /// Mutably get the runtime's service
-    pub async fn service_mut(&mut self) -> &mut Service {
-        self.scope.service_mut()
+    pub async fn service(&mut self) -> Service {
+        self.scope.service().await
     }
 }
 
@@ -708,7 +695,7 @@ impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync> DerefMut for Act
 
 impl<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync> Drop for ActorScopedRuntime<'a, A, Reg> {
     fn drop(&mut self) {
-        self.shutdown();
+        tokio::task::block_in_place(|| futures::executor::block_on(self.shutdown()));
     }
 }
 
@@ -795,18 +782,13 @@ impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> SystemScopedRun
     }
 
     /// Shutdown this system
-    pub fn shutdown(&mut self) {
-        self.scope.shutdown();
+    pub async fn shutdown(&mut self) {
+        self.scope.shutdown().await;
     }
 
     /// Get the runtime's service
-    pub fn service(&self) -> &Service {
-        self.scope.service()
-    }
-
-    /// Mutably get the runtime's service
-    pub fn service_mut(&mut self) -> &mut Service {
-        self.scope.service_mut()
+    pub async fn service(&mut self) -> Service {
+        self.scope.service().await
     }
 }
 
@@ -823,7 +805,7 @@ where
 
 impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> Drop for SystemScopedRuntime<'a, S, Reg> {
     fn drop(&mut self) {
-        self.shutdown();
+        tokio::task::block_in_place(|| futures::executor::block_on(self.shutdown()));
     }
 }
 
@@ -838,12 +820,6 @@ impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> Deref for Syste
 impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> DerefMut for SystemScopedRuntime<'a, S, Reg> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.scope
-    }
-}
-
-impl<'a, S: System> std::fmt::Display for SystemScopedRuntime<'a, S, ArcedRegistry> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.scope)
     }
 }
 

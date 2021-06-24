@@ -342,7 +342,7 @@ async fn startup() -> anyhow::Result<()> {
                 })
                 .await;
             tokio::time::sleep(Duration::from_secs(1)).await;
-            //log::debug!("Tree:\n{}", scope)
+            scope.print_root().await;
         }
         .boxed()
     })

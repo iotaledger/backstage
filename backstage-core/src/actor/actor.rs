@@ -8,7 +8,7 @@ use futures::{
     future::{AbortHandle, Abortable},
     FutureExt,
 };
-use std::{borrow::Cow, fmt::Debug, panic::AssertUnwindSafe};
+use std::{borrow::Cow, panic::AssertUnwindSafe};
 use tokio::sync::oneshot;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
@@ -61,7 +61,7 @@ pub trait Actor {
         scope.add_data(sender.clone()).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        scope.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        scope.add_shutdown_handle(Some(oneshot_send), abort_handle.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))

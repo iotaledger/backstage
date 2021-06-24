@@ -1,14 +1,14 @@
 use super::{ActorError, Channel, Dependencies, Sender, SupervisorEvent};
 use crate::{
     prelude::RegistryAccess,
-    runtime::{Registry, RuntimeScope, SupervisedSystemScopedRuntime, SystemScopedRuntime},
+    runtime::{RuntimeScope, SupervisedSystemScopedRuntime, SystemScopedRuntime},
 };
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable},
     FutureExt,
 };
-use std::{borrow::Cow, fmt::Debug, panic::AssertUnwindSafe, sync::Arc};
+use std::{borrow::Cow, panic::AssertUnwindSafe, sync::Arc};
 use tokio::sync::{oneshot, RwLock};
 
 /// A system is effectively a shared actor which groups other systems and actors and obfuscates them.
@@ -65,7 +65,7 @@ pub trait System {
         scope.add_data(sender.clone()).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        scope.shutdown_handles_mut().push((Some(oneshot_send), abort_handle.clone()));
+        scope.add_shutdown_handle(Some(oneshot_send), abort_handle.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<Self>(), e))

@@ -39,8 +39,8 @@ impl<T: NumAssignOps + FromPrimitive + Copy> IdPool<T> {
     /// Get a new unique ID
     pub fn get_id(&mut self) -> T {
         if self.pool.len() == 0 {
-            self.pool.push(T::from_isize(2).unwrap());
-            T::from_isize(1).unwrap()
+            self.pool.push(T::from_isize(1).unwrap());
+            T::from_isize(0).unwrap()
         } else if self.pool.len() == 1 {
             let id = self.pool[0];
             self.pool[0] += T::from_isize(1).unwrap();
