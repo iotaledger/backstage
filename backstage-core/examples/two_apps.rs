@@ -130,7 +130,7 @@ pub struct Howdy;
 
 #[async_trait]
 impl Actor for Howdy {
-    type Dependencies = (Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>);
+    type Dependencies = ();
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
     type SupervisorEvent = ();
@@ -138,11 +138,12 @@ impl Actor for Howdy {
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg>,
-        (counter, mut hello_world): Self::Dependencies,
+        _: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
     {
+        let (counter, mut hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HowdyEvent::Print(s) => {

@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 /// create tasks within it.
 pub struct RuntimeScope<Reg: RegistryAccess> {
     pub(crate) scope_id: ScopeId,
+    pub(crate) parent_id: Option<ScopeId>,
     pub(crate) registry: Reg,
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
 }
@@ -44,9 +45,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         abort_handle: Option<AbortHandle>,
     ) -> Self {
         let name_opt = name.into().map(Into::into);
+        let parent_id = parent_scope_id.into();
         let scope_id = registry
             .new_scope(
-                parent_scope_id,
+                parent_id.clone(),
                 |id| name_opt.unwrap_or_else(|| format!("Scope {}", id)),
                 shutdown_handle,
                 abort_handle,
@@ -54,6 +56,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             .await;
         Self {
             scope_id,
+            parent_id,
             registry,
             join_handles: Default::default(),
         }
@@ -66,9 +69,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         shutdown_handle: Option<oneshot::Sender<()>>,
         abort_handle: Option<AbortHandle>,
     ) -> Self {
-        let scope_id = registry.new_scope(parent_scope_id, name_fn, shutdown_handle, abort_handle).await;
+        let parent_id = parent_scope_id.into();
+        let scope_id = registry.new_scope(parent_id, name_fn, shutdown_handle, abort_handle).await;
         Self {
             scope_id,
+            parent_id,
             registry,
             join_handles: Default::default(),
         }
@@ -93,6 +98,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             .await;
         Self {
             scope_id,
+            parent_id: Some(self.scope_id),
             registry: self.registry.clone(),
             join_handles: Default::default(),
         }
@@ -107,6 +113,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let scope_id = self.registry.new_scope(self.scope_id, name_fn, shutdown_handle, abort_handle).await;
         Self {
             scope_id,
+            parent_id: Some(self.scope_id),
             registry: self.registry.clone(),
             join_handles: Default::default(),
         }
@@ -133,6 +140,16 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
+    pub(crate) async fn add_data_to_parent<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
+        if let Some(parent_id) = self.parent_id {
+            log::debug!("Adding {} to parent scope {}", std::any::type_name::<T>(), parent_id);
+            self.registry
+                .add_data(&parent_id, data)
+                .await
+                .expect(&format!("Scope {} is missing...", parent_id))
+        }
+    }
+
     pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self) {
         self.registry
             .depend_on::<T>(&self.scope_id)
@@ -142,6 +159,24 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
         self.registry.get_data(&self.scope_id).await
+    }
+
+    /// Request a dependency and wait for it to be added, forming a link between this scope and
+    /// the requested data. If the data is removed from this scope, it will be shut down.
+    pub async fn link_data<T: 'static + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
+        let status = T::request(self).await;
+        T::link(self).await;
+        match status {
+            DepStatus::Ready(t) => Ok(t),
+            DepStatus::Waiting(mut recv) => {
+                if let Err(_) = recv.recv().await {
+                    anyhow::bail!("Failed to acquire dependencies for {}", std::any::type_name::<T>());
+                }
+                T::instantiate(self)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<T>(), e))
+            }
+        }
     }
 
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
@@ -461,7 +496,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         run_fn: F,
     ) {
         log::debug!("Spawning {}", std::any::type_name::<T>());
-        let dep_status = Deps::request(self).await;
+        let dep_status = Deps::request(&mut child_scope).await;
         let child_task = tokio::spawn(async move {
             let deps = match dep_status {
                 DepStatus::Ready(deps) => deps,

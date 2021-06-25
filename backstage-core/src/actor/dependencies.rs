@@ -30,7 +30,7 @@ pub trait Dependencies {
                     sender.subscribe()
                 } else {
                     let (sender, receiver) = broadcast::channel::<PhantomData<Self>>(8);
-                    scope.add_data(sender).await;
+                    scope.add_data_to_parent(sender).await;
                     receiver
                 },
             ),
@@ -128,11 +128,11 @@ macro_rules! impl_dependencies {
                     let (sender, receiver) = broadcast::channel::<PhantomData<Self>>(8);
                     tokio::task::spawn(async move {
                         $(
-                            let mut receiver = receivers.remove::<broadcast::Receiver<PhantomData<$gen>>>().unwrap();
-                            if let Err(_) = receiver.recv().await {
-                                return;
+                            if let Some(mut receiver) = receivers.remove::<broadcast::Receiver<PhantomData<$gen>>>() {
+                                if let Err(_) = receiver.recv().await {
+                                    return;
+                                }
                             }
-
                         )+
                         sender.send(PhantomData).ok();
                     });

@@ -292,7 +292,6 @@ impl Registry {
     }
 
     fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
-        log::debug!("Propagating raw data to scope {}", scope_id);
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             match prop {
                 Propagation::Add(data_id) => {

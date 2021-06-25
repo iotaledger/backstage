@@ -151,7 +151,6 @@ impl System for Launcher {
                 }
                 LauncherEvents::Shutdown { using_ctrl_c: _ } => {
                     debug!("Exiting launcher");
-                    //log::debug!("Tree:\n{}", rt);
                     break;
                 }
                 LauncherEvents::Report(res) => match res {
@@ -166,7 +165,6 @@ impl System for Launcher {
                                 info!("{} {} has shutdown unexpectedly!", h.name, h.num);
                             }
                         }
-                        //log::debug!("Tree:\n{}", rt);
                         match e.error.request() {
                             ActorRequest::Restart => {
                                 match e.state {

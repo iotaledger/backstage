@@ -255,11 +255,13 @@ where
         let actor_registry = ActorRegistry { handle: sender };
         let mut scope = RuntimeScope {
             scope_id,
+            parent_id: None,
             registry: actor_registry.clone(),
             join_handles: Default::default(),
         };
         let mut child_scope = RuntimeScope {
             scope_id: child_scope_id,
+            parent_id: Some(scope_id),
             registry: actor_registry,
             join_handles: Default::default(),
         };
