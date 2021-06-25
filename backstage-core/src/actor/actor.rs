@@ -56,12 +56,11 @@ pub trait Actor {
     where
         Self: Sized,
     {
-        let mut scope = Reg::instantiate(Self::name()).await;
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
         let (sender, receiver) = <Self::Channel as Channel<Self::Event>>::new();
         scope.add_data(sender.clone()).await;
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        scope.add_shutdown_handle(Some(oneshot_send), abort_handle.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))
@@ -70,6 +69,6 @@ pub trait Actor {
             let mut actor_rt = ActorScopedRuntime::unsupervised(&mut scope, receiver, oneshot_recv);
             Abortable::new(AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
         };
-        RuntimeScope::handle_res_unsupervised::<Self>(res, &mut scope).await
+        RuntimeScope::handle_res_unsupervised(res, &mut scope).await
     }
 }

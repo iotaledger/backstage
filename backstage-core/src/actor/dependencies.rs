@@ -1,11 +1,11 @@
-use super::{Actor, System};
+use super::{Actor, Channel, System};
 use crate::{
     prelude::RegistryAccess,
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
-use std::marker::PhantomData;
-use tokio::sync::broadcast;
+use std::{marker::PhantomData, sync::Arc};
+use tokio::sync::{broadcast, RwLock};
 
 /// A dependency's status
 pub enum DepStatus<T> {
@@ -41,6 +41,9 @@ pub trait Dependencies {
     async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
     where
         Self: Sized;
+
+    /// Link the dependencies so that removing them will shut down the dependent
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>);
 }
 
 #[async_trait]
@@ -50,6 +53,10 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
             .system()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
+    }
+
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
+        scope.depend_on::<Arc<RwLock<S>>>().await;
     }
 }
 
@@ -61,6 +68,10 @@ impl<A: Actor + Send + Sync> Dependencies for Act<A> {
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))
     }
+
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
+        scope.depend_on::<<A::Channel as Channel<A::Event>>::Sender>().await;
+    }
 }
 
 #[async_trait]
@@ -71,6 +82,10 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))
     }
+
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+        scope.depend_on::<R>().await;
+    }
 }
 
 #[async_trait]
@@ -78,6 +93,8 @@ impl Dependencies for () {
     async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         Ok(())
     }
+
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<Reg>) {}
 }
 
 macro_rules! impl_dependencies {
@@ -126,6 +143,10 @@ macro_rules! impl_dependencies {
             async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self>
             {
                 Ok(($($gen::instantiate(scope).await?),+,))
+            }
+
+            async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+                $($gen::link(scope).await);+
             }
         }
     };

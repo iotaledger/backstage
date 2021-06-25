@@ -80,10 +80,16 @@ impl Actor for HelloWorld {
     where
         Self: Sized,
     {
+        let mut count = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HelloWorldEvent::Print(s) => {
                     info!("HelloWorld printing: {}", s);
+                    count += 1;
+                    if count == 3 {
+                        rt.print_root().await;
+                        panic!("I counted to 3!");
+                    }
                 }
             }
         }

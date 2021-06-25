@@ -58,14 +58,13 @@ pub trait System {
     where
         Self: 'static + Sized + Send + Sync,
     {
-        let mut scope = Reg::instantiate(Self::name()).await;
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
         let system = Arc::new(RwLock::new(self));
         scope.add_data(system.clone()).await;
         let (sender, receiver) = <Self::Channel as Channel<Self::ChildEvents>>::new();
         scope.add_data(sender.clone()).await;
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        scope.add_shutdown_handle(Some(oneshot_send), abort_handle.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<Self>(), e))
@@ -78,6 +77,6 @@ pub trait System {
             )
             .await
         };
-        RuntimeScope::handle_res_unsupervised::<Self>(res, &mut scope).await
+        RuntimeScope::handle_res_unsupervised(res, &mut scope).await
     }
 }
