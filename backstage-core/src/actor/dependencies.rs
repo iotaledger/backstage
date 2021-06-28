@@ -1,6 +1,6 @@
 use super::{Actor, Channel, System};
 use crate::{
-    prelude::RegistryAccess,
+    prelude::{ActorPool, Pool, RegistryAccess},
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
@@ -85,6 +85,20 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
 
     async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
         scope.depend_on::<R>().await;
+    }
+}
+
+#[async_trait]
+impl<A: 'static + Actor + Send + Sync> Dependencies for Pool<A> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        scope
+            .pool()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<ActorPool<A>>()))
+    }
+
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
+        scope.depend_on::<Arc<RwLock<ActorPool<A>>>>().await;
     }
 }
 

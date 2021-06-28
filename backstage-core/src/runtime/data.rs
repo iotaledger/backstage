@@ -53,6 +53,23 @@ impl<A: Actor> DerefMut for Act<A> {
     }
 }
 
+/// A pool of actors which can be used as a dependency
+pub struct Pool<A: Actor>(pub(crate) Arc<RwLock<ActorPool<A>>>);
+
+impl<A: Actor> Deref for Pool<A> {
+    type Target = Arc<RwLock<ActorPool<A>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<A: Actor> DerefMut for Pool<A> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// A pool of actors which can be queried for actor handles
 pub struct ActorPool<A: Actor> {
     handles: Vec<Option<Rc<RefCell<<A::Channel as Channel<A::Event>>::Sender>>>>,

@@ -294,7 +294,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Get the pool of a specified actor if it exists in this runtime's scope
-    pub async fn pool<A>(&mut self) -> Option<Res<Arc<RwLock<ActorPool<A>>>>>
+    pub async fn pool<A>(&mut self) -> Option<Pool<A>>
     where
         Self: 'static + Sized,
         A: 'static + Actor + Send + Sync,
@@ -302,7 +302,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         match self.get_data::<Arc<RwLock<ActorPool<A>>>>().await {
             Some(arc) => {
                 if arc.write().await.verify() {
-                    Some(Res(arc))
+                    Some(Pool(arc))
                 } else {
                     self.remove_data::<Arc<RwLock<ActorPool<A>>>>().await;
                     None
@@ -642,7 +642,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        child_scope.add_data(sender.clone()).await;
         self.common_spawn::<A, _, Act<A>, _, _>(
             child_scope,
             oneshot_recv,
@@ -927,7 +928,8 @@ where
         self.pool.push(sender.clone());
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        let mut child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        child_scope.add_data(sender.clone()).await;
         let supervisor_handle = self.supervisor_handle.clone();
         self.scope
             .common_spawn::<A, _, Act<A>, _, _>(
