@@ -191,7 +191,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
-    pub(crate) async fn update_status(&mut self, status: ServiceStatus) {
+    /// Update this scope's service status
+    pub async fn update_status(&mut self, status: ServiceStatus) {
         self.registry
             .update_status(&self.scope_id, status)
             .await
