@@ -192,49 +192,7 @@ enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
     WebsocketMsg(SocketAddr, String),
-    Status(Service),
-    Report(Result<SuccessReport<LauncherChildren>, ErrorReport<LauncherChildren>>),
     Shutdown { using_ctrl_c: bool },
-}
-
-enum LauncherChildren {
-    HelloWorld(HelloWorld),
-    Howdy(Howdy),
-    Websocket(Websocket<Act<Launcher>, LauncherEvents>),
-}
-
-impl From<HelloWorld> for LauncherChildren {
-    fn from(h: HelloWorld) -> Self {
-        Self::HelloWorld(h)
-    }
-}
-
-impl From<Howdy> for LauncherChildren {
-    fn from(h: Howdy) -> Self {
-        Self::Howdy(h)
-    }
-}
-
-impl From<Websocket<Act<Launcher>, LauncherEvents>> for LauncherChildren {
-    fn from(websocket: Websocket<Act<Launcher>, LauncherEvents>) -> Self {
-        Self::Websocket(websocket)
-    }
-}
-
-impl<T: Into<LauncherChildren>> SupervisorEvent<T> for LauncherEvents {
-    fn report(res: Result<SuccessReport<T>, ErrorReport<T>>) -> anyhow::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(Self::Report(
-            res.map(|s| SuccessReport::new(s.state.into(), s.service))
-                .map_err(|e| ErrorReport::new(e.state.into(), e.service, e.error)),
-        ))
-    }
-
-    fn status(service: Service) -> Self {
-        Self::Status(service)
-    }
 }
 
 impl TryFrom<(SocketAddr, Message)> for LauncherEvents {
@@ -293,15 +251,6 @@ impl Actor for Launcher {
                     info!("Received websocket message: {:?}", msg);
                     websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await;
                 }
-                LauncherEvents::Report(res) => match res {
-                    Ok(s) => {
-                        info!("{} has shutdown!", s.service.name);
-                    }
-                    Err(e) => {
-                        info!("{} has shutdown unexpectedly!", e.service.name);
-                    }
-                },
-                LauncherEvents::Status(s) => {}
             }
         }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    actor::{build, Actor, ActorError, Builder, Sender, SupervisorEvent, TokioChannel, TokioSender},
+    actor::{build, Actor, ActorError, Builder, Sender, TokioChannel, TokioSender},
     prelude::RegistryAccess,
     runtime::ActorScopedRuntime,
 };
@@ -21,7 +21,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 pub struct Websocket<H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Self> + Send + Sync + TryFrom<(SocketAddr, Message)>,
+    E: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
     E::Error: Send,
 {
     listen_address: SocketAddr,
@@ -35,7 +35,7 @@ where
 pub fn build<H, E>(listen_address: SocketAddr, supervisor_handle: H) -> Websocket<H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Websocket<H, E>> + Send + Sync + TryFrom<(SocketAddr, Message)>,
+    E: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
     E::Error: Send,
 {
     Websocket {
@@ -70,7 +70,7 @@ pub struct Connection {
 impl<SH, SE> Actor for Websocket<SH, SE>
 where
     SH: 'static + Sender<SE> + Clone + Send + Sync,
-    SE: 'static + SupervisorEvent<Self> + Send + Sync + TryFrom<(SocketAddr, Message)>,
+    SE: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
     SE::Error: Send,
 {
     type Event = WebsocketChildren;
