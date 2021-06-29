@@ -8,7 +8,14 @@ use std::{
 };
 use tokio::sync::RwLock;
 
+/// Wrapper for data types
+pub trait DataWrapper<T> {
+    /// Get the wrapper value, consuming the wrapper
+    fn into_inner(self) -> T;
+}
+
 /// A shared resource
+#[derive(Clone)]
 pub struct Res<R: Clone>(pub(crate) R);
 
 impl<R: Deref + Clone> Deref for Res<R> {
@@ -25,12 +32,9 @@ impl<R: DerefMut + Clone> DerefMut for Res<R> {
     }
 }
 
-impl<R: Clone> Clone for Res<R>
-where
-    R: Clone,
-{
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+impl<R: Clone> DataWrapper<R> for Res<R> {
+    fn into_inner(self) -> R {
+        self.0
     }
 }
 
@@ -43,6 +47,12 @@ impl<S: System> Deref for Sys<S> {
 
     fn deref(&self) -> &Self::Target {
         self.0.deref()
+    }
+}
+
+impl<S: System> DataWrapper<Arc<RwLock<S>>> for Sys<S> {
+    fn into_inner(self) -> Arc<RwLock<S>> {
+        self.0
     }
 }
 
@@ -72,6 +82,12 @@ where
     }
 }
 
+impl<A: Actor> DataWrapper<<A::Channel as Channel<A::Event>>::Sender> for Act<A> {
+    fn into_inner(self) -> <A::Channel as Channel<A::Event>>::Sender {
+        self.0
+    }
+}
+
 /// A pool of actors which can be used as a dependency
 #[derive(Clone)]
 pub struct Pool<A: Actor>(pub(crate) Arc<RwLock<ActorPool<A>>>);
@@ -87,6 +103,12 @@ impl<A: Actor> Deref for Pool<A> {
 impl<A: Actor> DerefMut for Pool<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl<A: Actor> DataWrapper<Arc<RwLock<ActorPool<A>>>> for Pool<A> {
+    fn into_inner(self) -> Arc<RwLock<ActorPool<A>>> {
+        self.0
     }
 }
 
