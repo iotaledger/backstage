@@ -25,7 +25,17 @@ impl<R: DerefMut + Clone> DerefMut for Res<R> {
     }
 }
 
+impl<R: Clone> Clone for Res<R>
+where
+    R: Clone,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 /// A shared system reference
+#[derive(Clone)]
 pub struct Sys<S: System>(pub(crate) Arc<RwLock<S>>);
 
 impl<S: System> Deref for Sys<S> {
@@ -53,7 +63,17 @@ impl<A: Actor> DerefMut for Act<A> {
     }
 }
 
+impl<A: Actor> Clone for Act<A>
+where
+    <A::Channel as Channel<A::Event>>::Sender: Clone,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 /// A pool of actors which can be used as a dependency
+#[derive(Clone)]
 pub struct Pool<A: Actor>(pub(crate) Arc<RwLock<ActorPool<A>>>);
 
 impl<A: Actor> Deref for Pool<A> {
