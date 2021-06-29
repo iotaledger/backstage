@@ -83,6 +83,8 @@ impl Scope {
     }
 }
 
+/// Defines how the registry is accessed so that various wrappers can
+/// be implemented
 #[async_trait]
 pub trait RegistryAccess: Clone {
     /// Create a new runtime scope using this registry implementation
@@ -335,6 +337,7 @@ impl Registry {
             .and_then(|data_id| self.data[*data_id].as_ref())
     }
 
+    #[allow(unused)]
     /// Get a mutable reference to some arbitrary data from the given scope
     pub(crate) fn get_data_mut<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<&mut T> {
         self.scopes

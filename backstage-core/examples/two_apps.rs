@@ -3,7 +3,7 @@ use backstage::{prefabs::websocket::*, prelude::*};
 use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{convert::TryFrom, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -70,7 +70,6 @@ impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
-    type SupervisorEvent = ();
 
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         &mut self,
@@ -133,7 +132,6 @@ impl Actor for Howdy {
     type Dependencies = ();
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
-    type SupervisorEvent = ();
 
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         &mut self,
@@ -170,14 +168,15 @@ pub struct NecessaryResource {
 }
 
 struct Launcher;
+pub struct LauncherAPI;
 
-impl Launcher {
+impl LauncherAPI {
     pub async fn send_to_hello_world<Reg: 'static + RegistryAccess + Send + Sync>(
         &self,
         event: HelloWorldEvent,
         rt: &mut RuntimeScope<Reg>,
     ) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
+        rt.send_actor_event::<Launcher>(LauncherEvents::HelloWorld(event)).await
     }
 
     pub async fn send_to_howdy<Reg: 'static + RegistryAccess + Send + Sync>(
@@ -185,25 +184,23 @@ impl Launcher {
         event: HowdyEvent,
         rt: &mut RuntimeScope<Reg>,
     ) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherEvents::Howdy(event)).await
+        rt.send_actor_event::<Launcher>(LauncherEvents::Howdy(event)).await
     }
 }
 
-#[derive(Debug)]
-pub enum LauncherEvents {
+enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
-    WebsocketMsg((SocketAddr, Message)),
+    WebsocketMsg(SocketAddr, String),
     Status(Service),
     Report(Result<SuccessReport<LauncherChildren>, ErrorReport<LauncherChildren>>),
     Shutdown { using_ctrl_c: bool },
 }
 
-#[derive(Debug)]
-pub enum LauncherChildren {
+enum LauncherChildren {
     HelloWorld(HelloWorld),
     Howdy(Howdy),
-    Websocket(Arc<RwLock<Websocket>>),
+    Websocket(Websocket<Act<Launcher>, LauncherEvents>),
 }
 
 impl From<HelloWorld> for LauncherChildren {
@@ -218,8 +215,8 @@ impl From<Howdy> for LauncherChildren {
     }
 }
 
-impl From<Arc<RwLock<Websocket>>> for LauncherChildren {
-    fn from(websocket: Arc<RwLock<Websocket>>) -> Self {
+impl From<Websocket<Act<Launcher>, LauncherEvents>> for LauncherChildren {
+    fn from(websocket: Websocket<Act<Launcher>, LauncherEvents>) -> Self {
         Self::Websocket(websocket)
     }
 }
@@ -240,29 +237,27 @@ impl<T: Into<LauncherChildren>> SupervisorEvent<T> for LauncherEvents {
     }
 }
 
-impl From<(SocketAddr, Message)> for LauncherEvents {
-    fn from(msg: (SocketAddr, Message)) -> Self {
-        Self::WebsocketMsg(msg)
-    }
-}
+impl TryFrom<(SocketAddr, Message)> for LauncherEvents {
+    type Error = anyhow::Error;
 
-impl From<()> for LauncherEvents {
-    fn from(_: ()) -> Self {
-        panic!()
+    fn try_from((addr, msg): (SocketAddr, Message)) -> Result<Self, Self::Error> {
+        match msg {
+            Message::Text(t) => Ok(LauncherEvents::WebsocketMsg(addr, t)),
+            _ => anyhow::bail!("Invalid message!"),
+        }
     }
 }
 
 #[async_trait]
-impl System for Launcher {
-    type ChildEvents = LauncherEvents;
+impl Actor for Launcher {
+    type Event = LauncherEvents;
     type Dependencies = ();
-    type Channel = TokioChannel<Self::ChildEvents>;
-    type SupervisorEvent = ();
+    type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
-        _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
-        _deps: (),
+    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -270,16 +265,18 @@ impl System for Launcher {
         let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await;
-        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await;
+        rt.spawn_actor_unsupervised(howdy_builder.build()).await;
+        rt.spawn_actor_unsupervised(hello_world_builder.build()).await;
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         let (_, mut websocket_handle) = rt
-            .spawn_system(
-                WebsocketBuilder::new().listen_address(([127, 0, 0, 1], 8000).into()).build(),
-                my_handle.clone(),
+            .spawn_actor_unsupervised(
+                WebsocketBuilder::new()
+                    .listen_address(([127, 0, 0, 1], 8000).into())
+                    .supervisor_handle(my_handle.clone())
+                    .build(),
             )
             .await;
-        tokio::task::spawn(ctrl_c(my_handle));
+        tokio::task::spawn(ctrl_c(my_handle.into_inner()));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
@@ -292,9 +289,9 @@ impl System for Launcher {
                     debug!("Exiting launcher");
                     break;
                 }
-                LauncherEvents::WebsocketMsg((peer, msg)) => {
+                LauncherEvents::WebsocketMsg(peer, msg) => {
                     info!("Received websocket message: {:?}", msg);
-                    websocket_handle.send(WebsocketChildren::Response((peer, "bonjour".into()))).await;
+                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await;
                 }
                 LauncherEvents::Report(res) => match res {
                     Ok(s) => {
@@ -312,7 +309,11 @@ impl System for Launcher {
     }
 }
 
-pub async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
+impl System for Launcher {
+    type State = Arc<RwLock<LauncherAPI>>;
+}
+
+async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
     tokio::signal::ctrl_c().await.unwrap();
     let exit_program_event = LauncherEvents::Shutdown { using_ctrl_c: true };
     sender.send(exit_program_event).await.ok();
@@ -329,12 +330,12 @@ async fn main() {
 async fn startup() -> anyhow::Result<()> {
     RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
-            scope.spawn_system_unsupervised(Launcher).await;
+            scope.spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI))).await;
             scope
                 .spawn_task(|rt| {
                     async move {
                         for _ in 0..3 {
-                            rt.send_system_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
+                            rt.send_actor_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
                                 .await
                                 .unwrap();
                         }

@@ -149,7 +149,7 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let res = quote! {
         #[doc=#builder_doc]
         #(#attrs)*
-        #vis struct #builder #generics {
+        #vis struct #builder #generics #bounds {
             _phantom: std::marker::PhantomData<(#bare_generics)>,
             #(#inputs),*
         }

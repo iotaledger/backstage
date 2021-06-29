@@ -48,15 +48,16 @@ pub trait Dependencies {
 
 #[async_trait]
 impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
         scope
             .system()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
-        scope.depend_on::<Arc<RwLock<S>>>().await;
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+        scope.depend_on::<S::State>().await;
+        scope.depend_on::<<S::Channel as Channel<S::Event>>::Sender>().await;
     }
 }
 

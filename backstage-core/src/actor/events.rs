@@ -7,6 +7,7 @@ pub trait SupervisorEvent<T> {
     where
         Self: Sized;
 
+    /// Create a success report
     fn report_ok(success: SuccessReport<T>) -> anyhow::Result<Self>
     where
         Self: Sized,
@@ -14,6 +15,7 @@ pub trait SupervisorEvent<T> {
         Self::report(Ok(success))
     }
 
+    /// Create an error report
     fn report_err(err: ErrorReport<T>) -> anyhow::Result<Self>
     where
         Self: Sized,

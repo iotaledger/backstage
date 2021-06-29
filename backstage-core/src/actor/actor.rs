@@ -19,8 +19,6 @@ pub trait Actor {
     type Event: 'static + Send + Sync;
     /// The type of channel this actor will use to receive events
     type Channel: Channel<Self::Event> + Send;
-    /// An optional custom event type which can be sent to the supervisor
-    type SupervisorEvent;
 
     /// The main function for the actor
     async fn run<'a, Reg: RegistryAccess + Send + Sync>(
@@ -41,7 +39,7 @@ pub trait Actor {
     where
         Self: Sized,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<Self> + Send + Sync + From<Self::SupervisorEvent>,
+        E: 'static + SupervisorEvent<Self> + Send + Sync,
     {
         self.run(&mut rt.scope, deps).await
     }

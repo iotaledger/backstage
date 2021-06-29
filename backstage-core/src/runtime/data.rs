@@ -40,20 +40,11 @@ impl<R: Clone> DataWrapper<R> for Res<R> {
 
 /// A shared system reference
 #[derive(Clone)]
-pub struct Sys<S: System>(pub(crate) Arc<RwLock<S>>);
-
-impl<S: System> Deref for Sys<S> {
-    type Target = RwLock<S>;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.deref()
-    }
-}
-
-impl<S: System> DataWrapper<Arc<RwLock<S>>> for Sys<S> {
-    fn into_inner(self) -> Arc<RwLock<S>> {
-        self.0
-    }
+pub struct Sys<S: System> {
+    /// The actor handle
+    pub actor: Act<S>,
+    /// The shared state of the system
+    pub state: Res<S::State>,
 }
 
 /// An actor handle, used to send events
@@ -85,6 +76,17 @@ where
 impl<A: Actor> DataWrapper<<A::Channel as Channel<A::Event>>::Sender> for Act<A> {
     fn into_inner(self) -> <A::Channel as Channel<A::Event>>::Sender {
         self.0
+    }
+}
+
+#[async_trait::async_trait]
+impl<A: Actor> Sender<A::Event> for Act<A> {
+    async fn send(&mut self, event: A::Event) -> anyhow::Result<()> {
+        self.0.send(event).await
+    }
+
+    fn is_closed(&self) -> bool {
+        self.0.is_closed()
     }
 }
 

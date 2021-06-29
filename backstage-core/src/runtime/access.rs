@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 
 use super::*;
 
+/// A registry shared via an Arc and RwLock
 #[derive(Clone)]
 pub struct ArcedRegistry {
     registry: Arc<RwLock<Registry>>,
@@ -96,7 +97,7 @@ impl RegistryAccess for ArcedRegistry {
     }
 }
 
-pub enum RequestType {
+enum RequestType {
     NewScope {
         parent: Option<ScopeId>,
         name_fn: Box<dyn Send + Sync + FnOnce(ScopeId) -> String>,
@@ -130,7 +131,7 @@ pub enum RequestType {
     Print(ScopeId),
 }
 
-pub enum ResponseType {
+enum ResponseType {
     NewScope(usize),
     DropScope,
     AddData(anyhow::Result<()>),
@@ -143,7 +144,7 @@ pub enum ResponseType {
     Print,
 }
 
-pub struct RegistryActorRequest {
+struct RegistryActorRequest {
     req: RequestType,
     responder: tokio::sync::oneshot::Sender<ResponseType>,
 }
@@ -155,7 +156,7 @@ impl RegistryActorRequest {
     }
 }
 
-pub struct RegistryActor {
+struct RegistryActor {
     registry: Registry,
 }
 
@@ -167,7 +168,6 @@ where
     type Dependencies = ();
     type Event = RegistryActorRequest;
     type Channel = TokioChannel<Self::Event>;
-    type SupervisorEvent = ();
 
     async fn run<'a, Reg: RegistryAccess + Send + Sync>(
         &mut self,
@@ -220,6 +220,7 @@ where
     }
 }
 
+/// A registry owned by an actor in the runtime and accessible via a tokio channel
 pub struct ActorRegistry {
     handle: TokioSender<RegistryActorRequest>,
 }
@@ -232,7 +233,7 @@ impl Clone for ActorRegistry {
     }
 }
 
-pub struct RegistryShutdownHandle(oneshot::Sender<()>);
+struct RegistryShutdownHandle(oneshot::Sender<()>);
 
 #[async_trait]
 impl RegistryAccess for ActorRegistry

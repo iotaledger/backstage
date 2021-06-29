@@ -62,23 +62,6 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         }
     }
 
-    pub(crate) async fn new_name_with<P: Into<Option<usize>> + Send, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
-        mut registry: Reg,
-        parent_scope_id: P,
-        name_fn: F,
-        shutdown_handle: Option<oneshot::Sender<()>>,
-        abort_handle: Option<AbortHandle>,
-    ) -> Self {
-        let parent_id = parent_scope_id.into();
-        let scope_id = registry.new_scope(parent_id, name_fn, shutdown_handle, abort_handle).await;
-        Self {
-            scope_id,
-            parent_id,
-            registry,
-            join_handles: Default::default(),
-        }
-    }
-
     pub(crate) async fn child<S: Into<String>, O: Into<Option<S>>>(
         &mut self,
         name: O,
@@ -255,23 +238,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Get a shared reference to a system if it exists in this runtime's scope
     pub async fn system<S: 'static + System + Send + Sync>(&mut self) -> Option<Sys<S>> {
-        self.get_data::<Arc<RwLock<S>>>().await.map(|sys| Sys(sys))
-    }
-
-    /// Get a system's event handle if the system exists in this runtime's scope
-    pub async fn system_event_handle<S: System>(&mut self) -> Option<<S::Channel as Channel<S::ChildEvents>>::Sender> {
-        self.get_data::<<S::Channel as Channel<S::ChildEvents>>::Sender>()
-            .await
-            .and_then(|handle| (!handle.is_closed()).then(|| handle))
-    }
-
-    /// Send an event to a system if it exists within this runtime's scope
-    pub async fn send_system_event<S: System>(&mut self, event: S::ChildEvents) -> anyhow::Result<()> {
-        let mut handle = self
-            .system_event_handle::<S>()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("No channel for this system!"))?;
-        Sender::<S::ChildEvents>::send(&mut handle, event).await
+        if let Some(actor) = self.get_data::<<S::Channel as Channel<S::Event>>::Sender>().await {
+            if let Some(state) = self.get_data::<S::State>().await {
+                return Some(Sys {
+                    actor: Act(actor),
+                    state: Res(state),
+                });
+            }
+        }
+        None
     }
 
     /// Get a shared resource if it exists in this runtime's scope
@@ -353,7 +328,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<A> + Send + Sync + From<A::SupervisorEvent>,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
     {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
@@ -409,40 +384,39 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<S, H, E>(
+    pub async fn spawn_system<A, R, H, E>(
         &mut self,
-        system: S,
+        mut actor: A,
+        state: A::State,
         supervisor_handle: H,
-    ) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
+    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
-        S: 'static + System + Send + Sync,
+        A: 'static + System + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync + From<S::SupervisorEvent>,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
     {
-        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let system = Arc::new(RwLock::new(system));
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
-        self.add_data(system.clone()).await;
+        self.add_data(state).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.child(S::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        self.common_spawn::<S, _, Sys<S>, _, _>(
+        let child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        self.common_spawn::<A, _, Sys<A>, _, _>(
             child_scope,
             oneshot_recv,
             abort_registration,
             |mut child_scope, deps, oneshot_recv, abort_registration| async move {
                 let res = {
-                    let mut system_rt =
-                        SystemScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    let mut actor_rt = ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
                     Abortable::new(
-                        AssertUnwindSafe(System::run_supervised(system.clone(), &mut system_rt, deps)).catch_unwind(),
+                        AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
                         abort_registration,
                     )
                     .await
                 };
-                child_scope.remove_data::<<S::Channel as Channel<S::ChildEvents>>::Sender>().await;
-                child_scope.remove_data::<Arc<RwLock<S>>>().await;
-                Self::handle_res(res, &mut child_scope, supervisor_handle, system).await
+                child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
+                child_scope.remove_data::<A::State>().await;
+                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
             },
         )
         .await;
@@ -450,32 +424,31 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with no supervisor
-    pub async fn spawn_system_unsupervised<S>(&mut self, system: S) -> (AbortHandle, <S::Channel as Channel<S::ChildEvents>>::Sender)
+    pub async fn spawn_system_unsupervised<A>(
+        &mut self,
+        mut actor: A,
+        state: A::State,
+    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
     where
-        S: 'static + System + Send + Sync,
+        A: 'static + System + Send + Sync,
     {
-        let (sender, receiver) = <S::Channel as Channel<S::ChildEvents>>::new();
-        let system = Arc::new(RwLock::new(system));
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
-        self.add_data(system.clone()).await;
+        self.add_data(state).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.child(S::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        self.common_spawn::<S, _, Sys<S>, _, _>(
+        let child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        self.common_spawn::<A, _, Sys<A>, _, _>(
             child_scope,
             oneshot_recv,
             abort_registration,
             |mut child_scope, deps, oneshot_recv, abort_registration| async move {
                 let res = {
-                    let mut system_rt = SystemScopedRuntime::unsupervised(&mut child_scope, receiver, oneshot_recv);
-                    Abortable::new(
-                        AssertUnwindSafe(System::run(system, &mut system_rt, deps)).catch_unwind(),
-                        abort_registration,
-                    )
-                    .await
+                    let mut actor_rt = ActorScopedRuntime::unsupervised(&mut child_scope, receiver, oneshot_recv);
+                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
                 };
-                child_scope.remove_data::<<S::Channel as Channel<S::ChildEvents>>::Sender>().await;
-                child_scope.remove_data::<Arc<RwLock<S>>>().await;
+                child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
+                child_scope.remove_data::<A::State>().await;
                 Self::handle_res_unsupervised(res, &mut child_scope).await
             },
         )
@@ -635,7 +608,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<A> + Send + Sync + From<A::SupervisorEvent> + Debug,
+        E: 'static + SupervisorEvent<A> + Send + Sync + Debug,
         I: Into<Option<H>>,
     {
         let supervisor_handle = supervisor_handle.into();
@@ -788,119 +761,6 @@ where
     }
 }
 
-/// A systems's scope, which provides some helpful functions specific to a system
-pub struct SystemScopedRuntime<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync>
-where
-    S::ChildEvents: 'static,
-{
-    scope: &'a mut RuntimeScope<Reg>,
-    receiver: ShutdownStream<<S::Channel as Channel<S::ChildEvents>>::Receiver>,
-}
-
-/// A supervised systems's scope. The system can request its supervisor's handle from here.
-pub struct SupervisedSystemScopedRuntime<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync, H, E>
-where
-    S::ChildEvents: 'static,
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
-{
-    pub(crate) scope: SystemScopedRuntime<'a, S, Reg>,
-    supervisor_handle: H,
-    _event: PhantomData<E>,
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> SystemScopedRuntime<'a, S, Reg> {
-    pub(crate) fn unsupervised(
-        scope: &'a mut RuntimeScope<Reg>,
-        receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
-        shutdown: oneshot::Receiver<()>,
-    ) -> Self {
-        Self {
-            scope,
-            receiver: ShutdownStream::new(shutdown, receiver),
-        }
-    }
-
-    pub(crate) fn supervised<H, E>(
-        scope: &'a mut RuntimeScope<Reg>,
-        receiver: <S::Channel as Channel<S::ChildEvents>>::Receiver,
-        shutdown: oneshot::Receiver<()>,
-        supervisor_handle: H,
-    ) -> SupervisedSystemScopedRuntime<'a, S, Reg, H, E>
-    where
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
-    {
-        SupervisedSystemScopedRuntime {
-            scope: Self::unsupervised(scope, receiver, shutdown),
-            supervisor_handle,
-            _event: PhantomData,
-        }
-    }
-
-    /// Get the next event from the event receiver
-    pub async fn next_event(&mut self) -> Option<S::ChildEvents> {
-        self.receiver.next().await
-    }
-
-    /// Get this system's handle
-    pub async fn my_handle(&mut self) -> <S::Channel as Channel<S::ChildEvents>>::Sender {
-        self.scope.system_event_handle::<S>().await.unwrap()
-    }
-
-    /// Get the runtime's service
-    pub async fn service(&mut self) -> Service {
-        self.scope.service().await
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync, H, E> SupervisedSystemScopedRuntime<'a, S, Reg, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
-{
-    /// Get this systems's supervisor handle
-    pub fn supervisor_handle(&mut self) -> &mut H {
-        &mut self.supervisor_handle
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> Deref for SystemScopedRuntime<'a, S, Reg> {
-    type Target = RuntimeScope<Reg>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.scope
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync> DerefMut for SystemScopedRuntime<'a, S, Reg> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.scope
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync, H, E> Deref for SupervisedSystemScopedRuntime<'a, S, Reg, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
-{
-    type Target = SystemScopedRuntime<'a, S, Reg>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.scope
-    }
-}
-
-impl<'a, S: System, Reg: 'static + RegistryAccess + Send + Sync, H, E> DerefMut for SupervisedSystemScopedRuntime<'a, S, Reg, H, E>
-where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<Arc<RwLock<S>>> + Send + Sync,
-{
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.scope
-    }
-}
-
 /// A scope for an actor pool, which only allows spawning of the specified actor
 pub struct ScopedActorPool<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync, H, E>
 where
@@ -916,7 +776,7 @@ where
 impl<'a, A, Reg: 'static + RegistryAccess + Send + Sync, H, E> ScopedActorPool<'a, A, Reg, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<A> + Send + Sync + std::fmt::Debug + From<A::SupervisorEvent>,
+    E: 'static + SupervisorEvent<A> + Send + Sync + std::fmt::Debug,
     A: Actor,
 {
     /// Spawn a new actor into this pool

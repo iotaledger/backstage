@@ -1,82 +1,8 @@
-use super::{ActorError, Channel, Dependencies, Sender, SupervisorEvent};
-use crate::{
-    prelude::RegistryAccess,
-    runtime::{RuntimeScope, SupervisedSystemScopedRuntime, SystemScopedRuntime},
-};
-use async_trait::async_trait;
-use futures::{
-    future::{AbortHandle, Abortable},
-    FutureExt,
-};
-use std::{borrow::Cow, panic::AssertUnwindSafe, sync::Arc};
-use tokio::sync::{oneshot, RwLock};
+use super::Actor;
 
-/// A system is effectively a shared actor which groups other systems and actors and obfuscates them.
-/// Systems route incoming messages to their children and may provide a public API over their shared state.
-#[async_trait]
-pub trait System {
-    /// Allows specifying a system's startup dependencies. Ex. (Sys<OtherSystem>, Res<MyResource>)
-    type Dependencies: Dependencies + Send + Sync;
-    /// The type of event this system will receive and forward to its children
-    type ChildEvents: 'static + Send + Sync;
-    /// The type of channel this system will use to receive events
-    type Channel: Channel<Self::ChildEvents> + Send;
-    /// An optional custom event type which can be sent to the supervisor
-    type SupervisorEvent;
-
-    /// The main function for the system
-    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
-        this: Arc<RwLock<Self>>,
-        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
-        deps: Self::Dependencies,
-    ) -> Result<(), ActorError>
-    where
-        Self: Sized;
-
-    /// Run this system with a supervisor
-    /// Note: Redefine this method if your system requires a supervisor handle to function!
-    async fn run_supervised<'a, Reg: RegistryAccess + Send + Sync, H, E>(
-        this: Arc<RwLock<Self>>,
-        rt: &mut SupervisedSystemScopedRuntime<'a, Self, Reg, H, E>,
-        deps: Self::Dependencies,
-    ) -> Result<(), ActorError>
-    where
-        Self: Send + Sync + Sized,
-        H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<Arc<RwLock<Self>>> + Send + Sync + From<Self::SupervisorEvent>,
-    {
-        Self::run(this, &mut rt.scope, deps).await
-    }
-
-    /// Get this system's name
-    fn name() -> Cow<'static, str> {
-        std::any::type_name::<Self>().into()
-    }
-
-    /// Start with this system as the root scope
-    async fn start_as_root<Reg: 'static + RegistryAccess + Send + Sync>(self) -> anyhow::Result<()>
-    where
-        Self: 'static + Sized + Send + Sync,
-    {
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
-        let system = Arc::new(RwLock::new(self));
-        scope.add_data(system.clone()).await;
-        let (sender, receiver) = <Self::Channel as Channel<Self::ChildEvents>>::new();
-        scope.add_data(sender.clone()).await;
-        let deps = Self::Dependencies::instantiate(&mut scope)
-            .await
-            .map_err(|e| anyhow::anyhow!("Cannot spawn system {}: {}", std::any::type_name::<Self>(), e))
-            .unwrap();
-        let res = {
-            let mut system_rt = SystemScopedRuntime::unsupervised(&mut scope, receiver, oneshot_recv);
-            Abortable::new(
-                AssertUnwindSafe(Self::run(system, &mut system_rt, deps)).catch_unwind(),
-                abort_registration,
-            )
-            .await
-        };
-        RuntimeScope::handle_res_unsupervised(res, &mut scope).await
-    }
+/// A system is an actor with some specified shared state
+pub trait System: Actor {
+    /// The shared state of this actor, which more-or-less
+    /// defines a public API
+    type State: Clone + Send + Sync;
 }

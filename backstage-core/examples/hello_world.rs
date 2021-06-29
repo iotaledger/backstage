@@ -3,8 +3,9 @@ use backstage::prelude::*;
 use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 #[derive(Error, Debug)]
 pub enum HelloWorldError {
@@ -43,7 +44,6 @@ impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
-    type SupervisorEvent = ();
 
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
         &mut self,
@@ -68,14 +68,15 @@ impl Actor for HelloWorld {
 }
 
 struct Launcher;
+struct LauncherAPI;
 
-impl Launcher {
+impl LauncherAPI {
     pub async fn send_to_hello_world<Reg: 'static + RegistryAccess + Send + Sync>(
         &self,
         event: HelloWorldEvent,
         rt: &mut RuntimeScope<Reg>,
     ) -> anyhow::Result<()> {
-        rt.send_system_event::<Self>(LauncherEvents::HelloWorld(event)).await
+        rt.send_actor_event::<Launcher>(LauncherEvents::HelloWorld(event)).await
     }
 }
 
@@ -105,23 +106,16 @@ impl SupervisorEvent<HelloWorld> for LauncherEvents {
     }
 }
 
-impl From<()> for LauncherEvents {
-    fn from(_: ()) -> Self {
-        panic!()
-    }
-}
-
 #[async_trait]
-impl System for Launcher {
-    type ChildEvents = LauncherEvents;
+impl Actor for Launcher {
     type Dependencies = ();
-    type Channel = TokioChannel<Self::ChildEvents>;
-    type SupervisorEvent = ();
+    type Event = LauncherEvents;
+    type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
-        _this: std::sync::Arc<tokio::sync::RwLock<Self>>,
-        rt: &mut SystemScopedRuntime<'a, Self, Reg>,
-        _deps: (),
+    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -140,7 +134,7 @@ impl System for Launcher {
         .await
         .expect("Failed to create actor pool!");
 
-        tokio::task::spawn(ctrl_c(my_handle.clone()));
+        tokio::task::spawn(ctrl_c(my_handle.clone().into_inner()));
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
@@ -187,6 +181,10 @@ impl System for Launcher {
     }
 }
 
+impl System for Launcher {
+    type State = Arc<RwLock<LauncherAPI>>;
+}
+
 pub async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
     tokio::signal::ctrl_c().await.unwrap();
     let exit_program_event = LauncherEvents::Shutdown { using_ctrl_c: true };
@@ -207,7 +205,7 @@ async fn startup() -> anyhow::Result<()> {
     }));
     RuntimeScope::<ArcedRegistry>::launch(|scope| {
         async move {
-            scope.spawn_system_unsupervised(Launcher).await;
+            scope.spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI))).await;
             scope
                 .spawn_task(|rt| {
                     async move {
@@ -215,6 +213,7 @@ async fn startup() -> anyhow::Result<()> {
                             rt.system::<Launcher>()
                                 .await
                                 .unwrap()
+                                .state
                                 .read()
                                 .await
                                 .send_to_hello_world(HelloWorldEvent::Print(format!("foo {}", i)), rt)
