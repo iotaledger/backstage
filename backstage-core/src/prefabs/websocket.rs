@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     actor::{build, Actor, ActorError, Builder, Sender, TokioChannel, TokioSender},
-    prelude::RegistryAccess,
+    prelude::{DataWrapper, RegistryAccess},
     runtime::ActorScopedRuntime,
 };
 use futures::{FutureExt, SinkExt, StreamExt};
@@ -121,7 +121,7 @@ where
                                 .await;
                                 rt.send_actor_event::<Websocket<SH, SE>>(WebsocketChildren::Connection(Connection {
                                     peer,
-                                    sender: responder_handle,
+                                    sender: responder_handle.into_inner(),
                                 }))
                                 .await?;
                             }

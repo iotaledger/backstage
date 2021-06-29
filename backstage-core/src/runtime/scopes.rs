@@ -320,11 +320,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new actor with a supervisor handle
-    pub async fn spawn_actor<A, H, E>(
-        &mut self,
-        mut actor: A,
-        supervisor_handle: H,
-    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn_actor<A, H, E>(&mut self, mut actor: A, supervisor_handle: H) -> (AbortHandle, Act<A>)
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -353,11 +349,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             },
         )
         .await;
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 
     /// Spawn a new actor with no supervisor
-    pub async fn spawn_actor_unsupervised<A>(&mut self, mut actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn_actor_unsupervised<A>(&mut self, mut actor: A) -> (AbortHandle, Act<A>)
     where
         A: 'static + Actor + Send + Sync,
     {
@@ -380,16 +376,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             },
         )
         .await;
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<A, R, H, E>(
-        &mut self,
-        mut actor: A,
-        state: A::State,
-        supervisor_handle: H,
-    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn_system<A, R, H, E>(&mut self, mut actor: A, state: A::State, supervisor_handle: H) -> (AbortHandle, Act<A>)
     where
         A: 'static + System + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -420,15 +411,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             },
         )
         .await;
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 
     /// Spawn a new system with no supervisor
-    pub async fn spawn_system_unsupervised<A>(
-        &mut self,
-        mut actor: A,
-        state: A::State,
-    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn_system_unsupervised<A>(&mut self, mut actor: A, state: A::State) -> (AbortHandle, Act<A>)
     where
         A: 'static + System + Send + Sync,
     {
@@ -453,7 +440,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             },
         )
         .await;
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 
     async fn common_spawn<
@@ -604,7 +591,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         &mut self,
         mut actor: A,
         supervisor_handle: I,
-    ) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    ) -> (AbortHandle, Act<A>)
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -644,7 +631,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 self.add_data(Arc::new(RwLock::new(pool))).await;
             }
         };
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 }
 
@@ -780,7 +767,7 @@ where
     A: Actor,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, <A::Channel as Channel<A::Event>>::Sender)
+    pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, Act<A>)
     where
         A: 'static + Send + Sync,
     {
@@ -810,6 +797,6 @@ where
                 },
             )
             .await;
-        (abort_handle, sender)
+        (abort_handle, Act(sender))
     }
 }
