@@ -1,6 +1,7 @@
 use num_traits::{FromPrimitive, NumAssignOps};
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
 use std::time::SystemTime;
 
 /// The possible statuses a service (application) can be
@@ -150,6 +151,20 @@ pub struct ServiceTree {
     pub service: Service,
     /// The children of this level
     pub children: Vec<ServiceTree>,
+}
+
+impl Deref for ServiceTree {
+    type Target = Service;
+
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+
+impl DerefMut for ServiceTree {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.service
+    }
 }
 
 impl TreeItem for ServiceTree {
