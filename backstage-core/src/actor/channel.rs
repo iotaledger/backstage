@@ -45,12 +45,17 @@ impl<E: 'static + Send + Sync> Channel<E> for TokioChannel<E> {
 }
 
 /// A tokio mpsc sender implementation
-#[derive(Debug)]
 pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
 
 impl<E: 'static + Send + Sync> Clone for TokioSender<E> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
+    }
+}
+
+impl<E: 'static + Send + Sync + Debug> Debug for TokioSender<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
     }
 }
 
@@ -84,7 +89,7 @@ impl<E: Send> Stream for TokioReceiver<E> {
 }
 
 #[async_trait]
-impl<T, E: 'static + Send + Debug + Sync> Sender<E> for Option<T>
+impl<T, E: 'static + Send + Sync> Sender<E> for Option<T>
 where
     T: Sender<E> + Send + Sync,
 {
@@ -117,7 +122,7 @@ where
 }
 
 #[async_trait]
-impl<E: 'static + Send + Debug + Sync> Sender<E> for () {
+impl<E: 'static + Send + Sync> Sender<E> for () {
     async fn send(&mut self, _event: E) -> anyhow::Result<()> {
         Ok(())
     }

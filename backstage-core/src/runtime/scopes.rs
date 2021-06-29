@@ -6,7 +6,7 @@ use futures::{
     future::{AbortRegistration, Aborted},
     Future, FutureExt,
 };
-use std::{fmt::Debug, panic::AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 use tokio::sync::broadcast;
 
 /// A runtime which defines a particular scope and functionality to
@@ -595,7 +595,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
-        E: 'static + SupervisorEvent<A> + Send + Sync + Debug,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
         I: Into<Option<H>>,
     {
         let supervisor_handle = supervisor_handle.into();
@@ -763,7 +763,7 @@ where
 impl<'a, A, Reg: 'static + RegistryAccess + Send + Sync, H, E> ScopedActorPool<'a, A, Reg, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + SupervisorEvent<A> + Send + Sync + std::fmt::Debug,
+    E: 'static + SupervisorEvent<A> + Send + Sync,
     A: Actor,
 {
     /// Spawn a new actor into this pool
