@@ -1,4 +1,4 @@
-use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, System};
+use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, ServiceTree, System};
 use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_trait::async_trait;
 use futures::{
@@ -132,6 +132,9 @@ pub trait RegistryAccess: Clone {
     /// Print the tree hierarchy starting with this scope
     /// NOTE: To print the entire tree, use scope id `&0` as it will always refer to the root
     async fn print(&mut self, scope_id: &ScopeId);
+
+    /// Request the service tree from this scope
+    async fn service_tree(&mut self, scope_id: &ScopeId) -> Option<ServiceTree>;
 }
 
 /// The central registry that stores all data for the application.
@@ -371,6 +374,13 @@ impl Registry {
 
     pub(crate) fn print(&self, scope_id: &ScopeId) {
         log::debug!("Registry ({}):\n{}", scope_id, PrintableRegistry(self, *scope_id))
+    }
+
+    pub(crate) fn service_tree(&self, scope_id: &ScopeId) -> Option<ServiceTree> {
+        self.scopes.get(scope_id).map(|scope| ServiceTree {
+            service: scope.service.clone(),
+            children: scope.children.iter().filter_map(|id| self.service_tree(id)).collect(),
+        })
     }
 }
 

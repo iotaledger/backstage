@@ -299,7 +299,8 @@ async fn startup() -> anyhow::Result<()> {
                 })
                 .await;
             tokio::time::sleep(Duration::from_secs(1)).await;
-            scope.print_root().await;
+            //scope.print_root().await;
+            log::info!("Service Tree:\n{}", scope.service_tree().await);
         }
         .boxed()
     })

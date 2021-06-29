@@ -95,6 +95,10 @@ impl RegistryAccess for ArcedRegistry {
     async fn print(&mut self, scope_id: &ScopeId) {
         self.registry.read().await.print(scope_id)
     }
+
+    async fn service_tree(&mut self, scope_id: &ScopeId) -> Option<ServiceTree> {
+        self.registry.read().await.service_tree(scope_id)
+    }
 }
 
 enum RequestType {
@@ -129,6 +133,7 @@ enum RequestType {
     },
     Abort(ScopeId),
     Print(ScopeId),
+    ServiceTree(ScopeId),
 }
 
 enum ResponseType {
@@ -142,6 +147,7 @@ enum ResponseType {
     UpdateStatus(anyhow::Result<()>),
     Abort,
     Print,
+    ServiceTree(Option<ServiceTree>),
 }
 
 struct RegistryActorRequest {
@@ -211,6 +217,7 @@ where
                     self.registry.print(&scope_id);
                     ResponseType::Print
                 }
+                RequestType::ServiceTree(scope_id) => ResponseType::ServiceTree(self.registry.service_tree(&scope_id)),
             };
             e.responder.send(res);
         }
@@ -396,6 +403,16 @@ where
         let (request, recv) = RegistryActorRequest::new(RequestType::Print(*scope_id));
         self.handle.send(request).await;
         if let ResponseType::Print = recv.await.unwrap() {
+        } else {
+            panic!("Wrong response type!")
+        }
+    }
+
+    async fn service_tree(&mut self, scope_id: &ScopeId) -> Option<ServiceTree> {
+        let (request, recv) = RegistryActorRequest::new(RequestType::ServiceTree(*scope_id));
+        self.handle.send(request).await;
+        if let ResponseType::ServiceTree(r) = recv.await.unwrap() {
+            r
         } else {
             panic!("Wrong response type!")
         }

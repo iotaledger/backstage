@@ -1,6 +1,6 @@
 use super::*;
 use crate::actor::{
-    ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, Service, ShutdownStream, SuccessReport, SupervisorEvent,
+    ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, Service, ServiceTree, ShutdownStream, SuccessReport, SupervisorEvent,
 };
 use futures::{
     future::{AbortRegistration, Aborted},
@@ -206,6 +206,13 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     pub async fn print_root(&mut self) {
         self.registry.print(&0).await;
+    }
+
+    pub async fn service_tree(&mut self) -> ServiceTree {
+        self.registry
+            .service_tree(&self.scope_id)
+            .await
+            .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
     /// Get the join handles of this runtime's scoped tasks

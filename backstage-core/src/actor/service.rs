@@ -1,4 +1,5 @@
 use num_traits::{FromPrimitive, NumAssignOps};
+use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -139,5 +140,40 @@ impl Default for Service {
             up_since: SystemTime::now(),
             downtime_ms: Default::default(),
         }
+    }
+}
+
+/// A tree of services
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceTree {
+    /// The service at this level
+    pub service: Service,
+    /// The children of this level
+    pub children: Vec<ServiceTree>,
+}
+
+impl TreeItem for ServiceTree {
+    type Child = ServiceTree;
+
+    fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
+        write!(
+            f,
+            "{}: {:?}, uptime: {}",
+            self.service.name,
+            self.service.status,
+            self.service.up_since.elapsed().unwrap().as_millis()
+        )
+    }
+
+    fn children(&self) -> std::borrow::Cow<[Self::Child]> {
+        self.children.clone().into()
+    }
+}
+
+impl std::fmt::Display for ServiceTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+        ptree::write_tree(self, &mut buf).ok();
+        write!(f, "{}", String::from_utf8_lossy(&buf.into_inner()))
     }
 }
