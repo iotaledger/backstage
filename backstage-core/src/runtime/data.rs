@@ -16,9 +16,9 @@ pub trait DataWrapper<T> {
 
 /// A shared resource
 #[derive(Clone)]
-pub struct Res<R: Clone>(pub R);
+pub struct Res<R>(pub R);
 
-impl<R: Deref + Clone> Deref for Res<R> {
+impl<R: Deref> Deref for Res<R> {
     type Target = R::Target;
 
     fn deref(&self) -> &Self::Target {
@@ -26,25 +26,33 @@ impl<R: Deref + Clone> Deref for Res<R> {
     }
 }
 
-impl<R: DerefMut + Clone> DerefMut for Res<R> {
+impl<R: DerefMut> DerefMut for Res<R> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0.deref_mut()
     }
 }
 
-impl<R: Clone> DataWrapper<R> for Res<R> {
+impl<R> DataWrapper<R> for Res<R> {
     fn into_inner(self) -> R {
         self.0
     }
 }
 
 /// A shared system reference
-#[derive(Clone)]
 pub struct Sys<S: System> {
     /// The actor handle
     pub actor: Act<S>,
     /// The shared state of the system
     pub state: Res<S::State>,
+}
+
+impl<S: System> Clone for Sys<S> {
+    fn clone(&self) -> Self {
+        Self {
+            actor: self.actor.clone(),
+            state: self.state.clone(),
+        }
+    }
 }
 
 /// An actor handle, used to send events
@@ -91,8 +99,13 @@ impl<A: Actor> Sender<A::Event> for Act<A> {
 }
 
 /// A pool of actors which can be used as a dependency
-#[derive(Clone)]
 pub struct Pool<A: Actor, M: Hash + Clone>(pub Arc<RwLock<ActorPool<A, M>>>);
+
+impl<A: Actor, M: Hash + Clone> Clone for Pool<A, M> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 impl<A: Actor, M: Hash + Clone> Deref for Pool<A, M> {
     type Target = Arc<RwLock<ActorPool<A, M>>>;
