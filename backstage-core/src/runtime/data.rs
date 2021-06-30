@@ -198,6 +198,15 @@ impl<A: Actor, M: Hash + Eq + Clone> ActorPool<A, M> {
             anyhow::bail!("No handles in pool!");
         }
     }
+
+    /// Get an iterator over the actor handles in this pool
+    pub fn iter_with_metrics(&mut self) -> std::vec::IntoIter<(M, Act<A>)> {
+        self.map
+            .iter()
+            .filter_map(|(metric, &id)| self.handles[id].as_ref().map(|h| (metric.clone(), h.clone())))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 }
 
 impl<A: Actor, M: Hash + Clone> ActorPool<A, M> {
