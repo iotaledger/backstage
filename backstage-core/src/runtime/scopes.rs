@@ -688,8 +688,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let pool = match self.pool_with_metric::<A, M>().await {
             Some(res) => res,
             None => {
-                self.add_data(Arc::new(RwLock::new(ActorPool::<A, M>::default()))).await;
-                self.pool_with_metric::<A, M>().await.unwrap()
+                let pool = Pool(Arc::new(RwLock::new(ActorPool::<A, M>::default())));
+                self.add_data(pool.clone()).await;
+                pool
             }
         };
         if pool.write().await.get_by_metric(&metric).is_some() {
