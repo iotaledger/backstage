@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use std::{fmt::Debug, marker::PhantomData};
 
+use crate::prelude::DataWrapper;
+
 /// Defines a channel which becomes a sender and receiver half
 pub trait Channel<E: 'static + Send + Sync> {
     /// The sender half of the channel
@@ -47,6 +49,12 @@ impl<E: 'static + Send + Sync> Channel<E> for TokioChannel<E> {
 /// A tokio mpsc sender implementation
 pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
 
+impl<E: 'static + Send + Sync> DataWrapper<tokio::sync::mpsc::UnboundedSender<E>> for TokioSender<E> {
+    fn into_inner(self) -> tokio::sync::mpsc::UnboundedSender<E> {
+        self.0
+    }
+}
+
 impl<E: 'static + Send + Sync> Clone for TokioSender<E> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
@@ -72,6 +80,12 @@ impl<E: 'static + Send + Sync> Sender<E> for TokioSender<E> {
 
 /// A tokio mpsc receiver implementation
 pub struct TokioReceiver<E>(tokio::sync::mpsc::UnboundedReceiver<E>);
+
+impl<E: 'static + Send + Sync> DataWrapper<tokio::sync::mpsc::UnboundedReceiver<E>> for TokioReceiver<E> {
+    fn into_inner(self) -> tokio::sync::mpsc::UnboundedReceiver<E> {
+        self.0
+    }
+}
 
 #[async_trait]
 impl<E: Send> Receiver<E> for TokioReceiver<E> {
