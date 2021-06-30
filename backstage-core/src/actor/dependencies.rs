@@ -129,8 +129,9 @@ macro_rules! impl_dependencies {
                     total += 1;
                     let status = $gen::request(scope).await;
                     match status {
-                        DepStatus::Ready(_) => {
+                        DepStatus::Ready(dep) => {
                             ready += 1;
+                            receivers.insert(dep);
                         }
                         DepStatus::Waiting(receiver) => {
                             receivers.insert(receiver);
