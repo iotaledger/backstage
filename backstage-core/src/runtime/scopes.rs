@@ -280,7 +280,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         Self: 'static + Sized,
         A: 'static + Actor + Send + Sync,
-        M: 'static + Hash + Clone + Send + Sync,
+        M: 'static + Hash + Eq + Clone + Send + Sync,
     {
         match self.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await {
             Some(arc) => {
@@ -632,7 +632,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub async fn spawn_pool<A, M, H, E, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
         A: 'static + Actor + Send + Sync,
-        M: 'static + Hash + Clone + Send + Sync,
+        M: 'static + Hash + Clone + Eq + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
         I: Into<Option<H>>,

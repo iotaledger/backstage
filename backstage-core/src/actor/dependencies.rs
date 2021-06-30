@@ -90,7 +90,7 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
 }
 
 #[async_trait]
-impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Clone + Send + Sync> Dependencies for Pool<A, M> {
+impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + Sync> Dependencies for Pool<A, M> {
     async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
             .pool_with_metric()
