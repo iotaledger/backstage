@@ -125,7 +125,7 @@ impl Actor for Launcher {
         rt.spawn_pool(my_handle.clone(), |pool| {
             async move {
                 for i in 0..10 {
-                    let (_abort, _handle) = pool.spawn(builder.clone().num(i).build()).await;
+                    let (_abort, _handle) = pool.spawn_with_metric(builder.clone().num(i).build(), i as i32).await;
                 }
                 Ok(())
             }
@@ -135,12 +135,19 @@ impl Actor for Launcher {
         .expect("Failed to create actor pool!");
 
         tokio::task::spawn(ctrl_c(my_handle.clone().into_inner()));
+        let mut i = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool::<HelloWorld>().await {
-                        pool.write().await.send_all(event).await.expect("Failed to pass along message!");
+                    if let Some(pool) = rt.pool_with_metric::<HelloWorld, i32>().await {
+                        //pool.write().await.send_all(event).await.expect("Failed to pass along message!");
+                        pool.write()
+                            .await
+                            .send_by_metric(&i, event)
+                            .await
+                            .expect("Failed to pass along message!");
+                        i += 1;
                     }
                 }
                 LauncherEvents::Shutdown { using_ctrl_c: _ } => {
@@ -164,7 +171,8 @@ impl Actor for Launcher {
                                 match e.state {
                                     LauncherChildren::HelloWorld(h) => {
                                         info!("Restarting {} {}", h.name, h.num);
-                                        rt.spawn_into_pool(h, my_handle.clone()).await;
+                                        let i = h.num;
+                                        rt.spawn_into_pool_with_metric(h, i, my_handle.clone()).await;
                                     }
                                 };
                             }

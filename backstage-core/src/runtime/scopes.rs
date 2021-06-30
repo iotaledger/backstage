@@ -6,7 +6,7 @@ use futures::{
     future::{AbortRegistration, Aborted},
     Future, FutureExt,
 };
-use std::panic::AssertUnwindSafe;
+use std::{hash::Hash, panic::AssertUnwindSafe};
 use tokio::sync::broadcast;
 
 /// A runtime which defines a particular scope and functionality to
@@ -276,17 +276,37 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Get the pool of a specified actor if it exists in this runtime's scope
-    pub async fn pool<A>(&mut self) -> Option<Pool<A>>
+    pub async fn pool_with_metric<A, M>(&mut self) -> Option<Pool<A, M>>
     where
         Self: 'static + Sized,
         A: 'static + Actor + Send + Sync,
+        M: 'static + Hash + Clone + Send + Sync,
     {
-        match self.get_data::<Arc<RwLock<ActorPool<A>>>>().await {
+        match self.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await {
             Some(arc) => {
                 if arc.write().await.verify() {
                     Some(Pool(arc))
                 } else {
-                    self.remove_data::<Arc<RwLock<ActorPool<A>>>>().await;
+                    self.remove_data::<Arc<RwLock<ActorPool<A, M>>>>().await;
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Get the pool of a specified actor if it exists in this runtime's scope
+    pub async fn pool<A>(&mut self) -> Option<Pool<A, ()>>
+    where
+        Self: 'static + Sized,
+        A: 'static + Actor + Send + Sync,
+    {
+        match self.get_data::<Arc<RwLock<ActorPool<A, ()>>>>().await {
+            Some(arc) => {
+                if arc.write().await.verify() {
+                    Some(Pool(arc))
+                } else {
+                    self.remove_data::<Arc<RwLock<ActorPool<A, ()>>>>().await;
                     None
                 }
             }
@@ -333,6 +353,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
     {
+        if self.actor_event_handle::<A>().await.is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                std::any::type_name::<A>(),
+                self.scope_id,
+                service.name
+            );
+        }
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
@@ -364,6 +393,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + Actor + Send + Sync,
     {
+        if self.actor_event_handle::<A>().await.is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                std::any::type_name::<A>(),
+                self.scope_id,
+                service.name
+            );
+        }
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
@@ -393,6 +431,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
     {
+        if self.actor_event_handle::<A>().await.is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                std::any::type_name::<A>(),
+                self.scope_id,
+                service.name
+            );
+        }
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
         self.add_data(state).await;
@@ -426,6 +473,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + System + Send + Sync,
     {
+        if self.actor_event_handle::<A>().await.is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                std::any::type_name::<A>(),
+                self.scope_id,
+                service.name
+            );
+        }
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
         self.add_data(sender.clone()).await;
         self.add_data(state).await;
@@ -572,15 +628,25 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         }
     }
 
-    /// Spawn a new pool of actors of a given type
-    pub async fn spawn_pool<A, H, E, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
+    /// Spawn a new pool of actors of a given type with some metric
+    pub async fn spawn_pool<A, M, H, E, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
         A: 'static + Actor + Send + Sync,
+        M: 'static + Hash + Clone + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
         E: 'static + SupervisorEvent<A> + Send + Sync,
         I: Into<Option<H>>,
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, Reg, H, E>) -> BoxFuture<'b, anyhow::Result<()>>,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, M, Reg, H, E>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
+        if self.pool_with_metric::<A, M>().await.is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate pool ({}) to scope {} ({})",
+                std::any::type_name::<Pool<A, M>>(),
+                self.scope_id,
+                service.name
+            );
+        }
         let mut pool = ActorPool::default();
         let mut scoped_pool = ScopedActorPool {
             scope: self,
@@ -593,12 +659,89 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Ok(())
     }
 
+    /// Spawn a new pool of actors of a given type with no metrics
+    pub async fn spawn_basic_pool<A, H, E, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
+    where
+        A: 'static + Actor + Send + Sync,
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
+        I: Into<Option<H>>,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, (), Reg, H, E>) -> BoxFuture<'b, anyhow::Result<()>>,
+    {
+        self.spawn_pool(supervisor_handle, f).await
+    }
+
     /// Spawn a new actor into a pool, creating a pool if needed
-    pub async fn spawn_into_pool<A: 'static + Actor, H, E, I: Into<Option<H>>>(
+    pub async fn spawn_into_pool_with_metric<A, M, H, E, I>(
         &mut self,
         mut actor: A,
+        metric: M,
         supervisor_handle: I,
     ) -> (AbortHandle, Act<A>)
+    where
+        A: 'static + Actor + Send + Sync,
+        M: 'static + Hash + Eq + Clone + Send + Sync,
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
+        I: Into<Option<H>>,
+    {
+        let pool = match self.pool_with_metric::<A, M>().await {
+            Some(res) => res,
+            None => {
+                self.add_data(Arc::new(RwLock::new(ActorPool::<A, M>::default()))).await;
+                self.pool_with_metric::<A, M>().await.unwrap()
+            }
+        };
+        if pool.write().await.get_by_metric(&metric).is_some() {
+            let service = self.service().await;
+            panic!(
+                "Attempted to add a duplicate metric to pool {} in scope {} ({})",
+                std::any::type_name::<Pool<A, M>>(),
+                self.scope_id,
+                service.name
+            );
+        }
+        let supervisor_handle = supervisor_handle.into();
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        child_scope.add_data(sender.clone()).await;
+        self.common_spawn::<A, _, Act<A>, _, _>(
+            child_scope,
+            oneshot_recv,
+            abort_registration,
+            |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                let res = {
+                    let mut actor_rt = ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                    Abortable::new(
+                        AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
+                        abort_registration,
+                    )
+                    .await
+                };
+                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
+            },
+        )
+        .await;
+        pool.write().await.push(Act(sender.clone()), metric);
+        (abort_handle, Act(sender))
+    }
+
+    /// Spawn a new actor into a pool with a default metric, creating a pool if needed
+    pub async fn spawn_into_pool_with_default_metric<A, M, H, E, I>(&mut self, actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
+    where
+        A: 'static + Actor + Send + Sync,
+        M: 'static + Hash + Eq + Clone + Default + Send + Sync,
+        H: 'static + Sender<E> + Clone + Send + Sync,
+        E: 'static + SupervisorEvent<A> + Send + Sync,
+        I: Into<Option<H>>,
+    {
+        self.spawn_into_pool_with_metric(actor, M::default(), supervisor_handle).await
+    }
+
+    /// Spawn a new actor into a pool with no metrics, creating a pool if needed
+    pub async fn spawn_into_pool<A, H, E, I>(&mut self, mut actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
     where
         A: 'static + Actor + Send + Sync,
         H: 'static + Sender<E> + Clone + Send + Sync,
@@ -630,11 +773,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         .await;
         match self.pool::<A>().await {
             Some(res) => {
-                res.write().await.push(sender.clone());
+                res.write().await.push_no_metric(Act(sender.clone()));
             }
             None => {
-                let mut pool = ActorPool::<A>::default();
-                pool.push(sender.clone());
+                let mut pool = ActorPool::<A, ()>::default();
+                pool.push_no_metric(Act(sender.clone()));
                 self.add_data(Arc::new(RwLock::new(pool))).await;
             }
         };
@@ -756,22 +899,92 @@ where
 }
 
 /// A scope for an actor pool, which only allows spawning of the specified actor
-pub struct ScopedActorPool<'a, A: Actor, Reg: 'static + RegistryAccess + Send + Sync, H, E>
+pub struct ScopedActorPool<'a, A: Actor, M: Hash + Clone, Reg: 'static + RegistryAccess + Send + Sync, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent<A> + Send + Sync,
 {
     scope: &'a mut RuntimeScope<Reg>,
-    pool: &'a mut ActorPool<A>,
+    pool: &'a mut ActorPool<A, M>,
     supervisor_handle: Option<H>,
     _evt: PhantomData<E>,
 }
 
-impl<'a, A, Reg: 'static + RegistryAccess + Send + Sync, H, E> ScopedActorPool<'a, A, Reg, H, E>
+impl<'a, A, M, Reg, H, E> ScopedActorPool<'a, A, M, Reg, H, E>
 where
     H: 'static + Sender<E> + Clone + Send + Sync,
     E: 'static + SupervisorEvent<A> + Send + Sync,
     A: Actor,
+    M: Hash + Eq + Clone,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    /// Spawn a new actor into this pool
+    pub async fn spawn_with_metric(&mut self, mut actor: A, metric: M) -> (AbortHandle, Act<A>)
+    where
+        A: 'static + Send + Sync,
+    {
+        if self.pool.get_by_metric(&metric).is_some() {
+            let service = self.scope.service().await;
+            panic!(
+                "Attempted to add a duplicate metric to pool {} in scope {} ({})",
+                std::any::type_name::<Pool<A, M>>(),
+                self.scope.scope_id,
+                service.name
+            );
+        }
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        self.pool.push(Act(sender.clone()), metric);
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let mut child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        child_scope.add_data(sender.clone()).await;
+        let supervisor_handle = self.supervisor_handle.clone();
+        self.scope
+            .common_spawn::<A, _, Act<A>, _, _>(
+                child_scope,
+                oneshot_recv,
+                abort_registration,
+                |mut child_scope, deps, oneshot_recv, abort_registration| async move {
+                    let res = {
+                        let mut actor_rt =
+                            ActorScopedRuntime::supervised(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                        Abortable::new(
+                            AssertUnwindSafe(actor.run_supervised(&mut actor_rt, deps)).catch_unwind(),
+                            abort_registration,
+                        )
+                        .await
+                    };
+                    RuntimeScope::handle_res(res, &mut child_scope, supervisor_handle, actor).await
+                },
+            )
+            .await;
+        (abort_handle, Act(sender))
+    }
+}
+
+impl<'a, A, M, Reg, H, E> ScopedActorPool<'a, A, M, Reg, H, E>
+where
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent<A> + Send + Sync,
+    A: Actor,
+    M: Hash + Eq + Clone + Default,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    /// Spawn a new actor into this pool
+    pub async fn spawn_default_metric(&mut self, actor: A) -> (AbortHandle, Act<A>)
+    where
+        A: 'static + Send + Sync,
+    {
+        self.spawn_with_metric(actor, M::default()).await
+    }
+}
+
+impl<'a, A, Reg, H, E> ScopedActorPool<'a, A, (), Reg, H, E>
+where
+    H: 'static + Sender<E> + Clone + Send + Sync,
+    E: 'static + SupervisorEvent<A> + Send + Sync,
+    A: Actor,
+    Reg: 'static + RegistryAccess + Send + Sync,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, Act<A>)
@@ -779,7 +992,7 @@ where
         A: 'static + Send + Sync,
     {
         let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.pool.push(sender.clone());
+        self.pool.push_no_metric(Act(sender.clone()));
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
