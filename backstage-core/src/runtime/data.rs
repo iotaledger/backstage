@@ -137,24 +137,6 @@ pub struct ActorPool<A: Actor, M: Hash + Clone> {
     id_pool: IdPool<usize>,
 }
 
-impl<A: Actor, M: Hash + Clone> Clone for ActorPool<A, M> {
-    fn clone(&self) -> Self {
-        let mut lru = LruCache::unbounded();
-        for (idx, _) in self.lru.iter().rev() {
-            lru.put(*idx, *idx);
-        }
-        Self {
-            handles: self.handles.clone(),
-            lru,
-            map: self.map.clone(),
-            id_pool: self.id_pool.clone(),
-        }
-    }
-}
-
-//unsafe impl<A: Actor + Send, M: Hash + Clone + Send> Send for ActorPool<A, M> {}
-//unsafe impl<A: Actor + Sync, M: Hash + Clone + Sync> Sync for ActorPool<A, M> {}
-
 impl<A: Actor, M: Hash + Clone> Default for ActorPool<A, M> {
     fn default() -> Self {
         Self {
@@ -200,7 +182,7 @@ impl<A: Actor, M: Hash + Eq + Clone> ActorPool<A, M> {
     }
 
     /// Get an iterator over the actor handles in this pool
-    pub fn iter_with_metrics(&mut self) -> std::vec::IntoIter<(M, Act<A>)> {
+    pub fn iter_with_metrics(&self) -> std::vec::IntoIter<(M, Act<A>)> {
         self.map
             .iter()
             .filter_map(|(metric, &id)| self.handles[id].as_ref().map(|h| (metric.clone(), h.clone())))
