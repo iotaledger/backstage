@@ -1,4 +1,4 @@
-use crate::actor::{Service, ServiceStatus, TokioChannel, TokioSender};
+use crate::actor::{EventDriven, Service, ServiceStatus, Supervisor, TokioChannel, TokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 use tokio::sync::Mutex;
@@ -175,9 +175,9 @@ where
     type Event = RegistryActorRequest;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), crate::actor::ActorError>
     where
@@ -275,7 +275,7 @@ where
         };
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         tokio::spawn(async move {
-            let mut actor_rt = ActorScopedRuntime::unsupervised(&mut scope, receiver, oneshot_recv);
+            let mut actor_rt = ActorScopedRuntime::<'_, _, _, ()>::new(&mut scope, receiver, oneshot_recv, None);
             actor.run(&mut actor_rt, ()).await;
         });
         child_scope

@@ -1,4 +1,4 @@
-use crate::actor::{Actor, Channel, IdPool, Sender, System};
+use crate::actor::{Actor, Channel, EventDriven, IdPool, Sender, System};
 use lru::LruCache;
 use std::{
     collections::HashMap,
@@ -56,9 +56,9 @@ impl<S: System> Clone for Sys<S> {
 }
 
 /// An actor handle, used to send events
-pub struct Act<A: Actor>(pub <A::Channel as Channel<A::Event>>::Sender);
+pub struct Act<A: EventDriven>(pub <A::Channel as Channel<A::Event>>::Sender);
 
-impl<A: Actor> Deref for Act<A> {
+impl<A: EventDriven> Deref for Act<A> {
     type Target = <A::Channel as Channel<A::Event>>::Sender;
 
     fn deref(&self) -> &Self::Target {
@@ -66,13 +66,13 @@ impl<A: Actor> Deref for Act<A> {
     }
 }
 
-impl<A: Actor> DerefMut for Act<A> {
+impl<A: EventDriven> DerefMut for Act<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl<A: Actor> Clone for Act<A>
+impl<A: EventDriven> Clone for Act<A>
 where
     <A::Channel as Channel<A::Event>>::Sender: Clone,
 {
@@ -81,14 +81,14 @@ where
     }
 }
 
-impl<A: Actor> DataWrapper<<A::Channel as Channel<A::Event>>::Sender> for Act<A> {
+impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A::Event>>::Sender> for Act<A> {
     fn into_inner(self) -> <A::Channel as Channel<A::Event>>::Sender {
         self.0
     }
 }
 
 #[async_trait::async_trait]
-impl<A: Actor> Sender<A::Event> for Act<A> {
+impl<A: EventDriven> Sender<A::Event> for Act<A> {
     async fn send(&mut self, event: A::Event) -> anyhow::Result<()> {
         self.0.send(event).await
     }

@@ -3,7 +3,7 @@ use backstage::{prefabs::websocket::*, prelude::*};
 use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, sync::Arc, time::Duration};
+use std::{convert::TryFrom, marker::PhantomData, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -71,14 +71,16 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
         Self: Sized,
+        Sup::Children: From<PhantomData<Self>>,
     {
+        rt.update_status(ServiceStatus::Running).await;
         let mut count = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -92,6 +94,7 @@ impl Actor for HelloWorld {
                 }
             }
         }
+        rt.update_status(ServiceStatus::Stopped).await;
         Ok(())
     }
 }
@@ -133,15 +136,18 @@ impl Actor for Howdy {
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
+        Sup::Children: From<PhantomData<Self>>,
     {
+        rt.update_status(ServiceStatus::Initializing).await;
         let (counter, mut hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
+        rt.update_status(ServiceStatus::Running).await;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HowdyEvent::Print(s) => {
@@ -155,10 +161,12 @@ impl Actor for Howdy {
                 }
             }
         }
+        rt.update_status(ServiceStatus::Stopping).await;
         for s in 0..4 {
             debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        rt.update_status(ServiceStatus::Stopped).await;
         Ok(())
     }
 }
@@ -212,14 +220,16 @@ impl Actor for Launcher {
     type Dependencies = ();
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
+        Sup::Children: From<PhantomData<Self>>,
     {
+        rt.update_status(ServiceStatus::Initializing).await;
         let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
@@ -235,6 +245,7 @@ impl Actor for Launcher {
             )
             .await;
         tokio::task::spawn(ctrl_c(my_handle.into_inner()));
+        rt.update_status(ServiceStatus::Running).await;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
@@ -253,7 +264,7 @@ impl Actor for Launcher {
                 }
             }
         }
-
+        rt.update_status(ServiceStatus::Stopped).await;
         Ok(())
     }
 }

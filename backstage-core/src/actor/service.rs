@@ -25,6 +25,24 @@ pub enum ServiceStatus {
     Stopped = 6,
 }
 
+impl std::fmt::Display for ServiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                ServiceStatus::Starting => "Starting",
+                ServiceStatus::Initializing => "Initializing",
+                ServiceStatus::Degraded => "Degraded",
+                ServiceStatus::Running => "Running",
+                ServiceStatus::Stopping => "Stopping",
+                ServiceStatus::Maintenance => "Maintenance",
+                ServiceStatus::Stopped => "Stopped",
+            }
+        )
+    }
+}
+
 impl Default for ServiceStatus {
     fn default() -> Self {
         Self::Starting
@@ -173,7 +191,7 @@ impl TreeItem for ServiceTree {
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
         write!(
             f,
-            "{}: {:?}, uptime: {}",
+            "{}: {}, uptime: {}",
             self.service.name,
             self.service.status,
             self.service.up_since.elapsed().unwrap().as_millis()

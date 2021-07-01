@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    actor::{build, Actor, ActorError, Builder, Sender, TokioChannel, TokioSender},
+    actor::{build, Actor, ActorError, Builder, EventDriven, Sender, Supervisor, TokioChannel, TokioSender},
     prelude::{DataWrapper, RegistryAccess},
     runtime::ActorScopedRuntime,
 };
@@ -73,13 +73,13 @@ where
     SE: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
     SE::Error: Send,
 {
-    type Event = WebsocketChildren;
     type Dependencies = ();
+    type Event = WebsocketChildren;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -171,9 +171,9 @@ impl Actor for Responder {
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where

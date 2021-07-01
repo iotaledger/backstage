@@ -135,6 +135,27 @@ where
     }
 }
 
+/// A type marker for receivers with no data
+pub struct NullReceiver;
+
+impl Stream for NullReceiver {
+    type Item = ();
+
+    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(None)
+    }
+}
+
+impl Channel<()> for () {
+    type Sender = ();
+
+    type Receiver = NullReceiver;
+
+    fn new() -> (Self::Sender, Self::Receiver) {
+        ((), NullReceiver)
+    }
+}
+
 #[async_trait]
 impl<E: 'static + Send + Sync> Sender<E> for () {
     async fn send(&mut self, _event: E) -> anyhow::Result<()> {
@@ -148,6 +169,13 @@ impl<E: 'static + Send + Sync> Sender<E> for () {
 
 #[async_trait]
 impl<E: Send> Receiver<E> for () {
+    async fn recv(&mut self) -> Option<E> {
+        None
+    }
+}
+
+#[async_trait]
+impl<E: Send> Receiver<E> for NullReceiver {
     async fn recv(&mut self) -> Option<E> {
         None
     }
