@@ -770,19 +770,21 @@ where
     where
         Sup::Children: From<PhantomData<A>>,
     {
-        let mut service = self.service().await;
-        self.scope.update_status(status).await;
-        let prev_status = service.status;
-        service.update_status(status);
-        if let Some(supervisor) = self.supervisor_handle() {
+        if self.supervisor_handle.is_some() {
+            let mut service = self.service().await;
+            self.scope.update_status(status).await;
+            let prev_status = service.status;
+            service.update_status(status);
             match Sup::status_change(StatusChange::new(PhantomData::<A>.into(), prev_status, service)) {
                 Ok(evt) => {
-                    supervisor.send(evt).await.ok();
+                    self.supervisor_handle.send(evt).await.ok();
                 }
                 Err(e) => {
                     log::error!("{}", e)
                 }
             }
+        } else {
+            self.scope.update_status(status).await;
         }
     }
 }
