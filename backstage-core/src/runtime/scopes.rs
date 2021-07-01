@@ -33,8 +33,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         log::debug!("Spawning with registry {}", std::any::type_name::<Reg>());
         let mut scope = Reg::instantiate("Root", None, None).await;
+        scope.update_status(ServiceStatus::Running).await;
         let res = f(&mut scope).await;
+        scope.update_status(ServiceStatus::Stopping).await;
         scope.join().await;
+        scope.update_status(ServiceStatus::Stopped).await;
         Ok(res)
     }
 
@@ -111,8 +114,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child::<String, _>(None, None, Some(abort_handle)).await;
+        child_scope.update_status(ServiceStatus::Running).await;
         let res = Abortable::new(f(&mut child_scope), abort_registration).await;
+        child_scope.update_status(ServiceStatus::Stopping).await;
         child_scope.join().await;
+        child_scope.update_status(ServiceStatus::Stopped).await;
         res.map_err(|_| anyhow::anyhow!("Aborted scope!"))
     }
 
