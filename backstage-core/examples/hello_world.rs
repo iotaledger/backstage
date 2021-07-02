@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use backstage::prelude::*;
+use backstage_macros::supervisor;
 use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -83,56 +84,11 @@ impl LauncherAPI {
     }
 }
 
+#[supervisor(Launcher, children(HelloWorld))]
 #[derive(Debug)]
 pub enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
-    Status(StatusChange<LauncherChildren>),
-    Report(Result<SuccessReport<LauncherChildrenStates>, ErrorReport<LauncherChildrenStates>>),
     Shutdown { using_ctrl_c: bool },
-}
-
-#[derive(Debug)]
-pub enum LauncherChildrenStates {
-    HelloWorld(HelloWorld),
-}
-
-// This will become part of a proc macro later
-impl From<HelloWorld> for LauncherChildrenStates {
-    fn from(h: HelloWorld) -> Self {
-        LauncherChildrenStates::HelloWorld(h)
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub enum LauncherChildren {
-    HelloWorld,
-}
-
-// This will become part of a proc macro later
-impl From<PhantomData<HelloWorld>> for LauncherChildren {
-    fn from(_: PhantomData<HelloWorld>) -> Self {
-        LauncherChildren::HelloWorld
-    }
-}
-
-// This might become part of a proc macro later?
-impl Supervisor for Launcher {
-    type ChildStates = LauncherChildrenStates;
-    type Children = LauncherChildren;
-
-    fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
-    where
-        Self: Sized,
-    {
-        Ok(LauncherEvents::Report(res))
-    }
-
-    fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
-    where
-        Self: Sized,
-    {
-        Ok(LauncherEvents::Status(status_change))
-    }
 }
 
 #[async_trait]
@@ -187,27 +143,17 @@ impl Actor for Launcher {
                     debug!("Exiting launcher");
                     break;
                 }
-                LauncherEvents::Report(res) => match res {
-                    Ok(s) => match s.state {
-                        LauncherChildrenStates::HelloWorld(h) => {
-                            info!("{} {} has shutdown!", h.name, h.num);
-                        }
-                    },
+                LauncherEvents::ReportExit(res) => match res {
+                    Ok(s) => {
+                        info!("{} {} has shutdown!", s.state.name, s.state.num);
+                    }
                     Err(e) => {
-                        match e.state {
-                            LauncherChildrenStates::HelloWorld(ref h) => {
-                                info!("{} {} has shutdown unexpectedly!", h.name, h.num);
-                            }
-                        }
+                        info!("{} {} has shutdown unexpectedly!", e.state.name, e.state.num);
                         match e.error.request() {
                             ActorRequest::Restart => {
-                                match e.state {
-                                    LauncherChildrenStates::HelloWorld(h) => {
-                                        info!("Restarting {} {}", h.name, h.num);
-                                        let i = h.num;
-                                        rt.spawn_into_pool_with_metric(h, i, my_handle.clone()).await;
-                                    }
-                                };
+                                info!("Restarting {} {}", e.state.name, e.state.num);
+                                let i = e.state.num;
+                                rt.spawn_into_pool_with_metric(e.state, i, my_handle.clone()).await;
                             }
                             ActorRequest::Reschedule(_) => todo!(),
                             ActorRequest::Finish => (),
@@ -215,12 +161,10 @@ impl Actor for Launcher {
                         }
                     }
                 },
-                LauncherEvents::Status(s) => match s.actor_type {
-                    LauncherChildren::HelloWorld => {
-                        info!("{} status changed ({} -> {})!", s.service.name, s.prev_status, s.service.status);
-                        debug!("\n{}", rt.service_tree().await);
-                    }
-                },
+                LauncherEvents::StatusChange(s) => {
+                    info!("{} status changed ({} -> {})!", s.service.name, s.prev_status, s.service.status);
+                    debug!("\n{}", rt.service_tree().await);
+                }
             }
         }
         rt.update_status(ServiceStatus::Stopped).await;

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, Supervisor, TokioChannel, TokioSender},
-    prelude::{DataWrapper, RegistryAccess},
+    prelude::{Act, DataWrapper, RegistryAccess},
     runtime::ActorScopedRuntime,
 };
 use futures::{FutureExt, SinkExt, StreamExt};
@@ -17,32 +17,29 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 
 /// A websocket which awaits connections on a specified listen
 /// address and forwards messages to its supervisor
-#[derive(Debug)]
-pub struct Websocket<H, E>
+pub struct Websocket<Sup>
 where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
-    E::Error: Send,
+    Sup: EventDriven + Supervisor,
+    Sup::Event: TryFrom<(SocketAddr, Message)>,
+    <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
     listen_address: SocketAddr,
     connections: HashMap<SocketAddr, TokioSender<Message>>,
-    supervisor_handle: H,
-    _data: PhantomData<E>,
+    supervisor_handle: Act<Sup>,
 }
 
 #[build]
-#[derive(Debug, Clone)]
-pub fn build<H, E>(listen_address: SocketAddr, supervisor_handle: H) -> Websocket<H, E>
+#[derive(Clone)]
+pub fn build<Sup>(listen_address: SocketAddr, supervisor_handle: Act<Sup>) -> Websocket<Sup>
 where
-    H: 'static + Sender<E> + Clone + Send + Sync,
-    E: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
-    E::Error: Send,
+    Sup: EventDriven + Supervisor,
+    Sup::Event: TryFrom<(SocketAddr, Message)>,
+    <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
     Websocket {
         listen_address,
         connections: Default::default(),
         supervisor_handle,
-        _data: PhantomData,
     }
 }
 
@@ -67,24 +64,24 @@ pub struct Connection {
 }
 
 #[async_trait]
-impl<SH, SE> Actor for Websocket<SH, SE>
+impl<Sup> Actor for Websocket<Sup>
 where
-    SH: 'static + Sender<SE> + Clone + Send + Sync,
-    SE: 'static + Send + Sync + TryFrom<(SocketAddr, Message)>,
-    SE::Error: Send,
+    Sup: EventDriven + Supervisor,
+    Sup::Event: TryFrom<(SocketAddr, Message)>,
+    <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
     type Dependencies = ();
     type Event = WebsocketChildren;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven + Supervisor>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup2>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup2::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await;
         let tcp_listener = {
@@ -108,11 +105,11 @@ where
                                         match msg {
                                             Message::Close(_) => {
                                                 responder_abort.abort();
-                                                rt.send_actor_event::<Websocket<SH, SE>>(WebsocketChildren::Close(peer)).await?;
+                                                rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer)).await?;
                                                 break;
                                             }
                                             msg => {
-                                                rt.send_actor_event::<Websocket<SH, SE>>(WebsocketChildren::Received(peer, msg))
+                                                rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Received(peer, msg))
                                                     .await?;
                                             }
                                         }
@@ -123,7 +120,7 @@ where
                                 .boxed()
                             })
                             .await;
-                            rt.send_actor_event::<Websocket<SH, SE>>(WebsocketChildren::Connection(Connection {
+                            rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Connection(Connection {
                                 peer,
                                 sender: responder_handle.into_inner(),
                             }))

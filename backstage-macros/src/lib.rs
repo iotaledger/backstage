@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::parse::Parse;
 
 #[proc_macro_attribute]
 pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -179,6 +180,154 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
             fn build(self) -> Self::Built #bounds
                 #block
 
+        }
+    };
+    res.into()
+}
+
+struct SupArgs(syn::Type, syn::punctuated::Punctuated<syn::Type, syn::Token![,]>);
+
+impl Parse for SupArgs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let actor_type = input.parse::<syn::Type>()?;
+        input.parse::<syn::Token!(,)>()?;
+        if input
+            .parse::<syn::Path>()?
+            .get_ident()
+            .expect("Should be literally 'children'")
+            .to_string()
+            != "children"
+        {
+            panic!("Specify 'children'");
+        }
+        let content;
+        syn::parenthesized!(content in input);
+        Ok(SupArgs(actor_type, content.parse_terminated(syn::Type::parse)?))
+    }
+}
+
+#[proc_macro_attribute]
+pub fn supervisor(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SupArgs(actor_path, children) = syn::parse_macro_input!(attr as SupArgs);
+
+    let mut ident_paths = Vec::new();
+
+    for child in children {
+        match child {
+            syn::Type::Path(p) => {
+                let id = p.path.get_ident().unwrap_or_else(|| &p.path.segments.last().unwrap().ident).clone();
+                ident_paths.push((id, p));
+            }
+            _ => panic!("Expected child type!"),
+        }
+    }
+
+    let (mut children, mut states, mut from_state_impls, mut from_child_impls) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (ident, path) in ident_paths.iter() {
+        children.push(quote! {
+            #ident
+        });
+        states.push(quote! {
+            #ident(#path)
+        });
+        from_state_impls.push(quote! {
+            impl From<#path> for ChildStates {
+                fn from(s: #path) -> Self {
+                    Self::#ident(s)
+                }
+            }
+        });
+        from_child_impls.push(quote! {
+            impl From<std::marker::PhantomData<#path>> for Children {
+                fn from(_: std::marker::PhantomData<#path>) -> Self {
+                    Self::#ident
+                }
+            }
+        });
+    }
+
+    let syn::ItemEnum {
+        attrs,
+        vis,
+        enum_token: _,
+        ident,
+        generics,
+        brace_token: _,
+        variants,
+    } = syn::parse_macro_input!(item as syn::ItemEnum);
+
+    let res = if children.len() > 1 {
+        quote! {
+            #(#attrs)*
+            #vis enum #ident #generics {
+                #[doc="Event variant used to report children actors exiting. Contains the actor's state and a request from the child."]
+                ReportExit(Result<SuccessReport<ChildStates>, ErrorReport<ChildStates>>),
+                #[doc="Event variant used to report children status changes."]
+                StatusChange(StatusChange<Children>),
+                #variants
+            }
+
+            #vis enum ChildStates {
+                #(#states),*
+            }
+
+            #[derive(Copy, Clone)]
+            #vis enum Children {
+                #(#children),*
+            }
+
+            #(#from_state_impls)*
+            #(#from_child_impls)*
+
+            impl Supervisor for #actor_path {
+                type ChildStates = ChildStates;
+                type Children = Children;
+
+                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+                where
+                    Self: Sized,
+                {
+                    Ok(#ident::ReportExit(res))
+                }
+
+                fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+                where
+                    Self: Sized,
+                {
+                    Ok(#ident::StatusChange(status_change))
+                }
+            }
+        }
+    } else {
+        let (child, state) = (children.remove(0), ident_paths.remove(0).1);
+        quote! {
+            #(#attrs)*
+            #vis enum #ident #generics {
+                #[doc="Event variant used to report child actor exiting. Contains the actor's state and a request from the child."]
+                ReportExit(Result<SuccessReport<#state>, ErrorReport<#state>>),
+                #[doc="Event variant used to report child status changes."]
+                StatusChange(StatusChange<std::marker::PhantomData<#child>>),
+                #variants
+            }
+
+            impl Supervisor for #actor_path {
+                type ChildStates = #state;
+                type Children = std::marker::PhantomData<#child>;
+
+                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+                where
+                    Self: Sized,
+                {
+                    Ok(#ident::ReportExit(res))
+                }
+
+                fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+                where
+                    Self: Sized,
+                {
+                    Ok(#ident::StatusChange(status_change))
+                }
+            }
         }
     };
     res.into()

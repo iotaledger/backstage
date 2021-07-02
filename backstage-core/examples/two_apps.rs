@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use backstage::{prefabs::websocket::*, prelude::*};
+use backstage_macros::supervisor;
 use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -196,6 +197,7 @@ impl LauncherAPI {
     }
 }
 
+#[supervisor(Launcher, children(HelloWorld, Howdy, Websocket<Launcher>))]
 enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
@@ -233,15 +235,16 @@ impl Actor for Launcher {
         let my_handle = rt.my_handle().await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor_unsupervised(howdy_builder.build()).await;
-        rt.spawn_actor_unsupervised(hello_world_builder.build()).await;
+        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await;
+        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await;
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         let (_, mut websocket_handle) = rt
-            .spawn_actor_unsupervised(
+            .spawn_actor(
                 WebsocketBuilder::new()
                     .listen_address(([127, 0, 0, 1], 8000).into())
                     .supervisor_handle(my_handle.clone())
                     .build(),
+                my_handle.clone(),
             )
             .await;
         tokio::task::spawn(ctrl_c(my_handle.into_inner()));
@@ -262,6 +265,19 @@ impl Actor for Launcher {
                     info!("Received websocket message: {:?}", msg);
                     websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await;
                 }
+                LauncherEvents::ReportExit(res) => match res {
+                    Ok(s) => {}
+                    Err(e) => match e.state {
+                        ChildStates::HelloWorld(h) => {}
+                        ChildStates::Howdy(h) => {}
+                        ChildStates::Websocket(w) => {}
+                    },
+                },
+                LauncherEvents::StatusChange(s) => match s.actor_type {
+                    Children::HelloWorld => {}
+                    Children::Howdy => {}
+                    Children::Websocket => {}
+                },
             }
         }
         rt.update_status(ServiceStatus::Stopped).await;
