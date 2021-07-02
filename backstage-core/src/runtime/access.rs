@@ -1,4 +1,4 @@
-use crate::actor::{EventDriven, Service, ServiceStatus, Supervisor, TokioChannel, TokioSender};
+use crate::actor::{EventDriven, Service, ServiceStatus, TokioChannel, TokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 use tokio::sync::Mutex;
@@ -175,7 +175,7 @@ where
     type Event = RegistryActorRequest;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,

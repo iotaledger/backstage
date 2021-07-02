@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use backstage::{prefabs::websocket::*, prelude::*};
-use backstage_macros::supervisor;
+use backstage_macros::supervise;
 use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -72,14 +72,15 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Running).await;
         let mut count = 0;
@@ -137,14 +138,15 @@ impl Actor for Howdy {
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await;
         let (counter, mut hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
@@ -197,7 +199,7 @@ impl LauncherAPI {
     }
 }
 
-#[supervisor(Launcher, children(HelloWorld, Howdy, Websocket<Launcher>))]
+#[supervise(HelloWorld, Howdy, Websocket<Launcher>)]
 enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
@@ -222,14 +224,15 @@ impl Actor for Launcher {
     type Dependencies = ();
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await;
         let my_handle = rt.my_handle().await;

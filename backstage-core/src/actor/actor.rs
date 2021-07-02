@@ -1,4 +1,4 @@
-use super::{ActorError, Channel, Dependencies, Supervisor};
+use super::{ActorError, Channel, Dependencies, SupervisorEvent};
 use crate::{
     prelude::RegistryAccess,
     runtime::{ActorScopedRuntime, RuntimeScope},
@@ -21,14 +21,15 @@ pub trait Actor {
     type Channel: Channel<Self::Event> + Send;
 
     /// The main function for the actor
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>;
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
 
     /// Get this actor's name
     fn name() -> Cow<'static, str> {

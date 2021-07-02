@@ -1,7 +1,7 @@
 use super::*;
 use crate::actor::{
     ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, EventDriven, Service, ServiceTree, ShutdownStream, StatusChange,
-    SuccessReport, Supervisor,
+    SuccessReport, SupervisorEvent,
 };
 use futures::{
     future::{AbortRegistration, Aborted},
@@ -356,9 +356,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Spawn a new actor with a supervisor handle
     pub async fn spawn_actor<A, Sup, I>(&mut self, mut actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
     where
-        A: 'static + Actor + Send + Sync + Into<Sup::ChildStates>,
-        Sup: 'static + EventDriven + Supervisor,
-        Sup::Children: From<PhantomData<A>>,
+        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
         if self.actor_event_handle::<A>().await.is_some() {
@@ -398,15 +399,16 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + Actor + Send + Sync,
     {
-        self.spawn_actor::<_, (), _>(actor, None).await
+        self.spawn_actor::<A, (), _>(actor, None).await
     }
 
     /// Spawn a new system with a supervisor handle
     pub async fn spawn_system<A, Sup, I>(&mut self, mut actor: A, state: A::State, supervisor_handle: I) -> (AbortHandle, Act<A>)
     where
-        A: 'static + System + Send + Sync + Into<Sup::ChildStates>,
-        Sup: 'static + EventDriven + Supervisor,
-        Sup::Children: From<PhantomData<A>>,
+        A: 'static + System + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
         if self.actor_event_handle::<A>().await.is_some() {
@@ -448,7 +450,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         A: 'static + System + Send + Sync,
     {
-        self.spawn_system::<_, (), _>(actor, state, None).await
+        self.spawn_system::<A, (), _>(actor, state, None).await
     }
 
     async fn common_spawn<
@@ -507,8 +509,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         state: T,
     ) -> anyhow::Result<()>
     where
-        Sup: EventDriven + Supervisor,
-        T: Into<Sup::ChildStates>,
+        Sup: EventDriven,
+        Sup::Event: SupervisorEvent,
+        T: Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     {
         let service = child_scope.service().await;
         child_scope.abort().await;
@@ -517,42 +520,33 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             match res.ok().map(Result::ok) {
                 Some(res) => match res {
                     Some(res) => match res {
-                        Ok(_) => match Sup::report_ok(SuccessReport::new(state.into(), service)) {
-                            Ok(evt) => supervisor.send(evt).await,
-                            Err(e) => {
-                                log::error!("{}", e);
-                                anyhow::bail!(e)
-                            }
-                        },
-                        Err(e) => match Sup::report_err(ErrorReport::new(state.into(), service, e)) {
-                            Ok(evt) => supervisor.send(evt).await,
-                            Err(e) => {
-                                log::error!("{}", e);
-                                anyhow::bail!(e)
-                            }
-                        },
-                    },
-                    // TODO: Maybe abort the children here?
-                    // or alternatively allow for restarting in the same scope?
-                    None => match Sup::report_err(ErrorReport::new(
-                        state.into(),
-                        service,
-                        ActorError::RuntimeError(ActorRequest::Restart),
-                    )) {
-                        Ok(evt) => supervisor.send(evt).await,
+                        Ok(_) => {
+                            supervisor
+                                .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
+                                .await
+                        }
+
                         Err(e) => {
-                            log::error!("{}", e);
-                            anyhow::bail!(e)
+                            supervisor
+                                .send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
+                                .await
                         }
                     },
-                },
-                None => match Sup::report_ok(SuccessReport::new(state.into(), service)) {
-                    Ok(evt) => supervisor.send(evt).await,
-                    Err(e) => {
-                        log::error!("{}", e);
-                        anyhow::bail!(e)
+                    None => {
+                        supervisor
+                            .send(Sup::Event::report_err(ErrorReport::new(
+                                state.into(),
+                                service,
+                                ActorError::RuntimeError(ActorRequest::Restart),
+                            )))
+                            .await
                     }
                 },
+                None => {
+                    supervisor
+                        .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
+                        .await
+                }
             }
         } else {
             match res {
@@ -576,9 +570,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub async fn spawn_pool<A, M, Sup, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
         A: 'static + Actor + Send + Sync,
-        Sup: EventDriven + Supervisor,
+        Sup: EventDriven,
+        Sup::Event: SupervisorEvent,
         M: 'static + Hash + Clone + Eq + Send + Sync,
-        Sup: EventDriven + Supervisor,
         I: Into<Option<Act<Sup>>>,
         for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, M, Reg, Sup>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
@@ -606,7 +600,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub async fn spawn_basic_pool<A, Sup, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
         A: 'static + Actor + Send + Sync,
-        Sup: EventDriven + Supervisor,
+        Sup: EventDriven,
+        Sup::Event: SupervisorEvent,
         I: Into<Option<Act<Sup>>>,
         for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, (), Reg, Sup>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
@@ -621,9 +616,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         supervisor_handle: I,
     ) -> (AbortHandle, Act<A>)
     where
-        A: 'static + Actor + Send + Sync + Into<Sup::ChildStates>,
-        Sup: 'static + EventDriven + Supervisor,
-        Sup::Children: From<PhantomData<A>>,
+        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         M: 'static + Hash + Eq + Clone + Send + Sync,
         I: Into<Option<Act<Sup>>>,
     {
@@ -670,9 +666,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Spawn a new actor into a pool with a default metric, creating a pool if needed
     pub async fn spawn_into_pool_with_default_metric<A, M, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
     where
-        A: 'static + Actor + Send + Sync + Into<Sup::ChildStates>,
-        Sup: 'static + EventDriven + Supervisor,
-        Sup::Children: From<PhantomData<A>>,
+        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         M: 'static + Hash + Eq + Clone + Default + Send + Sync,
         I: Into<Option<Act<Sup>>>,
     {
@@ -682,9 +679,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Spawn a new actor into a pool with no metrics, creating a pool if needed
     pub async fn spawn_into_pool<A, Sup, I>(&mut self, mut actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
     where
-        A: 'static + Actor + Send + Sync + Into<Sup::ChildStates>,
-        Sup: 'static + EventDriven + Supervisor,
-        Sup::Children: From<PhantomData<A>>,
+        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
         let supervisor_handle = supervisor_handle.into();
@@ -724,7 +722,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 pub struct ActorScopedRuntime<'a, A, Reg, Sup>
 where
     A: Actor,
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     scope: &'a mut RuntimeScope<Reg>,
@@ -735,7 +733,7 @@ where
 impl<'a, A, Reg, Sup> ActorScopedRuntime<'a, A, Reg, Sup>
 where
     A: Actor,
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     pub(crate) fn new(
@@ -770,25 +768,33 @@ where
     pub fn supervisor_handle(&mut self) -> &mut Option<Act<Sup>> {
         &mut self.supervisor_handle
     }
+}
 
+impl<'a, A, Reg, Sup> ActorScopedRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
     /// Update this scope's service status
     pub async fn update_status(&mut self, status: ServiceStatus)
     where
-        Sup::Children: From<PhantomData<A>>,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
     {
         if self.supervisor_handle.is_some() {
             let mut service = self.service().await;
             self.scope.update_status(status).await;
             let prev_status = service.status;
             service.update_status(status);
-            match Sup::status_change(StatusChange::new(PhantomData::<A>.into(), prev_status, service)) {
-                Ok(evt) => {
-                    self.supervisor_handle.send(evt).await.ok();
-                }
-                Err(e) => {
-                    log::error!("{}", e)
-                }
-            }
+            self.supervisor_handle
+                .send(Sup::Event::status_change(StatusChange::new(
+                    PhantomData::<A>.into(),
+                    prev_status,
+                    service,
+                )))
+                .await
+                .ok();
         } else {
             self.scope.update_status(status).await;
         }
@@ -798,7 +804,8 @@ where
 impl<'a, A, Reg, Sup> Deref for ActorScopedRuntime<'a, A, Reg, Sup>
 where
     A: Actor,
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     type Target = RuntimeScope<Reg>;
@@ -811,7 +818,8 @@ where
 impl<'a, A, Reg, Sup> DerefMut for ActorScopedRuntime<'a, A, Reg, Sup>
 where
     A: Actor,
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -824,7 +832,8 @@ where
     A: Actor,
     M: Hash + Clone,
     Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
 {
     scope: &'a mut RuntimeScope<Reg>,
     pool: &'a mut ActorPool<A, M>,
@@ -833,11 +842,12 @@ where
 
 impl<'a, A, M, Reg, Sup> ScopedActorPool<'a, A, M, Reg, Sup>
 where
-    A: Actor + Into<Sup::ChildStates>,
+    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     M: Hash + Eq + Clone,
     Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: 'static + EventDriven + Supervisor,
-    Sup::Children: From<PhantomData<A>>,
+    Sup: 'static + EventDriven,
+    Sup::Event: SupervisorEvent,
+    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn_with_metric(&mut self, mut actor: A, metric: M) -> (AbortHandle, Act<A>)
@@ -880,11 +890,12 @@ where
 
 impl<'a, A, M, Reg, Sup> ScopedActorPool<'a, A, M, Reg, Sup>
 where
-    A: Actor + Into<Sup::ChildStates>,
+    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     M: Hash + Eq + Clone + Default,
     Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: 'static + EventDriven + Supervisor,
-    Sup::Children: From<PhantomData<A>>,
+    Sup: 'static + EventDriven,
+    Sup::Event: SupervisorEvent,
+    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn_default_metric(&mut self, actor: A) -> (AbortHandle, Act<A>)
@@ -897,10 +908,11 @@ where
 
 impl<'a, A, Reg, Sup> ScopedActorPool<'a, A, (), Reg, Sup>
 where
-    A: Actor + Into<Sup::ChildStates>,
+    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: 'static + EventDriven + Supervisor,
-    Sup::Children: From<PhantomData<A>>,
+    Sup: 'static + EventDriven,
+    Sup::Event: SupervisorEvent,
+    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, Act<A>)

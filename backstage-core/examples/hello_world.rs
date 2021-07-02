@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use backstage::prelude::*;
-use backstage_macros::supervisor;
+use backstage_macros::supervise;
 use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
@@ -46,14 +46,15 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Running).await;
         while let Some(evt) = rt.next_event().await {
@@ -84,7 +85,7 @@ impl LauncherAPI {
     }
 }
 
-#[supervisor(Launcher, children(HelloWorld))]
+#[supervise(HelloWorld)]
 #[derive(Debug)]
 pub enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
@@ -97,14 +98,15 @@ impl Actor for Launcher {
     type Event = LauncherEvents;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await;
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());

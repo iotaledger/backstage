@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, Supervisor, TokioChannel, TokioSender},
+    actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, TokioChannel, TokioSender},
     prelude::{Act, DataWrapper, RegistryAccess},
     runtime::ActorScopedRuntime,
 };
@@ -19,7 +19,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
 /// address and forwards messages to its supervisor
 pub struct Websocket<Sup>
 where
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
     Sup::Event: TryFrom<(SocketAddr, Message)>,
     <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
@@ -32,7 +32,7 @@ where
 #[derive(Clone)]
 pub fn build<Sup>(listen_address: SocketAddr, supervisor_handle: Act<Sup>) -> Websocket<Sup>
 where
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
     Sup::Event: TryFrom<(SocketAddr, Message)>,
     <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
@@ -66,7 +66,7 @@ pub struct Connection {
 #[async_trait]
 impl<Sup> Actor for Websocket<Sup>
 where
-    Sup: EventDriven + Supervisor,
+    Sup: EventDriven,
     Sup::Event: TryFrom<(SocketAddr, Message)>,
     <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
@@ -74,14 +74,15 @@ where
     type Event = WebsocketChildren;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup2>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup2::Children: From<PhantomData<Self>>,
+        Sup2::Event: SupervisorEvent,
+        <Sup2::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await;
         let tcp_listener = {
@@ -173,14 +174,15 @@ impl Actor for Responder {
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven + Supervisor>(
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
         Self: Sized,
-        Sup::Children: From<PhantomData<Self>>,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Running).await;
         while let Some(msg) = rt.next_event().await {

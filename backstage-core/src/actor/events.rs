@@ -44,29 +44,29 @@ impl<T> StatusChange<T> {
 
 /// Specifies the types that children of this supervisor will be converted to
 /// upon reporting an exit or a status change.
-pub trait Supervisor: EventDriven {
+pub trait SupervisorEvent {
     type ChildStates: 'static + Send + Sync;
     type Children: 'static + Send + Sync;
 
-    fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+    fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> Self
     where
         Self: Sized;
 
-    fn report_ok(success: SuccessReport<Self::ChildStates>) -> anyhow::Result<Self::Event>
+    fn report_ok(success: SuccessReport<Self::ChildStates>) -> Self
     where
         Self: Sized,
     {
         Self::report(Ok(success))
     }
 
-    fn report_err(err: ErrorReport<Self::ChildStates>) -> anyhow::Result<Self::Event>
+    fn report_err(err: ErrorReport<Self::ChildStates>) -> Self
     where
         Self: Sized,
     {
         Self::report(Err(err))
     }
 
-    fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+    fn status_change(status_change: StatusChange<Self::Children>) -> Self
     where
         Self: Sized;
 }
@@ -80,23 +80,21 @@ impl EventDriven for () {
 pub struct NullChildStates;
 pub struct NullChildren;
 
-impl Supervisor for () {
+impl SupervisorEvent for () {
     type ChildStates = NullChildStates;
 
     type Children = NullChildren;
 
-    fn report(_res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+    fn report(_res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> Self
     where
         Self: Sized,
     {
-        Ok(())
     }
 
-    fn status_change(_status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+    fn status_change(_status_change: StatusChange<Self::Children>) -> Self
     where
         Self: Sized,
     {
-        Ok(())
     }
 }
 

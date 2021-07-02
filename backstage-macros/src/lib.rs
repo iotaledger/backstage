@@ -185,30 +185,17 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
     res.into()
 }
 
-struct SupArgs(syn::Type, syn::punctuated::Punctuated<syn::Type, syn::Token![,]>);
+struct SupArgs(syn::punctuated::Punctuated<syn::Type, syn::Token![,]>);
 
 impl Parse for SupArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let actor_type = input.parse::<syn::Type>()?;
-        input.parse::<syn::Token!(,)>()?;
-        if input
-            .parse::<syn::Path>()?
-            .get_ident()
-            .expect("Should be literally 'children'")
-            .to_string()
-            != "children"
-        {
-            panic!("Specify 'children'");
-        }
-        let content;
-        syn::parenthesized!(content in input);
-        Ok(SupArgs(actor_type, content.parse_terminated(syn::Type::parse)?))
+        Ok(SupArgs(syn::punctuated::Punctuated::parse_terminated(input)?))
     }
 }
 
 #[proc_macro_attribute]
-pub fn supervisor(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let SupArgs(actor_path, children) = syn::parse_macro_input!(attr as SupArgs);
+pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SupArgs(children) = syn::parse_macro_input!(attr as SupArgs);
 
     let mut ident_paths = Vec::new();
 
@@ -279,22 +266,22 @@ pub fn supervisor(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#from_state_impls)*
             #(#from_child_impls)*
 
-            impl Supervisor for #actor_path {
+            impl SupervisorEvent for #ident {
                 type ChildStates = ChildStates;
                 type Children = Children;
 
-                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> Self
                 where
                     Self: Sized,
                 {
-                    Ok(#ident::ReportExit(res))
+                    Self::ReportExit(res)
                 }
 
-                fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+                fn status_change(status_change: StatusChange<Self::Children>) -> Self
                 where
                     Self: Sized,
                 {
-                    Ok(#ident::StatusChange(status_change))
+                    Self::StatusChange(status_change)
                 }
             }
         }
@@ -310,22 +297,22 @@ pub fn supervisor(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #variants
             }
 
-            impl Supervisor for #actor_path {
+            impl SupervisorEvent for #ident {
                 type ChildStates = #state;
                 type Children = std::marker::PhantomData<#child>;
 
-                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> anyhow::Result<Self::Event>
+                fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> Self
                 where
                     Self: Sized,
                 {
-                    Ok(#ident::ReportExit(res))
+                    Self::ReportExit(res)
                 }
 
-                fn status_change(status_change: StatusChange<Self::Children>) -> anyhow::Result<Self::Event>
+                fn status_change(status_change: StatusChange<Self::Children>) -> Self
                 where
                     Self: Sized,
                 {
-                    Ok(#ident::StatusChange(status_change))
+                    Self::StatusChange(status_change)
                 }
             }
         }
