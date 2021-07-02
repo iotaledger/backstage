@@ -1,5 +1,5 @@
 pub use actor::*;
-pub use backstage_macros::build;
+pub use backstage_macros::{build, supervise};
 pub use builder::*;
 pub use channel::*;
 pub use dependencies::*;
