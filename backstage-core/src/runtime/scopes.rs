@@ -467,7 +467,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             let deps = match dep_status {
                 DepStatus::Ready(deps) => deps,
                 DepStatus::Waiting(mut recv) => {
-                    log::info!(
+                    log::debug!(
                         "{} waiting for dependencies {}",
                         std::any::type_name::<T>(),
                         std::any::type_name::<Deps>()
@@ -475,7 +475,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     if let Err(_) = recv.recv().await {
                         panic!("Failed to acquire dependencies for {}", std::any::type_name::<T>());
                     }
-                    log::info!("{} acquired dependencies!", std::any::type_name::<T>());
+                    log::debug!("{} acquired dependencies!", std::any::type_name::<T>());
                     Deps::instantiate(&mut child_scope)
                         .await
                         .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<T>(), e))

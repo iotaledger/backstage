@@ -308,7 +308,7 @@ impl Registry {
                 Propagation::Remove => {
                     scope.data.remove(&data_type);
                     if scope.dependencies.contains(&data_type) {
-                        log::info!(
+                        log::debug!(
                             "Aborting scope {} ({}) due to a removed critical dependency!",
                             scope.id,
                             scope.service.name
