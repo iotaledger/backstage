@@ -33,11 +33,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         log::debug!("Spawning with registry {}", std::any::type_name::<Reg>());
         let mut scope = Reg::instantiate("Root", None, None).await;
-        scope.update_status(ServiceStatus::Running).await;
+        scope.update_status(ServiceStatus::Running).await.ok();
         let res = f(&mut scope).await;
-        scope.update_status(ServiceStatus::Stopping).await;
+        scope.update_status(ServiceStatus::Stopping).await.ok();
         scope.join().await;
-        scope.update_status(ServiceStatus::Stopped).await;
         Ok(res)
     }
 
@@ -114,11 +113,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child::<String, _>(None, None, Some(abort_handle)).await;
-        child_scope.update_status(ServiceStatus::Running).await;
+        child_scope.update_status(ServiceStatus::Running).await.ok();
         let res = Abortable::new(f(&mut child_scope), abort_registration).await;
-        child_scope.update_status(ServiceStatus::Stopping).await;
+        child_scope.update_status(ServiceStatus::Stopping).await.ok();
         child_scope.join().await;
-        child_scope.update_status(ServiceStatus::Stopped).await;
         res.map_err(|_| anyhow::anyhow!("Aborted scope!"))
     }
 
@@ -182,11 +180,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Update this scope's service status
-    pub async fn update_status(&mut self, status: ServiceStatus) {
-        self.registry
-            .update_status(&self.scope_id, status)
-            .await
-            .expect(&format!("Scope {} is missing...", self.scope_id))
+    pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()> {
+        self.registry.update_status(&self.scope_id, status).await
     }
 
     /// Await the tasks in this runtime's scope
@@ -778,13 +773,12 @@ where
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     /// Update this scope's service status
-    pub async fn update_status(&mut self, status: ServiceStatus)
+    pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()>
     where
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
     {
         if self.supervisor_handle.is_some() {
             let mut service = self.service().await;
-            self.scope.update_status(status).await;
             let prev_status = service.status;
             service.update_status(status);
             self.supervisor_handle
@@ -795,9 +789,8 @@ where
                 )))
                 .await
                 .ok();
-        } else {
-            self.scope.update_status(status).await;
         }
+        self.scope.update_status(status).await
     }
 }
 
