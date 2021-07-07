@@ -72,6 +72,13 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
+    async fn init<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+        &mut self,
+        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+    ) -> Result<(), ActorError> {
+        Ok(())
+    }
+
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
@@ -82,7 +89,7 @@ impl Actor for HelloWorld {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Running).await;
+        rt.update_status(ServiceStatus::Running).await.ok();
         let mut count = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -96,7 +103,7 @@ impl Actor for HelloWorld {
                 }
             }
         }
-        rt.update_status(ServiceStatus::Stopped).await;
+        rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 }
@@ -138,6 +145,13 @@ impl Actor for Howdy {
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
+    async fn init<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+        &mut self,
+        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+    ) -> Result<(), ActorError> {
+        Ok(())
+    }
+
     async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
@@ -148,9 +162,8 @@ impl Actor for Howdy {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Initializing).await;
         let (counter, mut hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
-        rt.update_status(ServiceStatus::Running).await;
+        rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HowdyEvent::Print(s) => {
@@ -164,12 +177,12 @@ impl Actor for Howdy {
                 }
             }
         }
-        rt.update_status(ServiceStatus::Stopping).await;
+        rt.update_status(ServiceStatus::Stopping).await.ok();
         for s in 0..4 {
             debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        rt.update_status(ServiceStatus::Stopped).await;
+        rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 }
@@ -224,6 +237,34 @@ impl Actor for Launcher {
     type Dependencies = ();
     type Channel = TokioChannel<Self::Event>;
 
+    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+        &mut self,
+        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+    ) -> Result<(), ActorError>
+    where
+        Self: Sized,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
+    {
+        rt.update_status(ServiceStatus::Initializing).await.ok();
+        let my_handle = rt.my_handle().await;
+        let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
+        let howdy_builder = HowdyBuilder::new();
+        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await?;
+        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await?;
+        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
+        rt.spawn_actor(
+            WebsocketBuilder::new()
+                .listen_address(([127, 0, 0, 1], 8000).into())
+                .supervisor_handle(my_handle.clone())
+                .build(),
+            my_handle.clone(),
+        )
+        .await?;
+        tokio::task::spawn(ctrl_c(my_handle.into_inner()));
+        Ok(())
+    }
+
     async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
@@ -234,24 +275,11 @@ impl Actor for Launcher {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Initializing).await;
-        let my_handle = rt.my_handle().await;
-        let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
-        let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await;
-        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await;
-        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
-        let (_, mut websocket_handle) = rt
-            .spawn_actor(
-                WebsocketBuilder::new()
-                    .listen_address(([127, 0, 0, 1], 8000).into())
-                    .supervisor_handle(my_handle.clone())
-                    .build(),
-                my_handle.clone(),
-            )
-            .await;
-        tokio::task::spawn(ctrl_c(my_handle.into_inner()));
-        rt.update_status(ServiceStatus::Running).await;
+        rt.update_status(ServiceStatus::Running).await.ok();
+        let mut websocket_handle = rt
+            .actor_event_handle::<Websocket<Self>>()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No websocket!"))?;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
@@ -283,7 +311,7 @@ impl Actor for Launcher {
                 },
             }
         }
-        rt.update_status(ServiceStatus::Stopped).await;
+        rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 }
@@ -309,7 +337,9 @@ async fn main() {
 async fn startup() -> anyhow::Result<()> {
     RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
-            scope.spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI))).await;
+            scope
+                .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))
+                .await?;
             scope
                 .spawn_task(|rt| {
                     async move {
@@ -331,6 +361,7 @@ async fn startup() -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_secs(1)).await;
             //scope.print_root().await;
             log::info!("Service Tree:\n{}", scope.service_tree().await);
+            Ok(())
         }
         .boxed()
     })

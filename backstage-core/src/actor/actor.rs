@@ -1,8 +1,5 @@
 use super::{ActorError, Channel, Dependencies, SupervisorEvent};
-use crate::{
-    prelude::RegistryAccess,
-    runtime::{ActorScopedRuntime, RuntimeScope},
-};
+use crate::runtime::{ActorInitRuntime, ActorScopedRuntime, RegistryAccess, RuntimeScope};
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable},
@@ -19,6 +16,23 @@ pub trait Actor {
     type Event: 'static + Send + Sync;
     /// The type of channel this actor will use to receive events
     type Channel: Channel<Self::Event> + Send;
+
+    /// Used to initialize the actor. Any children spawned here will be initialized
+    /// before this actor's run method is called so they are guaranteed to be
+    /// ready to use depending on their requirements. Dependencies are not
+    /// handled until after this method is called, so they are not guaranteed
+    /// to exist yet. If a dependency must exist to complete initialization,
+    /// it can be linked with the runtime, but BEWARE that any dependencies which are
+    /// spawned by the parents of this actor will not be available if they are
+    /// spawned after this actor and linking them will therefore deadlock the thread.
+    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+        &mut self,
+        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+    ) -> Result<(), ActorError>
+    where
+        Self: Sized,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
 
     /// The main function for the actor
     async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
@@ -54,7 +68,7 @@ pub trait Actor {
             let mut actor_rt = ActorScopedRuntime::<'_, _, _, ()>::new(&mut scope, receiver, oneshot_recv, None);
             Abortable::new(AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
         };
-        RuntimeScope::handle_res::<_, ()>(res, &mut scope, None, self).await
+        RuntimeScope::handle_run_res::<_, ()>(res, &mut scope, None, self).await
     }
 }
 

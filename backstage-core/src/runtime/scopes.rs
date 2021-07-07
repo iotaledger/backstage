@@ -3,10 +3,7 @@ use crate::actor::{
     ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, EventDriven, Service, ServiceTree, ShutdownStream, StatusChange,
     SuccessReport, SupervisorEvent,
 };
-use futures::{
-    future::{AbortRegistration, Aborted},
-    Future, FutureExt,
-};
+use futures::{future::Aborted, FutureExt};
 use std::{hash::Hash, panic::AssertUnwindSafe};
 use tokio::sync::broadcast;
 
@@ -29,7 +26,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub async fn launch<F, O>(f: F) -> anyhow::Result<O>
     where
         O: Send + Sync,
-        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, O>,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, anyhow::Result<O>>,
     {
         log::debug!("Spawning with registry {}", std::any::type_name::<Reg>());
         let mut scope = Reg::instantiate("Root", None, None).await;
@@ -37,7 +34,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let res = f(&mut scope).await;
         scope.update_status(ServiceStatus::Stopping).await.ok();
         scope.join().await;
-        Ok(res)
+        res
     }
 
     pub(crate) async fn new<P: Into<Option<usize>> + Send, S: Into<String>, O: Into<Option<S>>>(
@@ -349,7 +346,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new actor with a supervisor handle
-    pub async fn spawn_actor<A, Sup, I>(&mut self, mut actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
+    pub async fn spawn_actor<A, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -367,30 +364,13 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             );
         }
         let supervisor_handle = supervisor_handle.into();
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.add_data(sender.clone()).await;
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        self.common_spawn::<A, _, Act<A>, _, _>(
-            child_scope,
-            oneshot_recv,
-            abort_registration,
-            |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                let res = {
-                    let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                };
-                child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
-                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-            },
-        )
-        .await;
-        (abort_handle, Act(sender))
+
+        self.common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, true, |_| async {}.boxed())
+            .await
     }
 
     /// Spawn a new actor with no supervisor
-    pub async fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> (AbortHandle, Act<A>)
+    pub async fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Actor + Send + Sync,
     {
@@ -398,7 +378,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<A, Sup, I>(&mut self, mut actor: A, state: A::State, supervisor_handle: I) -> (AbortHandle, Act<A>)
+    pub async fn spawn_system<A, Sup, I>(
+        &mut self,
+        actor: A,
+        state: A::State,
+        supervisor_handle: I,
+    ) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + System + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -416,73 +401,75 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             );
         }
         let supervisor_handle = supervisor_handle.into();
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.add_data(sender.clone()).await;
         self.add_data(state).await;
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        self.common_spawn::<A, _, Sys<A>, _, _>(
-            child_scope,
-            oneshot_recv,
-            abort_registration,
-            |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                let res = {
-                    let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                };
-                child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
-                child_scope.remove_data::<A::State>().await;
-                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-            },
-        )
-        .await;
-        (abort_handle, Act(sender))
+        self.common_spawn::<_, _, Sys<A>, _>(actor, supervisor_handle, true, |scope| {
+            async move {
+                scope.remove_data::<A::State>().await;
+            }
+            .boxed()
+        })
+        .await
     }
 
     /// Spawn a new system with no supervisor
-    pub async fn spawn_system_unsupervised<A>(&mut self, actor: A, state: A::State) -> (AbortHandle, Act<A>)
+    pub async fn spawn_system_unsupervised<A>(&mut self, actor: A, state: A::State) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + System + Send + Sync,
     {
         self.spawn_system::<A, (), _>(actor, state, None).await
     }
 
-    async fn common_spawn<
-        T,
-        Deps: 'static + Dependencies + Send + Sync,
-        B: 'static + Send + Sync,
-        F: 'static + Send + Sync + FnOnce(RuntimeScope<Reg>, Deps, oneshot::Receiver<()>, AbortRegistration) -> O,
-        O: Send + Future<Output = anyhow::Result<()>>,
-    >(
+    async fn common_spawn<A, Sup, B, F>(
         &mut self,
-        mut child_scope: RuntimeScope<Reg>,
-        oneshot_recv: oneshot::Receiver<()>,
-        abort_registration: AbortRegistration,
-        run_fn: F,
-    ) {
-        log::debug!("Spawning {}", std::any::type_name::<T>());
-        let dep_status = Deps::request(&mut child_scope).await;
+        mut actor: A,
+        supervisor_handle: Option<Act<Sup>>,
+        sender_in_parent: bool,
+        cleanup_fn: F,
+    ) -> anyhow::Result<(AbortHandle, Act<A>)>
+    where
+        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
+        B: 'static + Send + Sync,
+        for<'b> F: 'static + Send + Sync + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, ()>,
+    {
+        log::debug!("Spawning {}", std::any::type_name::<A>());
+        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
+        if sender_in_parent {
+            self.add_data(sender.clone()).await;
+        } else {
+            child_scope.add_data(sender.clone()).await;
+        }
+        let res = {
+            let mut actor_rt = ActorInitRuntime::new(&mut child_scope, supervisor_handle.clone());
+            AssertUnwindSafe(actor.init(&mut actor_rt)).catch_unwind().await
+        };
+        let mut actor = Self::handle_init_res(res, &mut child_scope, supervisor_handle.clone(), actor).await?;
+        let dep_status = A::Dependencies::request(&mut child_scope).await;
         let child_task = tokio::spawn(async move {
             let deps = match dep_status {
                 DepStatus::Ready(deps) => deps,
                 DepStatus::Waiting(mut recv) => {
                     log::debug!(
                         "{} waiting for dependencies {}",
-                        std::any::type_name::<T>(),
-                        std::any::type_name::<Deps>()
+                        std::any::type_name::<A>(),
+                        std::any::type_name::<A::Dependencies>()
                     );
                     if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<T>());
+                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<A>());
                     }
-                    log::debug!("{} acquired dependencies!", std::any::type_name::<T>());
-                    Deps::instantiate(&mut child_scope)
+                    log::debug!("{} acquired dependencies!", std::any::type_name::<A>());
+                    A::Dependencies::instantiate(&mut child_scope)
                         .await
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<T>(), e))
+                        .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<A>(), e))
                         .unwrap()
                 }
             };
-            Deps::link(&mut child_scope).await;
+            A::Dependencies::link(&mut child_scope).await;
             if let Some(broadcaster) = child_scope
                 .registry
                 .get_data::<broadcast::Sender<PhantomData<B>>>(&child_scope.scope_id)
@@ -492,12 +479,78 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 broadcaster.send(PhantomData).ok();
             }
 
-            run_fn(child_scope, deps, oneshot_recv, abort_registration).await
+            let res = {
+                let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
+                Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
+            };
+            cleanup_fn(&mut child_scope).await;
+            child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
+            Self::handle_run_res(res, &mut child_scope, supervisor_handle, actor).await
         });
         self.join_handles_mut().push(child_task);
+        Ok((abort_handle, Act(sender)))
     }
 
-    pub(crate) async fn handle_res<T, Sup>(
+    pub(crate) async fn handle_init_res<T, Sup>(
+        res: std::thread::Result<Result<(), ActorError>>,
+        child_scope: &mut RuntimeScope<Reg>,
+        supervisor_handle: Option<Act<Sup>>,
+        state: T,
+    ) -> anyhow::Result<T>
+    where
+        Sup: EventDriven,
+        Sup::Event: SupervisorEvent,
+        T: Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+    {
+        let service = child_scope.service().await;
+        if let Some(mut supervisor) = supervisor_handle {
+            match res.ok() {
+                Some(res) => match res {
+                    Ok(_) => Ok(state),
+                    Err(e) => {
+                        supervisor
+                            .send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
+                            .await
+                            .ok();
+                        child_scope.abort().await;
+                        child_scope.join().await;
+                        anyhow::bail!("Actor Error!");
+                    }
+                },
+                None => {
+                    supervisor
+                        .send(Sup::Event::report_err(ErrorReport::new(
+                            state.into(),
+                            service,
+                            ActorError::RuntimeError(ActorRequest::Restart),
+                        )))
+                        .await
+                        .ok();
+                    child_scope.abort().await;
+                    child_scope.join().await;
+                    anyhow::bail!("Panicked!");
+                }
+            }
+        } else {
+            match res {
+                Ok(res) => match res {
+                    Ok(_) => Ok(state),
+                    Err(e) => {
+                        child_scope.abort().await;
+                        child_scope.join().await;
+                        anyhow::bail!(e)
+                    }
+                },
+                Err(_) => {
+                    child_scope.abort().await;
+                    child_scope.join().await;
+                    anyhow::bail!("Panicked!")
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn handle_run_res<T, Sup>(
         res: Result<std::thread::Result<Result<(), ActorError>>, Aborted>,
         child_scope: &mut RuntimeScope<Reg>,
         supervisor_handle: Option<Act<Sup>>,
@@ -606,10 +659,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Spawn a new actor into a pool, creating a pool if needed
     pub async fn spawn_into_pool_with_metric<A, M, Sup, I>(
         &mut self,
-        mut actor: A,
+        actor: A,
         metric: M,
         supervisor_handle: I,
-    ) -> (AbortHandle, Act<A>)
+    ) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -636,30 +689,19 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             );
         }
         let supervisor_handle = supervisor_handle.into();
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        child_scope.add_data(sender.clone()).await;
-        self.common_spawn::<A, _, Act<A>, _, _>(
-            child_scope,
-            oneshot_recv,
-            abort_registration,
-            |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                let res = {
-                    let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                };
-                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-            },
-        )
-        .await;
-        pool.write().await.push(Act(sender.clone()), metric);
-        (abort_handle, Act(sender))
+        let (abort_handle, sender) = self
+            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .await?;
+        pool.write().await.push(sender.clone(), metric);
+        Ok((abort_handle, sender))
     }
 
     /// Spawn a new actor into a pool with a default metric, creating a pool if needed
-    pub async fn spawn_into_pool_with_default_metric<A, M, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
+    pub async fn spawn_into_pool_with_default_metric<A, M, Sup, I>(
+        &mut self,
+        actor: A,
+        supervisor_handle: I,
+    ) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -672,7 +714,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new actor into a pool with no metrics, creating a pool if needed
-    pub async fn spawn_into_pool<A, Sup, I>(&mut self, mut actor: A, supervisor_handle: I) -> (AbortHandle, Act<A>)
+    pub async fn spawn_into_pool<A, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -681,35 +723,117 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         I: Into<Option<Act<Sup>>>,
     {
         let supervisor_handle = supervisor_handle.into();
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        child_scope.add_data(sender.clone()).await;
-        self.common_spawn::<A, _, Act<A>, _, _>(
-            child_scope,
-            oneshot_recv,
-            abort_registration,
-            |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                let res = {
-                    let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                    Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                };
-                Self::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-            },
-        )
-        .await;
+        let (abort_handle, sender) = self
+            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .await?;
         match self.pool::<A>().await {
             Some(res) => {
-                res.write().await.push_no_metric(Act(sender.clone()));
+                res.write().await.push_no_metric(sender.clone());
             }
             None => {
                 let mut pool = ActorPool::<A, ()>::default();
-                pool.push_no_metric(Act(sender.clone()));
+                pool.push_no_metric(sender.clone());
                 self.add_data(Arc::new(RwLock::new(pool))).await;
             }
         };
-        (abort_handle, Act(sender))
+        Ok((abort_handle, sender))
+    }
+}
+
+/// A runtime for an actor to use when initializing
+pub struct ActorInitRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    scope: &'a mut RuntimeScope<Reg>,
+    supervisor_handle: Option<Act<Sup>>,
+    _actor: PhantomData<A>,
+}
+
+impl<'a, A, Reg, Sup> ActorInitRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    pub(crate) fn new(scope: &'a mut RuntimeScope<Reg>, supervisor_handle: Option<Act<Sup>>) -> Self {
+        Self {
+            scope,
+            supervisor_handle,
+            _actor: PhantomData,
+        }
+    }
+
+    /// Get this actors's handle
+    pub async fn my_handle(&mut self) -> Act<A> {
+        self.scope.actor_event_handle::<A>().await.unwrap()
+    }
+
+    /// Get the runtime's service
+    pub async fn service(&mut self) -> Service {
+        self.scope.service().await
+    }
+
+    /// Get this actor's supervisor handle
+    pub fn supervisor_handle(&mut self) -> &mut Option<Act<Sup>> {
+        &mut self.supervisor_handle
+    }
+}
+
+impl<'a, A, Reg, Sup> ActorInitRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    /// Update this scope's service status
+    pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()>
+    where
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
+    {
+        if self.supervisor_handle.is_some() {
+            let mut service = self.service().await;
+            let prev_status = service.status;
+            service.update_status(status);
+            self.supervisor_handle
+                .send(Sup::Event::status_change(StatusChange::new(
+                    PhantomData::<A>.into(),
+                    prev_status,
+                    service,
+                )))
+                .await
+                .ok();
+        }
+        self.scope.update_status(status).await
+    }
+}
+
+impl<'a, A, Reg, Sup> Deref for ActorInitRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    type Target = RuntimeScope<Reg>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.scope
+    }
+}
+
+impl<'a, A, Reg, Sup> DerefMut for ActorInitRuntime<'a, A, Reg, Sup>
+where
+    A: Actor,
+    Sup: EventDriven,
+    Sup::Event: SupervisorEvent,
+    Reg: 'static + RegistryAccess + Send + Sync,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.scope
     }
 }
 
@@ -843,7 +967,7 @@ where
     <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn_with_metric(&mut self, mut actor: A, metric: M) -> (AbortHandle, Act<A>)
+    pub async fn spawn_with_metric(&mut self, actor: A, metric: M) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Send + Sync,
     {
@@ -856,28 +980,13 @@ where
                 service.name
             );
         }
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.pool.push(Act(sender.clone()), metric);
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let mut child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        child_scope.add_data(sender.clone()).await;
         let supervisor_handle = self.supervisor_handle.clone();
-        self.scope
-            .common_spawn::<A, _, Act<A>, _, _>(
-                child_scope,
-                oneshot_recv,
-                abort_registration,
-                |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                    let res = {
-                        let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                        Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                    };
-                    RuntimeScope::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-                },
-            )
-            .await;
-        (abort_handle, Act(sender))
+        let (abort_handle, sender) = self
+            .scope
+            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .await?;
+        self.pool.push(sender.clone(), metric);
+        Ok((abort_handle, sender))
     }
 }
 
@@ -891,7 +1000,7 @@ where
     <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn_default_metric(&mut self, actor: A) -> (AbortHandle, Act<A>)
+    pub async fn spawn_default_metric(&mut self, actor: A) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Send + Sync,
     {
@@ -908,31 +1017,16 @@ where
     <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn(&mut self, mut actor: A) -> (AbortHandle, Act<A>)
+    pub async fn spawn(&mut self, actor: A) -> anyhow::Result<(AbortHandle, Act<A>)>
     where
         A: 'static + Send + Sync,
     {
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
-        self.pool.push_no_metric(Act(sender.clone()));
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let mut child_scope = self.scope.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
-        child_scope.add_data(sender.clone()).await;
         let supervisor_handle = self.supervisor_handle.clone();
-        self.scope
-            .common_spawn::<A, _, Act<A>, _, _>(
-                child_scope,
-                oneshot_recv,
-                abort_registration,
-                |mut child_scope, deps, oneshot_recv, abort_registration| async move {
-                    let res = {
-                        let mut actor_rt = ActorScopedRuntime::new(&mut child_scope, receiver, oneshot_recv, supervisor_handle.clone());
-                        Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-                    };
-                    RuntimeScope::handle_res(res, &mut child_scope, supervisor_handle, actor).await
-                },
-            )
-            .await;
-        (abort_handle, Act(sender))
+        let (abort_handle, sender) = self
+            .scope
+            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .await?;
+        self.pool.push_no_metric(sender.clone());
+        Ok((abort_handle, sender))
     }
 }

@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
     actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, TokioChannel, TokioSender},
-    prelude::{Act, DataWrapper, RegistryAccess},
-    runtime::ActorScopedRuntime,
+    prelude::{Act, ActorInitRuntime, ActorScopedRuntime, DataWrapper, RegistryAccess},
 };
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
@@ -74,17 +73,16 @@ where
     type Event = WebsocketChildren;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
+    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup2>,
-        _deps: Self::Dependencies,
+        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup2>,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
         Sup2::Event: SupervisorEvent,
         <Sup2::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Initializing).await;
+        rt.update_status(ServiceStatus::Initializing).await.ok();
         let tcp_listener = {
             TcpListener::bind(self.listen_address)
                 .await
@@ -92,16 +90,16 @@ where
         };
         rt.spawn_task(|rt| {
             async move {
-                rt.update_status(ServiceStatus::Running).await;
+                rt.update_status(ServiceStatus::Running).await.ok();
                 loop {
                     if let Ok((socket, peer)) = tcp_listener.accept().await {
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await;
+                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await?;
                             rt.spawn_task(move |rt| {
                                 async move {
-                                    rt.update_status(ServiceStatus::Running).await;
+                                    rt.update_status(ServiceStatus::Running).await.ok();
                                     while let Some(Ok(msg)) = receiver.next().await {
                                         match msg {
                                             Message::Close(_) => {
@@ -115,7 +113,7 @@ where
                                             }
                                         }
                                     }
-                                    rt.update_status(ServiceStatus::Stopped).await;
+                                    rt.update_status(ServiceStatus::Stopped).await.ok();
                                     Ok(())
                                 }
                                 .boxed()
@@ -133,7 +131,20 @@ where
             .boxed()
         })
         .await;
-        rt.update_status(ServiceStatus::Running).await;
+        Ok(())
+    }
+
+    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
+        &mut self,
+        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup2>,
+        _deps: Self::Dependencies,
+    ) -> Result<(), ActorError>
+    where
+        Self: Sized,
+        Sup2::Event: SupervisorEvent,
+        <Sup2::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
+    {
+        rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {
                 WebsocketChildren::Response(peer, msg) => {
@@ -159,7 +170,7 @@ where
                 }
             }
         }
-        rt.update_status(ServiceStatus::Stopped).await;
+        rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 }
@@ -174,6 +185,13 @@ impl Actor for Responder {
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
 
+    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+        &mut self,
+        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+    ) -> Result<(), ActorError> {
+        Ok(())
+    }
+
     async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
@@ -184,7 +202,7 @@ impl Actor for Responder {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Running).await;
+        rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(msg) = rt.next_event().await {
             self.sender.send(msg).await.map_err(|e| ActorError::from(anyhow::anyhow!(e)))?;
         }
