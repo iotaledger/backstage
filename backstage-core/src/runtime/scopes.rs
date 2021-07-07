@@ -106,7 +106,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub async fn scope<O, F>(&mut self, f: F) -> anyhow::Result<O>
     where
         O: Send + Sync,
-        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, O>,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, anyhow::Result<O>>,
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child::<String, _>(None, None, Some(abort_handle)).await;
@@ -114,7 +114,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let res = Abortable::new(f(&mut child_scope), abort_registration).await;
         child_scope.update_status(ServiceStatus::Stopping).await.ok();
         child_scope.join().await;
-        res.map_err(|_| anyhow::anyhow!("Aborted scope!"))
+        res.map_err(|_| anyhow::anyhow!("Aborted scope!")).and_then(|res| res)
     }
 
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
