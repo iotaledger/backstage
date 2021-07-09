@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parse;
@@ -197,40 +199,87 @@ impl Parse for SupArgs {
 pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
     let SupArgs(children) = syn::parse_macro_input!(attr as SupArgs);
 
-    let mut ident_paths = Vec::new();
+    let mut ident_paths = HashMap::<syn::Ident, Vec<syn::TypePath>>::new();
 
     for child in children {
         match child {
             syn::Type::Path(p) => {
                 let id = p.path.get_ident().unwrap_or_else(|| &p.path.segments.last().unwrap().ident).clone();
-                ident_paths.push((id, p));
+                ident_paths.entry(id).or_default().push(p);
             }
             _ => panic!("Expected child type!"),
         }
     }
 
     let (mut children, mut states, mut from_state_impls, mut from_child_impls) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for (ident, path) in ident_paths.iter() {
-        children.push(quote! {
-            #ident
-        });
-        states.push(quote! {
-            #ident(#path)
-        });
-        from_state_impls.push(quote! {
-            impl From<#path> for ChildStates {
-                fn from(s: #path) -> Self {
-                    Self::#ident(s)
+    for (ident, paths) in ident_paths.iter() {
+        if paths.len() == 1 {
+            let path = &paths[0];
+            children.push(quote! {
+                #ident
+            });
+            states.push(quote! {
+                #ident(#path)
+            });
+            from_state_impls.push(quote! {
+                impl From<#path> for ChildStates {
+                    fn from(s: #path) -> Self {
+                        Self::#ident(s)
+                    }
+                }
+            });
+            from_child_impls.push(quote! {
+                impl From<std::marker::PhantomData<#path>> for Children {
+                    fn from(_: std::marker::PhantomData<#path>) -> Self {
+                        Self::#ident
+                    }
+                }
+            });
+        } else {
+            for path in paths.iter() {
+                let generics = &path.path.segments.last().unwrap().arguments;
+                match generics {
+                    syn::PathArguments::AngleBracketed(args) => {
+                        let generics = &args.args;
+                        let mut ident = ident.to_string();
+                        for generic in generics.iter() {
+                            match generic {
+                                syn::GenericArgument::Lifetime(l) => ident = format!("{}_{}", ident, l.ident),
+                                syn::GenericArgument::Type(t) => match t {
+                                    syn::Type::Path(tp) => ident = format!("{}_{}", ident, tp.path.segments.last().unwrap().ident),
+                                    _ => panic!("Expected path!"),
+                                },
+                                syn::GenericArgument::Binding(_) => panic!("Bindings not supported!"),
+                                syn::GenericArgument::Constraint(_) => panic!("Constaints not supported!"),
+                                syn::GenericArgument::Const(_) => panic!("Consts not supported!"),
+                            }
+                        }
+                        let ident = syn::parse_str::<syn::Ident>(&ident).unwrap();
+                        children.push(quote! {
+                            #ident
+                        });
+                        states.push(quote! {
+                            #ident(#path)
+                        });
+                        from_state_impls.push(quote! {
+                            impl From<#path> for ChildStates {
+                                fn from(s: #path) -> Self {
+                                    Self::#ident(s)
+                                }
+                            }
+                        });
+                        from_child_impls.push(quote! {
+                            impl From<std::marker::PhantomData<#path>> for Children {
+                                fn from(_: std::marker::PhantomData<#path>) -> Self {
+                                    Self::#ident
+                                }
+                            }
+                        });
+                    }
+                    _ => panic!("Expected angle bracketed generics!"),
                 }
             }
-        });
-        from_child_impls.push(quote! {
-            impl From<std::marker::PhantomData<#path>> for Children {
-                fn from(_: std::marker::PhantomData<#path>) -> Self {
-                    Self::#ident
-                }
-            }
-        });
+        }
     }
 
     let syn::ItemEnum {
@@ -286,7 +335,7 @@ pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     } else {
-        let (child, state) = (children.remove(0), ident_paths.remove(0).1);
+        let (child, state) = (children.remove(0), ident_paths.into_iter().next().unwrap().1.remove(0));
         quote! {
             #(#attrs)*
             #vis enum #ident #generics {
