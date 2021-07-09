@@ -5,6 +5,7 @@ use std::{fmt::Debug, marker::PhantomData};
 use crate::prelude::DataWrapper;
 
 /// Defines a channel which becomes a sender and receiver half
+#[async_trait]
 pub trait Channel<C, E: 'static + Send + Sync> {
     /// The sender half of the channel
     type Sender: 'static + Sender<E> + Send + Sync + Clone;
@@ -12,7 +13,7 @@ pub trait Channel<C, E: 'static + Send + Sync> {
     type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send + Sync;
 
     /// Create a sender and receiver of the appropriate types
-    fn new(config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)>;
+    async fn new(config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)>;
 }
 
 /// Defines half of a channel which sends events
@@ -35,12 +36,13 @@ pub trait Receiver<E: Send> {
 /// A tokio mpsc channel implementation
 pub struct TokioChannel<E>(PhantomData<E>);
 
-impl<C, E: 'static + Send + Sync> Channel<C, E> for TokioChannel<E> {
+#[async_trait]
+impl<C: 'static + Send + Sync, E: 'static + Send + Sync> Channel<C, E> for TokioChannel<E> {
     type Sender = TokioSender<E>;
 
     type Receiver = TokioReceiver<E>;
 
-    fn new(_config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
+    async fn new(_config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok((TokioSender(sender), TokioReceiver(receiver)))
     }
@@ -146,12 +148,13 @@ impl Stream for NullReceiver {
     }
 }
 
+#[async_trait]
 impl Channel<(), ()> for () {
     type Sender = ();
 
     type Receiver = NullReceiver;
 
-    fn new(_config: &()) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
+    async fn new(_config: &()) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
         Ok(((), NullReceiver))
     }
 }

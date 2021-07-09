@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 #[async_trait]
 pub trait Actor
 where
-    Self: Sized,
+    Self: Sized + Send + Sync,
 {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
     type Dependencies: Dependencies + Send + Sync;
@@ -61,7 +61,7 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
-        let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self)?;
+        let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
         scope.add_data(sender.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await

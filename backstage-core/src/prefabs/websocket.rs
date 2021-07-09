@@ -65,7 +65,7 @@ pub struct Connection {
 #[async_trait]
 impl<Sup> Actor for Websocket<Sup>
 where
-    Sup: EventDriven,
+    Sup: 'static + EventDriven,
     Sup::Event: TryFrom<(SocketAddr, Message)>,
     <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
