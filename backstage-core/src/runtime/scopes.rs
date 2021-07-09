@@ -227,7 +227,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Get an actor's event handle, if it exists in this scope.
     /// Note: This will only return a handle if the actor exists outside of a pool.
     pub async fn actor_event_handle<A: Actor>(&mut self) -> Option<Act<A>> {
-        self.get_data::<<A::Channel as Channel<A::Event>>::Sender>()
+        self.get_data::<<A::Channel as Channel<A, A::Event>>::Sender>()
             .await
             .and_then(|handle| (!handle.is_closed()).then(|| Act(handle)))
     }
@@ -235,7 +235,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Send an event to a given actor, if it exists in this scope
     pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()> {
         let mut handle = self
-            .get_data::<<A::Channel as Channel<A::Event>>::Sender>()
+            .get_data::<<A::Channel as Channel<A, A::Event>>::Sender>()
             .await
             .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
@@ -244,7 +244,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Get a shared reference to a system if it exists in this runtime's scope
     pub async fn system<S: 'static + System + Send + Sync>(&mut self) -> Option<Sys<S>> {
-        if let Some(actor) = self.get_data::<<S::Channel as Channel<S::Event>>::Sender>().await {
+        if let Some(actor) = self.get_data::<<S::Channel as Channel<S, S::Event>>::Sender>().await {
             if let Some(state) = self.get_data::<S::State>().await {
                 return Some(Sys {
                     actor: Act(actor),
@@ -435,7 +435,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         for<'b> F: 'static + Send + Sync + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, ()>,
     {
         log::debug!("Spawning {}", std::any::type_name::<A>());
-        let (sender, receiver) = <A::Channel as Channel<A::Event>>::new();
+        let (sender, receiver) = <A::Channel as Channel<A, A::Event>>::new(&actor);
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;
@@ -484,7 +484,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
             };
             cleanup_fn(&mut child_scope).await;
-            child_scope.remove_data::<<A::Channel as Channel<A::Event>>::Sender>().await;
+            child_scope.remove_data::<<A::Channel as Channel<A, A::Event>>::Sender>().await;
             Self::handle_run_res(res, &mut child_scope, supervisor_handle, actor).await
         });
         self.join_handles_mut().push(child_task);
@@ -845,7 +845,7 @@ where
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     scope: &'a mut RuntimeScope<Reg>,
-    receiver: ShutdownStream<<A::Channel as Channel<A::Event>>::Receiver>,
+    receiver: ShutdownStream<<A::Channel as Channel<A, A::Event>>::Receiver>,
     supervisor_handle: Option<Act<Sup>>,
 }
 
@@ -857,7 +857,7 @@ where
 {
     pub(crate) fn new(
         scope: &'a mut RuntimeScope<Reg>,
-        receiver: <A::Channel as Channel<A::Event>>::Receiver,
+        receiver: <A::Channel as Channel<A, A::Event>>::Receiver,
         shutdown: oneshot::Receiver<()>,
         supervisor_handle: Option<Act<Sup>>,
     ) -> Self {

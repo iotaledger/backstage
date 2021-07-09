@@ -5,14 +5,14 @@ use std::{fmt::Debug, marker::PhantomData};
 use crate::prelude::DataWrapper;
 
 /// Defines a channel which becomes a sender and receiver half
-pub trait Channel<E: 'static + Send + Sync> {
+pub trait Channel<C, E: 'static + Send + Sync> {
     /// The sender half of the channel
     type Sender: 'static + Sender<E> + Send + Sync + Clone;
     /// The receiver half of the channel
     type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send + Sync;
 
     /// Create a sender and receiver of the appropriate types
-    fn new() -> (Self::Sender, Self::Receiver);
+    fn new(config: &C) -> (Self::Sender, Self::Receiver);
 }
 
 /// Defines half of a channel which sends events
@@ -35,12 +35,12 @@ pub trait Receiver<E: Send> {
 /// A tokio mpsc channel implementation
 pub struct TokioChannel<E>(PhantomData<E>);
 
-impl<E: 'static + Send + Sync> Channel<E> for TokioChannel<E> {
+impl<C, E: 'static + Send + Sync> Channel<C, E> for TokioChannel<E> {
     type Sender = TokioSender<E>;
 
     type Receiver = TokioReceiver<E>;
 
-    fn new() -> (Self::Sender, Self::Receiver) {
+    fn new(_config: &C) -> (Self::Sender, Self::Receiver) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         (TokioSender(sender), TokioReceiver(receiver))
     }
@@ -141,17 +141,17 @@ pub struct NullReceiver;
 impl Stream for NullReceiver {
     type Item = ();
 
-    fn poll_next(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
         std::task::Poll::Ready(None)
     }
 }
 
-impl Channel<()> for () {
+impl Channel<(), ()> for () {
     type Sender = ();
 
     type Receiver = NullReceiver;
 
-    fn new() -> (Self::Sender, Self::Receiver) {
+    fn new(_config: &()) -> (Self::Sender, Self::Receiver) {
         ((), NullReceiver)
     }
 }

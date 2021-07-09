@@ -57,7 +57,7 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
 
     async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
         scope.depend_on::<S::State>().await;
-        scope.depend_on::<<S::Channel as Channel<S::Event>>::Sender>().await;
+        scope.depend_on::<<S::Channel as Channel<S, S::Event>>::Sender>().await;
     }
 }
 
@@ -71,7 +71,7 @@ impl<A: Actor + Send + Sync> Dependencies for Act<A> {
     }
 
     async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
-        scope.depend_on::<<A::Channel as Channel<A::Event>>::Sender>().await;
+        scope.depend_on::<<A::Channel as Channel<A, A::Event>>::Sender>().await;
     }
 }
 

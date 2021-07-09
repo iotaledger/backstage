@@ -9,13 +9,16 @@ use std::{borrow::Cow, marker::PhantomData, panic::AssertUnwindSafe};
 use tokio::sync::oneshot;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor {
+pub trait Actor
+where
+    Self: Sized,
+{
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
     type Dependencies: Dependencies + Send + Sync;
     /// The type of event this actor will receive
     type Event: 'static + Send + Sync;
     /// The type of channel this actor will use to receive events
-    type Channel: Channel<Self::Event> + Send;
+    type Channel: Channel<Self, Self::Event> + Send;
 
     /// Used to initialize the actor. Any children spawned here will be initialized
     /// before this actor's run method is called so they are guaranteed to be
@@ -58,7 +61,7 @@ pub trait Actor {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
-        let (sender, receiver) = <Self::Channel as Channel<Self::Event>>::new();
+        let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self);
         scope.add_data(sender.clone()).await;
         let deps = Self::Dependencies::instantiate(&mut scope)
             .await
@@ -73,11 +76,14 @@ pub trait Actor {
 }
 
 /// Anything that is event driven
-pub trait EventDriven {
+pub trait EventDriven
+where
+    Self: Sized,
+{
     /// The type of event this implementor will receive
     type Event: 'static + Send + Sync;
     /// The type of channel this implementor will use to receive events
-    type Channel: Channel<Self::Event> + Send;
+    type Channel: Channel<Self, Self::Event> + Send;
 }
 
 impl<T> EventDriven for T

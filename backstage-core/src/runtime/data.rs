@@ -56,10 +56,10 @@ impl<S: System> Clone for Sys<S> {
 }
 
 /// An actor handle, used to send events
-pub struct Act<A: EventDriven>(pub <A::Channel as Channel<A::Event>>::Sender);
+pub struct Act<A: EventDriven>(pub <A::Channel as Channel<A, A::Event>>::Sender);
 
 impl<A: EventDriven> Deref for Act<A> {
-    type Target = <A::Channel as Channel<A::Event>>::Sender;
+    type Target = <A::Channel as Channel<A, A::Event>>::Sender;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -74,15 +74,15 @@ impl<A: EventDriven> DerefMut for Act<A> {
 
 impl<A: EventDriven> Clone for Act<A>
 where
-    <A::Channel as Channel<A::Event>>::Sender: Clone,
+    <A::Channel as Channel<A, A::Event>>::Sender: Clone,
 {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A::Event>>::Sender> for Act<A> {
-    fn into_inner(self) -> <A::Channel as Channel<A::Event>>::Sender {
+impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A, A::Event>>::Sender> for Act<A> {
+    fn into_inner(self) -> <A::Channel as Channel<A, A::Event>>::Sender {
         self.0
     }
 }
