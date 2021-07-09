@@ -12,7 +12,7 @@ pub trait Channel<C, E: 'static + Send + Sync> {
     type Receiver: Receiver<E> + Stream<Item = E> + Unpin + Send + Sync;
 
     /// Create a sender and receiver of the appropriate types
-    fn new(config: &C) -> (Self::Sender, Self::Receiver);
+    fn new(config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)>;
 }
 
 /// Defines half of a channel which sends events
@@ -40,9 +40,9 @@ impl<C, E: 'static + Send + Sync> Channel<C, E> for TokioChannel<E> {
 
     type Receiver = TokioReceiver<E>;
 
-    fn new(_config: &C) -> (Self::Sender, Self::Receiver) {
+    fn new(_config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        (TokioSender(sender), TokioReceiver(receiver))
+        Ok((TokioSender(sender), TokioReceiver(receiver)))
     }
 }
 
@@ -151,8 +151,8 @@ impl Channel<(), ()> for () {
 
     type Receiver = NullReceiver;
 
-    fn new(_config: &()) -> (Self::Sender, Self::Receiver) {
-        ((), NullReceiver)
+    fn new(_config: &()) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
+        Ok(((), NullReceiver))
     }
 }
 

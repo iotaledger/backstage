@@ -435,7 +435,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         for<'b> F: 'static + Send + Sync + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, ()>,
     {
         log::debug!("Spawning {}", std::any::type_name::<A>());
-        let (sender, receiver) = <A::Channel as Channel<A, A::Event>>::new(&actor);
+        let (sender, receiver) = <A::Channel as Channel<A, A::Event>>::new(&actor)?;
         let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self.child(A::name(), Some(oneshot_send), Some(abort_handle.clone())).await;

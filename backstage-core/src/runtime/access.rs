@@ -266,7 +266,7 @@ where
         let scope_id = registry.new_scope(None, |_| "Registry".to_string(), None, None);
         let child_scope_id = registry.new_scope(scope_id, |_| name.into(), shutdown_handle, abort_handle);
         let mut actor = RegistryActor { registry };
-        let (sender, receiver) = TokioChannel::new(&actor);
+        let (sender, receiver) = TokioChannel::new(&actor).unwrap();
         let actor_registry = ActorRegistry { handle: sender };
         let mut scope = RuntimeScope {
             scope_id,
