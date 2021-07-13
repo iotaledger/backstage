@@ -1,24 +1,70 @@
 use std::{
     pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
 };
 
 use futures::{
     future::{self, FusedFuture},
     stream::{self, FusedStream},
-    FutureExt, Stream, StreamExt,
+    task::AtomicWaker,
+    Future, FutureExt, Stream, StreamExt,
 };
-use tokio::sync::oneshot;
 
-type Shutdown = oneshot::Receiver<()>;
-type FusedShutdown = future::Fuse<Shutdown>;
+#[derive(Default)]
+pub struct ShutdownFlag {
+    waker: AtomicWaker,
+    set: AtomicBool,
+}
+
+impl ShutdownFlag {
+    pub fn signal(&self) {
+        self.set.store(true, Ordering::Relaxed);
+        self.waker.wake();
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ShutdownHandle {
+    flag: Arc<ShutdownFlag>,
+}
+
+impl ShutdownHandle {
+    pub fn shutdown(&self) {
+        self.flag.signal()
+    }
+}
+
+impl Future for ShutdownHandle {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // quick check to avoid registration if already done.
+        if self.flag.set.load(Ordering::Relaxed) {
+            return Poll::Ready(());
+        }
+
+        self.flag.waker.register(cx.waker());
+
+        // Need to check condition **after** `register` to avoid a race
+        // condition that would result in lost notifications.
+        if self.flag.set.load(Ordering::Relaxed) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
 
 /// A stream with a shutdown.
 ///
 /// This type wraps a shutdown receiver and a stream to produce a new stream that ends when the
 /// shutdown receiver is triggered or when the stream ends.
 pub struct ShutdownStream<S> {
-    shutdown: FusedShutdown,
+    shutdown: future::Fuse<ShutdownHandle>,
     stream: stream::Fuse<S>,
 }
 
@@ -28,25 +74,15 @@ impl<S: Stream> ShutdownStream<S> {
     /// This method receives the stream to be wrapped and a `oneshot::Receiver` for the shutdown.
     /// Both the stream and the shutdown receiver are fused to avoid polling already completed
     /// futures.
-    pub fn new(shutdown: Shutdown, stream: S) -> Self {
-        Self {
-            shutdown: shutdown.fuse(),
-            stream: stream.fuse(),
-        }
-    }
-
-    /// Create a new `ShutdownStream` from a fused shutdown receiver and a fused stream.
-    ///
-    /// This method receives the fused stream to be wrapped and a fused `oneshot::Receiver` for the shutdown.
-    #[allow(dead_code)]
-    pub fn from_fused(shutdown: FusedShutdown, stream: stream::Fuse<S>) -> Self {
-        Self { shutdown, stream }
-    }
-
-    /// Consume and split the `ShutdownStream` into its shutdown receiver and stream.
-    #[allow(dead_code)]
-    pub fn split(self) -> (FusedShutdown, stream::Fuse<S>) {
-        (self.shutdown, self.stream)
+    pub fn new(stream: S) -> (Self, ShutdownHandle) {
+        let handle = ShutdownHandle::default();
+        (
+            Self {
+                shutdown: handle.clone().fuse(),
+                stream: stream.fuse(),
+            },
+            handle,
+        )
     }
 }
 
@@ -55,17 +91,15 @@ impl<S: Stream<Item = T> + Unpin, T> Stream for ShutdownStream<S> {
     /// The shutdown receiver is polled first, if it is not ready, the stream is polled. This
     /// guarantees that checking for shutdown always happens first.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if !self.shutdown.is_terminated() {
+        if self.is_terminated() {
+            Poll::Ready(None)
+        } else {
             if self.shutdown.poll_unpin(cx).is_ready() {
                 return Poll::Ready(None);
             }
 
-            if !self.stream.is_terminated() {
-                return self.stream.poll_next_unpin(cx);
-            }
+            self.stream.poll_next_unpin(cx)
         }
-
-        Poll::Ready(None)
     }
 }
 

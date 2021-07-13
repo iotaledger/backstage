@@ -72,16 +72,16 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        _rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where
@@ -145,16 +145,16 @@ impl Actor for Howdy {
     type Event = HowdyEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        _rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -217,7 +217,6 @@ enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
     Howdy(HowdyEvent),
     WebsocketMsg(SocketAddr, String),
-    Shutdown { using_ctrl_c: bool },
 }
 
 impl TryFrom<(SocketAddr, Message)> for LauncherEvents {
@@ -237,9 +236,9 @@ impl Actor for Launcher {
     type Dependencies = ();
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -247,7 +246,7 @@ impl Actor for Launcher {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await.ok();
-        let my_handle = rt.my_handle().await;
+        let my_handle = rt.handle();
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
         rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await?;
@@ -261,13 +260,13 @@ impl Actor for Launcher {
             my_handle.clone(),
         )
         .await?;
-        tokio::task::spawn(ctrl_c(my_handle.into_inner()));
+        tokio::task::spawn(ctrl_c(rt.shutdown_handle()));
         Ok(())
     }
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -283,18 +282,16 @@ impl Actor for Launcher {
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
-                    rt.send_actor_event::<HelloWorld>(event).await;
+                    //info!("Received hello world message: {:?}", event);
+                    rt.send_actor_event::<HelloWorld>(event).await?;
                 }
                 LauncherEvents::Howdy(event) => {
-                    rt.send_actor_event::<Howdy>(event).await;
-                }
-                LauncherEvents::Shutdown { using_ctrl_c } => {
-                    debug!("Exiting launcher");
-                    break;
+                    //info!("Received howdy message: {:?}", event);
+                    rt.send_actor_event::<Howdy>(event).await?;
                 }
                 LauncherEvents::WebsocketMsg(peer, msg) => {
                     info!("Received websocket message: {:?}", msg);
-                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await;
+                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await?;
                 }
                 LauncherEvents::ReportExit(res) => match res {
                     Ok(s) => {}
@@ -311,6 +308,7 @@ impl Actor for Launcher {
                 },
             }
         }
+        debug!("Exiting launcher");
         rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
@@ -320,10 +318,9 @@ impl System for Launcher {
     type State = Arc<RwLock<LauncherAPI>>;
 }
 
-async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
+async fn ctrl_c(shutdown_handle: ShutdownHandle) {
     tokio::signal::ctrl_c().await.unwrap();
-    let exit_program_event = LauncherEvents::Shutdown { using_ctrl_c: true };
-    sender.send(exit_program_event).await.ok();
+    shutdown_handle.shutdown();
 }
 
 #[tokio::main]
@@ -335,6 +332,9 @@ async fn main() {
 }
 
 async fn startup() -> anyhow::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("{}", info);
+    }));
     RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
             scope

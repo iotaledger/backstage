@@ -49,7 +49,7 @@ impl<C: 'static + Send + Sync, E: 'static + Send + Sync> Channel<C, E> for Tokio
 }
 
 /// A tokio mpsc sender implementation
-pub struct TokioSender<E>(tokio::sync::mpsc::UnboundedSender<E>);
+pub struct TokioSender<E>(pub tokio::sync::mpsc::UnboundedSender<E>);
 
 impl<E: 'static + Send + Sync> DataWrapper<tokio::sync::mpsc::UnboundedSender<E>> for TokioSender<E> {
     fn into_inner(self) -> tokio::sync::mpsc::UnboundedSender<E> {

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, TokioChannel, TokioSender},
-    prelude::{Act, ActorInitRuntime, ActorScopedRuntime, DataWrapper, RegistryAccess},
+    prelude::{Act, ActorScopedRuntime, DataWrapper, RegistryAccess},
 };
 use futures::{FutureExt, SinkExt, StreamExt};
 use futures_util::stream::SplitSink;
@@ -73,9 +73,9 @@ where
     type Event = WebsocketChildren;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
+    async fn init<Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
         &mut self,
-        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup2>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup2>,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -96,14 +96,14 @@ where
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let (responder_abort, responder_handle) = rt.spawn_actor_unsupervised(Responder { sender }).await?;
+                            let (responder_handle, responder_shutdown, _) = rt.spawn_actor_unsupervised(Responder { sender }).await?;
                             rt.spawn_task(move |rt| {
                                 async move {
                                     rt.update_status(ServiceStatus::Running).await.ok();
                                     while let Some(Ok(msg)) = receiver.next().await {
                                         match msg {
                                             Message::Close(_) => {
-                                                responder_abort.abort();
+                                                responder_shutdown.shutdown();
                                                 rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer)).await?;
                                                 break;
                                             }
@@ -134,9 +134,9 @@ where
         Ok(())
     }
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
+    async fn run<Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup2>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup2>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -185,16 +185,16 @@ impl Actor for Responder {
     type Event = Message;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        _rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _deps: (),
     ) -> Result<(), ActorError>
     where

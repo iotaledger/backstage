@@ -1,7 +1,7 @@
 use super::{Actor, Channel, System};
 use crate::{
-    prelude::{ActorPool, Pool, RegistryAccess},
-    runtime::{Act, Res, RuntimeScope, Sys},
+    prelude::{ActorPool, LockedRuntimeScope, Pool, RegistryAccess},
+    runtime::{Act, Res, Sys},
 };
 use async_trait::async_trait;
 use std::{hash::Hash, marker::PhantomData, sync::Arc};
@@ -19,7 +19,7 @@ pub enum DepStatus<T> {
 #[async_trait]
 pub trait Dependencies {
     /// Request a notification when a specific resource is ready
-    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> DepStatus<Self>
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> DepStatus<Self>
     where
         Self: 'static + Send + Sync + Sized,
     {
@@ -38,24 +38,24 @@ pub trait Dependencies {
     }
 
     /// Instantiate instances of some dependencies
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self>
     where
         Self: Sized;
 
     /// Link the dependencies so that removing them will shut down the dependent
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>);
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>);
 }
 
 #[async_trait]
 impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
-    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self> {
         scope
             .system()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
         scope.depend_on::<S::State>().await;
         scope.depend_on::<<S::Channel as Channel<S, S::Event>>::Sender>().await;
     }
@@ -63,53 +63,53 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
 
 #[async_trait]
 impl<A: Actor + Send + Sync> Dependencies for Act<A> {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
         scope
             .actor_event_handle()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))
     }
 
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) {
         scope.depend_on::<<A::Channel as Channel<A, A::Event>>::Sender>().await;
     }
 }
 
 #[async_trait]
 impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
-    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self> {
         scope
             .resource()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))
     }
 
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
         scope.depend_on::<R>().await;
     }
 }
 
 #[async_trait]
 impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + Sync> Dependencies for Pool<A, M> {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
         scope
             .pool_with_metric()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<ActorPool<A, M>>()))
     }
 
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) {
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) {
         scope.depend_on::<Arc<RwLock<ActorPool<A, M>>>>().await;
     }
 }
 
 #[async_trait]
 impl Dependencies for () {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
         Ok(())
     }
 
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<Reg>) {}
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(_scope: &mut LockedRuntimeScope<'_, Reg>) {}
 }
 
 macro_rules! impl_dependencies {
@@ -118,7 +118,7 @@ macro_rules! impl_dependencies {
         impl<$($gen),+> Dependencies for ($($gen),+,)
         where $($gen: Dependencies + Send + Sync),+
         {
-            async fn request<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> DepStatus<Self>
+            async fn request<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> DepStatus<Self>
             where
                 Self: 'static + Send + Sync,
             {
@@ -156,12 +156,12 @@ macro_rules! impl_dependencies {
                 }
             }
 
-            async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self>
+            async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self>
             {
                 Ok(($($gen::instantiate(scope).await?),+,))
             }
 
-            async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) {
+            async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
                 $($gen::link(scope).await);+
             }
         }

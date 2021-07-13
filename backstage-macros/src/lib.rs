@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use proc_macro::TokenStream;
 use quote::quote;
+use std::collections::HashMap;
 use syn::parse::Parse;
 
 #[proc_macro_attribute]
@@ -193,6 +192,14 @@ impl Parse for SupArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         Ok(SupArgs(syn::punctuated::Punctuated::parse_terminated(input)?))
     }
+}
+
+#[test]
+fn text_sup_args() {
+    let input = quote! {
+        HelloWorld, Howdy, Websocket<Launcher>
+    };
+    syn::parse2::<SupArgs>(input).unwrap();
 }
 
 #[proc_macro_attribute]

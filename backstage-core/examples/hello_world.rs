@@ -46,16 +46,16 @@ impl Actor for HelloWorld {
     type Event = HelloWorldEvent;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        _rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        _rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError> {
         Ok(())
     }
 
-    async fn run<'a, Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -105,9 +105,9 @@ impl Actor for Launcher {
     type Event = LauncherEvents;
     type Channel = TokioChannel<Self::Event>;
 
-    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -116,11 +116,11 @@ impl Actor for Launcher {
     {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
-        let my_handle = rt.my_handle().await;
+        let my_handle = rt.handle();
         rt.spawn_pool(my_handle.clone(), |pool| {
             async move {
                 for i in 0..10 {
-                    let (_abort, _handle) = pool.spawn_with_metric(builder.clone().num(i).build(), i as i32).await?;
+                    let (_handle, _, _) = pool.spawn_with_metric(builder.clone().num(i).build(), i as i32).await?;
                 }
                 Ok(())
             }
@@ -133,9 +133,9 @@ impl Actor for Launcher {
         Ok(())
     }
 
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         _deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -144,7 +144,7 @@ impl Actor for Launcher {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Running).await.ok();
-        let my_handle = rt.my_handle().await;
+        let my_handle = rt.handle();
         let mut i = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -215,7 +215,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::<ArcedRegistry>::launch(|scope| {
+    RuntimeScope::<Registry>::launch(|scope| {
         async move {
             scope
                 .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))

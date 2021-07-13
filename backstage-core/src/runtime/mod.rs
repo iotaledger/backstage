@@ -1,4 +1,4 @@
-use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, ServiceTree, System};
+use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
 use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_trait::async_trait;
 use futures::{
@@ -13,10 +13,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tokio::{
-    sync::{oneshot, RwLock},
-    task::JoinHandle,
-};
+use tokio::{sync::RwLock, task::JoinHandle};
 
 mod data;
 pub use data::*;
@@ -37,7 +34,7 @@ pub struct Scope {
     // Of course this means figuring out how to propagate removal properly
     data: HashMap<TypeId, DataId>,
     service: Service,
-    shutdown_handle: Option<oneshot::Sender<()>>,
+    shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
     dependencies: HashSet<TypeId>,
     created: HashSet<DataId>,
@@ -50,7 +47,7 @@ impl Scope {
         id: usize,
         parent: Option<&Scope>,
         name: String,
-        shutdown_handle: Option<oneshot::Sender<()>>,
+        shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> Self {
         Scope {
@@ -72,13 +69,9 @@ impl Scope {
         log::debug!("Aborting scope {} ({})", self.id, self.service.name);
         let (shutdown_handle, abort_handle) = (&mut self.shutdown_handle, &mut self.abort_handle);
         if let Some(handle) = shutdown_handle.take() {
-            if let (Err(_), Some(abort)) = (handle.send(()), abort_handle.take()) {
-                abort.abort();
-            }
-        } else {
-            if let Some(abort) = abort_handle.take() {
-                abort.abort();
-            }
+            handle.shutdown();
+        } else if let Some(abort) = abort_handle.take() {
+            abort.abort();
         }
     }
 }
@@ -86,11 +79,11 @@ impl Scope {
 /// Defines how the registry is accessed so that various wrappers can
 /// be implemented
 #[async_trait]
-pub trait RegistryAccess: Clone {
+pub trait RegistryAccess {
     /// Create a new runtime scope using this registry implementation
     async fn instantiate<S: Into<String> + Send>(
         name: S,
-        shutdown_handle: Option<oneshot::Sender<()>>,
+        shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> RuntimeScope<Self>
     where
@@ -101,7 +94,7 @@ pub trait RegistryAccess: Clone {
         &mut self,
         parent: P,
         name_fn: F,
-        shutdown_handle: Option<oneshot::Sender<()>>,
+        shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> usize;
 
@@ -118,10 +111,10 @@ pub trait RegistryAccess: Clone {
     async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
 
     /// Get arbitrary data from this scope
-    async fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<T>;
+    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> Option<T>;
 
     /// Get this scope's service
-    async fn get_service(&mut self, scope_id: &ScopeId) -> Option<Service>;
+    async fn get_service(&self, scope_id: &ScopeId) -> Option<Service>;
 
     /// Update the status of this scope
     async fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
@@ -131,10 +124,10 @@ pub trait RegistryAccess: Clone {
 
     /// Print the tree hierarchy starting with this scope
     /// NOTE: To print the entire tree, use scope id `&0` as it will always refer to the root
-    async fn print(&mut self, scope_id: &ScopeId);
+    async fn print(&self, scope_id: &ScopeId);
 
     /// Request the service tree from this scope
-    async fn service_tree(&mut self, scope_id: &ScopeId) -> Option<ServiceTree>;
+    async fn service_tree(&self, scope_id: &ScopeId) -> Option<ServiceTree>;
 }
 
 /// The central registry that stores all data for the application.
@@ -165,7 +158,7 @@ impl Registry {
         &mut self,
         parent: P,
         name_fn: F,
-        shutdown_handle: Option<oneshot::Sender<()>>,
+        shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> usize {
         let scope_id = self.scope_pool.get_id();

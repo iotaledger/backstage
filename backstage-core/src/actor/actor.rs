@@ -1,12 +1,14 @@
 use super::{ActorError, Channel, Dependencies, SupervisorEvent};
-use crate::runtime::{ActorInitRuntime, ActorScopedRuntime, RegistryAccess, RuntimeScope};
+use crate::{
+    actor::ShutdownStream,
+    runtime::{ActorScopedRuntime, RegistryAccess, RuntimeScope},
+};
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable},
     FutureExt,
 };
 use std::{borrow::Cow, marker::PhantomData, panic::AssertUnwindSafe};
-use tokio::sync::oneshot;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor
@@ -28,9 +30,9 @@ where
     /// it can be linked with the runtime, but BEWARE that any dependencies which are
     /// spawned by the parents of this actor will not be available if they are
     /// spawned after this actor and linking them will therefore deadlock the thread.
-    async fn init<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorInitRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -38,9 +40,9 @@ where
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
 
     /// The main function for the actor
-    async fn run<'a, Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
-        rt: &mut ActorScopedRuntime<'a, Self, Reg, Sup>,
+        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
         deps: Self::Dependencies,
     ) -> Result<(), ActorError>
     where
@@ -59,19 +61,25 @@ where
         Self: Sized,
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let (oneshot_send, oneshot_recv) = oneshot::channel::<()>();
-        let mut scope = Reg::instantiate(Self::name(), Some(oneshot_send), Some(abort_handle)).await;
         let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
+        let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
+        let mut scope = Reg::instantiate(Self::name(), Some(shutdown_handle.clone()), Some(abort_handle)).await;
         scope.add_data(sender.clone()).await;
-        let deps = Self::Dependencies::instantiate(&mut scope)
+        let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
+            scope,
+            handle: sender,
+            receiver,
+            shutdown_handle,
+            supervisor_handle: None,
+        };
+        let deps = Self::Dependencies::instantiate(&mut actor_rt.lock().await)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))
             .unwrap();
-        let res = {
-            let mut actor_rt = ActorScopedRuntime::<'_, _, _, ()>::new(&mut scope, receiver, oneshot_recv, None);
-            Abortable::new(AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await
-        };
-        RuntimeScope::handle_run_res::<_, ()>(res, &mut scope, None, self).await
+        let res = AssertUnwindSafe(self.init(&mut actor_rt)).catch_unwind().await;
+        let mut actor = RuntimeScope::handle_init_res::<_, ()>(res, &mut actor_rt, self).await?;
+        let res = Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
+        RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, actor).await
     }
 }
 
