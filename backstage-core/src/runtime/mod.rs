@@ -1,9 +1,13 @@
 use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
-use anymap::any::{CloneAny, UncheckedAnyExt};
+use anymap::{
+    any::{CloneAny, UncheckedAnyExt},
+    raw::Entry,
+};
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
-    StreamExt,
+    task::AtomicWaker,
+    Future, StreamExt,
 };
 use ptree::{write_tree, TreeItem};
 use std::{
@@ -11,7 +15,12 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    sync::Arc,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
 
@@ -26,6 +35,81 @@ pub use access::*;
 pub type ScopeId = usize;
 type DataId = usize;
 
+#[derive(Clone)]
+enum Dependency {
+    Once(DepSignal),
+    Linked(DepSignal),
+}
+
+impl Dependency {
+    pub fn upgrade(&mut self) {
+        match self {
+            Dependency::Once(flag) => *self = Dependency::Linked(flag.clone()),
+            _ => (),
+        }
+    }
+}
+
+/// The status of a dependency
+pub enum DepStatus<T> {
+    /// The dependency is ready to be used
+    Ready(T),
+    /// The dependency is not ready, here is a flag to await
+    Waiting(DepHandle<T>),
+}
+
+impl<T: 'static + Clone + Send + Sync> Into<Option<T>> for DepStatus<T> {
+    fn into(self) -> Option<T> {
+        match self {
+            DepStatus::Ready(t) => Some(t),
+            DepStatus::Waiting(h) => {
+                if h.flag.set.load(Ordering::Relaxed) {
+                    h.flag
+                        .val
+                        .try_read()
+                        .ok()
+                        .and_then(|lock| lock.clone().map(|d| *unsafe { d.downcast_unchecked() }))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl<T: 'static + Clone + Send + Sync> DepStatus<T> {
+    /// Wait for a dependency to become ready.
+    /// Will return immediately if it is already ready.
+    /// Will return an Err if the containing scope is dropped.
+    pub async fn get(self) -> anyhow::Result<T> {
+        match self {
+            DepStatus::Ready(t) => Ok(t),
+            DepStatus::Waiting(h) => h.await,
+        }
+    }
+
+    /// Get the value of a dependency if it is ready, otherwise return None.
+    pub fn get_opt(self) -> Option<T> {
+        self.into()
+    }
+}
+
+pub(crate) enum RawDepStatus {
+    /// The dependency is ready to be used
+    Ready(Box<dyn CloneAny + Send + Sync>),
+    /// The dependency is not ready, here is a flag to await
+    Waiting(DepSignal),
+}
+
+impl RawDepStatus {
+    pub fn with_type<T: 'static + Clone + Send + Sync>(self) -> DepStatus<T> {
+        match self {
+            RawDepStatus::Ready(t) => DepStatus::Ready(*unsafe { t.downcast_unchecked() }),
+            RawDepStatus::Waiting(s) => DepStatus::Waiting(s.handle()),
+        }
+    }
+}
+
 /// A scope, which marks data as usable for a given task
 pub struct Scope {
     id: ScopeId,
@@ -36,7 +120,7 @@ pub struct Scope {
     service: Service,
     shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
-    dependencies: HashSet<TypeId>,
+    dependencies: anymap::Map<dyn CloneAny + Send + Sync>,
     created: HashSet<DataId>,
     parent: Option<ScopeId>,
     children: HashSet<ScopeId>,
@@ -56,7 +140,7 @@ impl Scope {
             service: Service::new(name),
             shutdown_handle,
             abort_handle,
-            dependencies: Default::default(),
+            dependencies: anymap::Map::new(),
             created: Default::default(),
             parent: parent.map(|p| p.id),
             children: Default::default(),
@@ -73,13 +157,22 @@ impl Scope {
         } else if let Some(abort) = abort_handle.take() {
             abort.abort();
         }
+        for dep in self.dependencies.as_mut().drain() {
+            match *unsafe { dep.downcast_unchecked() } {
+                Dependency::Once(f) | Dependency::Linked(f) => {
+                    f.cancel();
+                }
+            }
+        }
     }
 }
 
 /// Defines how the registry is accessed so that various wrappers can
-/// be implemented
+/// be implemented. This trait assumes that the registry will be wrapped
+/// in some synchronizeable structure which can be accessed via interior
+/// mutability.
 #[async_trait]
-pub trait RegistryAccess {
+pub trait RegistryAccess: Clone {
     /// Create a new runtime scope using this registry implementation
     async fn instantiate<S: Into<String> + Send>(
         name: S,
@@ -91,7 +184,7 @@ pub trait RegistryAccess {
 
     /// Create a new scope with an optional parent scope and name function
     async fn new_scope<P: Send + Into<Option<ScopeId>>, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
-        &mut self,
+        &self,
         parent: P,
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
@@ -99,28 +192,28 @@ pub trait RegistryAccess {
     ) -> usize;
 
     /// Drop the scope and all child scopes
-    async fn drop_scope(&mut self, scope_id: &ScopeId);
+    async fn drop_scope(&self, scope_id: &ScopeId);
 
     /// Add arbitrary data to this scope
-    async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()>;
+    async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()>;
 
     /// Force this scope to depend on some arbitrary data, and shut down if it is ever removed
-    async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<()>;
+    async fn depend_on<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>>;
 
     /// Remove arbitrary data from this scope
-    async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
+    async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
 
     /// Get arbitrary data from this scope
-    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> Option<T>;
+    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> DepStatus<T>;
 
     /// Get this scope's service
     async fn get_service(&self, scope_id: &ScopeId) -> Option<Service>;
 
     /// Update the status of this scope
-    async fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
+    async fn update_status(&self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
 
     /// Abort this scope
-    async fn abort(&mut self, scope_id: &ScopeId);
+    async fn abort(&self, scope_id: &ScopeId);
 
     /// Print the tree hierarchy starting with this scope
     /// NOTE: To print the entire tree, use scope id `&0` as it will always refer to the root
@@ -198,25 +291,42 @@ impl Registry {
         }
     }
 
-    pub(crate) fn depend_on<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        self.depend_on_raw(scope_id, TypeId::of::<T>())
+    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
+        self.depend_on_raw(scope_id, TypeId::of::<T>()).await.map(|s| s.with_type())
     }
 
-    pub(crate) fn depend_on_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<()> {
-        self.scopes
-            .get_mut(scope_id)
-            .map(|scope| {
-                scope.dependencies.insert(data_type);
+    pub(crate) async fn depend_on_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
+        let status = self.get_data_raw(scope_id, data_type);
+        if let Some(scope) = self.scopes.get_mut(scope_id) {
+            Ok(match scope.dependencies.as_mut().entry(data_type) {
+                Entry::Occupied(mut e) => {
+                    let val = unsafe { e.get_mut().downcast_mut_unchecked::<Dependency>() };
+                    val.upgrade();
+                    match val {
+                        Dependency::Linked(f) => RawDepStatus::Waiting(f.clone()),
+                        _ => panic!(),
+                    }
+                }
+                Entry::Vacant(v) => {
+                    let flag = DepSignal::default();
+                    unsafe { v.insert(Box::new(Dependency::Linked(flag.clone()))) };
+                    if let RawDepStatus::Ready(t) = status {
+                        flag.signal_raw(t).await;
+                    }
+                    RawDepStatus::Waiting(flag)
+                }
             })
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))
+        } else {
+            anyhow::bail!("No scope with id {}!", scope_id)
+        }
     }
 
     /// Add some arbitrary data to a scope and its children recursively
-    pub(crate) fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
-        self.add_data_raw(scope_id, TypeId::of::<T>(), Box::new(data))
+    pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
+        self.add_data_raw(scope_id, TypeId::of::<T>(), Box::new(data)).await
     }
 
-    pub(crate) fn add_data_raw(
+    pub(crate) async fn add_data_raw(
         &mut self,
         scope_id: &ScopeId,
         data_type: TypeId,
@@ -232,22 +342,20 @@ impl Registry {
         }
         self.data[data_id].replace(data);
         scope.created.insert(data_id);
-        scope.data.insert(data_type, data_id);
-        for child in scope.children.clone() {
-            self.propagate_data_raw(&child, data_type, Propagation::Add(data_id));
-        }
+        self.propagate_data_raw(scope_id, data_type, Propagation::Add(data_id)).await;
         Ok(())
     }
 
     /// Remove some data from this scope and its children.
     /// NOTE: This will only remove data if this scope originally added it! Otherwise,
     /// this fn will return an error.
-    pub(crate) fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
+    pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
         self.remove_data_raw(scope_id, TypeId::of::<T>())
+            .await
             .map(|o| o.map(|data| *unsafe { data.downcast_unchecked::<T>() }))
     }
 
-    pub(crate) fn remove_data_raw(
+    pub(crate) async fn remove_data_raw(
         &mut self,
         scope_id: &ScopeId,
         data_type: TypeId,
@@ -279,28 +387,47 @@ impl Registry {
         }
         .map(|(scope_id, data)| (self.scopes.get_mut(&scope_id).unwrap(), data))
         {
-            creator_scope.data.remove(&data_type);
-            for child in creator_scope.children.clone() {
-                self.propagate_data_raw(&child, data_type, Propagation::Remove);
-            }
+            let scope_id = creator_scope.id;
+            self.propagate_data_raw(&scope_id, data_type, Propagation::Remove).await;
             Ok(Some(data))
         } else {
             Ok(None)
         }
     }
 
-    fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
+    #[async_recursion::async_recursion]
+    async fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             match prop {
                 Propagation::Add(data_id) => {
                     scope.data.insert(data_type, data_id);
+                    if let Some(dep) = scope
+                        .dependencies
+                        .as_mut()
+                        .remove(&data_type)
+                        .map(|d| *unsafe { d.downcast_unchecked::<Dependency>() })
+                    {
+                        match dep {
+                            Dependency::Once(ref f) | Dependency::Linked(ref f) => {
+                                f.signal_raw(self.data[data_id].clone().unwrap()).await;
+                            }
+                        }
+                        if let Dependency::Linked(_) = dep {
+                            scope.dependencies.insert(dep);
+                        }
+                    }
                     for child in scope.children.clone() {
-                        self.propagate_data_raw(&child, data_type, prop);
+                        self.propagate_data_raw(&child, data_type, prop).await;
                     }
                 }
                 Propagation::Remove => {
                     scope.data.remove(&data_type);
-                    if scope.dependencies.contains(&data_type) {
+                    if let Some(Dependency::Linked(_)) = scope
+                        .dependencies
+                        .as_mut()
+                        .remove(&data_type)
+                        .map(|d| *unsafe { d.downcast_unchecked() })
+                    {
                         log::debug!(
                             "Aborting scope {} ({}) due to a removed critical dependency!",
                             scope.id,
@@ -309,7 +436,7 @@ impl Registry {
                         scope.abort();
                     } else {
                         for child in scope.children.clone() {
-                            self.propagate_data_raw(&child, data_type, prop);
+                            self.propagate_data_raw(&child, data_type, prop).await;
                         }
                     }
                 }
@@ -318,19 +445,45 @@ impl Registry {
     }
 
     /// Get a reference to some arbitrary data from the given scope
-    pub(crate) fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> Option<&T> {
-        self.scopes
+    pub(crate) fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> DepStatus<T> {
+        match self
+            .scopes
             .get(scope_id)
             .and_then(|scope| scope.data.get(&TypeId::of::<T>()))
             .and_then(|data_id| self.data[*data_id].as_ref())
-            .map(|t| unsafe { t.downcast_ref_unchecked::<T>() })
+            .map(|t| *unsafe { t.clone().downcast_unchecked::<T>() })
+        {
+            Some(d) => DepStatus::Ready(d),
+            None => {
+                let flag = DepSignal::default();
+                self.scopes
+                    .get_mut(scope_id)
+                    .unwrap()
+                    .dependencies
+                    .insert(Dependency::Once(flag.clone()));
+                DepStatus::Waiting(flag.handle())
+            }
+        }
     }
 
-    pub(crate) fn get_data_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> Option<&Box<dyn CloneAny + Send + Sync>> {
-        self.scopes
+    pub(crate) fn get_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> RawDepStatus {
+        match self
+            .scopes
             .get(scope_id)
             .and_then(|scope| scope.data.get(&data_type))
-            .and_then(|data_id| self.data[*data_id].as_ref())
+            .and_then(|data_id| self.data[*data_id].clone())
+        {
+            Some(d) => RawDepStatus::Ready(d),
+            None => {
+                let flag = DepSignal::default();
+                self.scopes
+                    .get_mut(scope_id)
+                    .unwrap()
+                    .dependencies
+                    .insert(Dependency::Once(flag.clone()));
+                RawDepStatus::Waiting(flag)
+            }
+        }
     }
 
     #[allow(unused)]
@@ -374,6 +527,100 @@ impl Registry {
             service: scope.service.clone(),
             children: scope.children.iter().filter_map(|id| self.service_tree(id)).collect(),
         })
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DepFlag {
+    waker: AtomicWaker,
+    set: AtomicBool,
+    val: Arc<RwLock<Option<Box<dyn CloneAny + Send + Sync>>>>,
+}
+
+impl DepFlag {
+    pub(crate) async fn signal<T: 'static + Clone + Send + Sync>(&self, val: T) {
+        self.set.store(true, Ordering::Relaxed);
+        self.waker.wake();
+        *self.val.write().await = Some(Box::new(val));
+    }
+
+    pub(crate) async fn signal_raw(&self, val: Box<dyn CloneAny + Send + Sync>) {
+        self.set.store(true, Ordering::Relaxed);
+        self.waker.wake();
+        *self.val.write().await = Some(val);
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.set.store(true, Ordering::Relaxed);
+        self.waker.wake();
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct DepSignal {
+    flag: Arc<DepFlag>,
+}
+
+impl DepSignal {
+    pub(crate) async fn signal<T: 'static + Clone + Send + Sync>(self, val: T) {
+        self.flag.signal(val).await
+    }
+
+    pub(crate) async fn signal_raw(&self, val: Box<dyn CloneAny + Send + Sync>) {
+        self.flag.signal_raw(val).await
+    }
+
+    pub(crate) fn cancel(self) {
+        self.flag.cancel();
+    }
+
+    pub(crate) fn handle<T: 'static + Clone + Send + Sync>(self) -> DepHandle<T> {
+        DepHandle {
+            flag: self.flag,
+            _type: PhantomData,
+        }
+    }
+}
+
+/// A handle to an awaitable dependency
+#[derive(Clone, Default)]
+pub struct DepHandle<T> {
+    flag: Arc<DepFlag>,
+    _type: PhantomData<T>,
+}
+
+impl<T: 'static + Clone> Future for DepHandle<T> {
+    type Output = anyhow::Result<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // quick check to avoid registration if already done.
+        if self.flag.set.load(Ordering::Relaxed) {
+            return match self.flag.val.try_read() {
+                Ok(lock) => Poll::Ready(
+                    lock.clone()
+                        .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
+                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
+                ),
+                Err(_) => Poll::Pending,
+            };
+        }
+
+        self.flag.waker.register(cx.waker());
+
+        // Need to check condition **after** `register` to avoid a race
+        // condition that would result in lost notifications.
+        if self.flag.set.load(Ordering::Relaxed) {
+            match self.flag.val.try_read() {
+                Ok(lock) => Poll::Ready(
+                    lock.clone()
+                        .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
+                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
+                ),
+                Err(_) => Poll::Pending,
+            }
+        } else {
+            Poll::Pending
+        }
     }
 }
 

@@ -215,7 +215,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::<Registry>::launch(|scope| {
+    RuntimeScope::<ArcedRegistry>::launch(|scope| {
         async move {
             scope
                 .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))

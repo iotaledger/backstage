@@ -343,8 +343,10 @@ async fn startup() -> anyhow::Result<()> {
             scope
                 .spawn_task(|rt| {
                     async move {
+                        let mut launcher_handle = rt.link_data::<Act<Launcher>>().await?;
                         for _ in 0..3 {
-                            rt.send_actor_event::<Launcher>(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
+                            launcher_handle
+                                .send(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
                                 .await
                                 .unwrap();
                         }

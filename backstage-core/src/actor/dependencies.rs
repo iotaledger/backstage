@@ -1,168 +1,126 @@
-use super::{Actor, Channel, System};
+use super::{Actor, System};
 use crate::{
-    prelude::{ActorPool, LockedRuntimeScope, Pool, RegistryAccess},
-    runtime::{Act, Res, Sys},
+    prelude::{ActorPool, Pool, RegistryAccess},
+    runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
-use std::{hash::Hash, marker::PhantomData, sync::Arc};
-use tokio::sync::{broadcast, RwLock};
-
-/// A dependency's status
-pub enum DepStatus<T> {
-    /// The dependency is ready to be used
-    Ready(T),
-    /// The dependency is not ready, here is a channel to await
-    Waiting(broadcast::Receiver<PhantomData<T>>),
-}
+use std::{hash::Hash, sync::Arc};
+use tokio::sync::RwLock;
 
 /// Defines dependencies that an actor or system can check for
 #[async_trait]
 pub trait Dependencies {
     /// Request a notification when a specific resource is ready
-    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> DepStatus<Self>
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
     where
-        Self: 'static + Send + Sync + Sized,
+        Self: 'static + Clone + Send + Sync,
     {
-        match Self::instantiate(scope).await {
-            Ok(dep) => DepStatus::Ready(dep),
-            Err(_) => DepStatus::Waiting(
-                if let Some(sender) = scope.get_data::<broadcast::Sender<PhantomData<Self>>>().await {
-                    sender.subscribe()
-                } else {
-                    let (sender, receiver) = broadcast::channel::<PhantomData<Self>>(8);
-                    scope.add_data_to_parent(sender).await;
-                    receiver
-                },
-            ),
-        }
+        scope.get_data().await.get().await
     }
 
     /// Instantiate instances of some dependencies
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self>
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
     where
-        Self: Sized;
+        Self: 'static + Clone + Send + Sync,
+    {
+        scope
+            .get_data_opt()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Missing dependency: {}", std::any::type_name::<Self>()))
+    }
 
     /// Link the dependencies so that removing them will shut down the dependent
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>);
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self>
+    where
+        Self: 'static + Clone + Send + Sync,
+    {
+        scope.depend_on().await.get().await
+    }
 }
 
 #[async_trait]
 impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
-    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self> {
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(Sys {
+            actor: Act::request(scope).await?,
+            state: Res::request(scope).await?,
+        })
+    }
+
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
         scope
             .system()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing system dependency: {}", std::any::type_name::<S>()))
     }
 
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
-        scope.depend_on::<S::State>().await;
-        scope.depend_on::<<S::Channel as Channel<S, S::Event>>::Sender>().await;
+    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
+        Ok(Sys {
+            actor: Act::link(scope).await?,
+            state: Res::link(scope).await?,
+        })
     }
 }
 
 #[async_trait]
-impl<A: Actor + Send + Sync> Dependencies for Act<A> {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
-        scope
-            .actor_event_handle()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Missing actor dependency: {}", std::any::type_name::<A>()))
-    }
-
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) {
-        scope.depend_on::<<A::Channel as Channel<A, A::Event>>::Sender>().await;
-    }
-}
+impl<A: 'static + Actor + Send + Sync> Dependencies for Act<A> {}
 
 #[async_trait]
-impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {
-    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self> {
-        scope
-            .resource()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Missing resource dependency: {}", std::any::type_name::<R>()))
-    }
-
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
-        scope.depend_on::<R>().await;
-    }
-}
+impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {}
 
 #[async_trait]
 impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + Sync> Dependencies for Pool<A, M> {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        // TODO: Verify the pool is not empty
+        Ok(Pool(scope.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await.get().await?))
+    }
+
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
             .pool_with_metric()
             .await
             .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<ActorPool<A, M>>()))
     }
 
-    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, R>) {
-        scope.depend_on::<Arc<RwLock<ActorPool<A, M>>>>().await;
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        // TODO: Verify the pool is not empty
+        Ok(Pool(scope.depend_on::<Arc<RwLock<ActorPool<A, M>>>>().await.get().await?))
     }
 }
 
 #[async_trait]
 impl Dependencies for () {
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut LockedRuntimeScope<'_, R>) -> anyhow::Result<Self> {
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         Ok(())
     }
 
-    async fn link<Reg: 'static + RegistryAccess + Send + Sync>(_scope: &mut LockedRuntimeScope<'_, Reg>) {}
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(())
+    }
+
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(())
+    }
 }
 
 macro_rules! impl_dependencies {
     ($($gen:ident),+) => {
         #[async_trait]
         impl<$($gen),+> Dependencies for ($($gen),+,)
-        where $($gen: Dependencies + Send + Sync),+
+        where $($gen: 'static + Dependencies + Clone + Send + Sync),+
         {
-            async fn request<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> DepStatus<Self>
-            where
-                Self: 'static + Send + Sync,
+            async fn request<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self>
             {
-                let mut receivers = anymap::Map::<dyn anymap::any::Any + Send + Sync>::new();
-                let mut total = 0;
-                let mut ready = 0;
-                $(
-                    total += 1;
-                    let status = $gen::request(scope).await;
-                    match status {
-                        DepStatus::Ready(dep) => {
-                            ready += 1;
-                            receivers.insert(dep);
-                        }
-                        DepStatus::Waiting(receiver) => {
-                            receivers.insert(receiver);
-                        }
-                    }
-                )+
-                if total == ready {
-                    DepStatus::Ready(($(receivers.remove::<$gen>().unwrap()),+,))
-                } else {
-                    let (sender, receiver) = broadcast::channel::<PhantomData<Self>>(8);
-                    tokio::task::spawn(async move {
-                        $(
-                            if let Some(mut receiver) = receivers.remove::<broadcast::Receiver<PhantomData<$gen>>>() {
-                                if let Err(_) = receiver.recv().await {
-                                    return;
-                                }
-                            }
-                        )+
-                        sender.send(PhantomData).ok();
-                    });
-                    DepStatus::Waiting(receiver)
-                }
+                Ok(($($gen::request(scope).await?),+,))
             }
 
-            async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) -> anyhow::Result<Self>
+            async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self>
             {
                 Ok(($($gen::instantiate(scope).await?),+,))
             }
 
-            async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut LockedRuntimeScope<'_, Reg>) {
-                $($gen::link(scope).await);+
+            async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
+                Ok(($($gen::link(scope).await?),+,))
             }
         }
     };

@@ -15,7 +15,7 @@ use futures::{
 };
 
 #[derive(Default)]
-pub struct ShutdownFlag {
+pub(crate) struct ShutdownFlag {
     waker: AtomicWaker,
     set: AtomicBool,
 }
@@ -27,12 +27,14 @@ impl ShutdownFlag {
     }
 }
 
+/// A handle which can be invoked to shutdown an actor
 #[derive(Clone, Default)]
 pub struct ShutdownHandle {
     flag: Arc<ShutdownFlag>,
 }
 
 impl ShutdownHandle {
+    /// Notify the listener of this handle that it should shut down
     pub fn shutdown(&self) {
         self.flag.signal()
     }

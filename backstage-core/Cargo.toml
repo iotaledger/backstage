@@ -14,6 +14,7 @@ exclude = [".github/**/*"]
 backstage-macros = { path = "../backstage-macros" }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
+async-recursion = "0.3"
 futures = "0.3"
 tokio = { version = "1.5", features = ["sync", "time", "rt"] }
 lazy_static = "1.4"

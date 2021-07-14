@@ -1,123 +1,26 @@
 use super::*;
 use crate::actor::{
-    ActorError, ActorRequest, DepStatus, Dependencies, ErrorReport, EventDriven, Service, ServiceTree, ShutdownHandle, ShutdownStream,
-    StatusChange, SuccessReport, SupervisorEvent,
+    ActorError, ActorRequest, Dependencies, ErrorReport, EventDriven, Service, ServiceTree, ShutdownHandle, ShutdownStream, StatusChange,
+    SuccessReport, SupervisorEvent,
 };
 use futures::{future::Aborted, FutureExt};
 use std::{hash::Hash, panic::AssertUnwindSafe};
-use tokio::sync::{broadcast, RwLockWriteGuard};
 
 /// A runtime which defines a particular scope and functionality to
 /// create tasks within it.
 pub struct RuntimeScope<Reg: RegistryAccess> {
     pub(crate) scope_id: ScopeId,
     pub(crate) parent_id: Option<ScopeId>,
-    pub(crate) registry: Arc<RwLock<Reg>>,
+    pub(crate) registry: Reg,
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
     pub(crate) shutdown_handle: Option<ShutdownHandle>,
     pub(crate) abort_handle: Option<AbortHandle>,
-}
-
-pub struct LockedRuntimeScope<'a, Reg: RegistryAccess> {
-    scope: &'a RuntimeScope<Reg>,
-    registry: RwLockWriteGuard<'a, Reg>,
-}
-
-impl<'a, Reg: 'static + RegistryAccess + Send + Sync> LockedRuntimeScope<'a, Reg> {
-    pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
-        log::debug!("Adding {} to scope {}", std::any::type_name::<T>(), self.scope.scope_id);
-        self.registry
-            .add_data(&self.scope.scope_id, data)
-            .await
-            .expect(&format!("Scope {} is missing...", self.scope.scope_id))
-    }
-
-    pub(crate) async fn add_data_to_parent<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
-        if let Some(parent_id) = self.scope.parent_id {
-            log::debug!("Adding {} to parent scope {}", std::any::type_name::<T>(), parent_id);
-            self.registry
-                .add_data(&parent_id, data)
-                .await
-                .expect(&format!("Scope {} is missing...", parent_id))
-        }
-    }
-
-    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self) {
-        self.registry
-            .depend_on::<T>(&self.scope.scope_id)
-            .await
-            .expect(&format!("Scope {} is missing...", self.scope.scope_id))
-    }
-
-    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
-        self.registry.get_data(&self.scope.scope_id).await
-    }
-
-    pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
-        log::debug!("Removing {} from scope {}", std::any::type_name::<T>(), self.scope.scope_id);
-        self.registry.remove_data(&self.scope.scope_id).await.ok().flatten()
-    }
-
-    /// Get a shared reference to a system if it exists in this runtime's scope
-    pub async fn system<S: 'static + System + Send + Sync>(&mut self) -> Option<Sys<S>> {
-        if let Some(actor) = self.get_data::<<S::Channel as Channel<S, S::Event>>::Sender>().await {
-            if let Some(state) = self.get_data::<S::State>().await {
-                return Some(Sys {
-                    actor: Act(actor),
-                    state: Res(state),
-                });
-            }
-        }
-        None
-    }
-
-    /// Get a shared resource if it exists in this runtime's scope
-    pub async fn resource<R: 'static + Send + Sync + Clone>(&mut self) -> Option<Res<R>> {
-        self.get_data::<R>().await.map(|res| Res(res))
-    }
-
-    /// Get an actor's event handle, if it exists in this scope.
-    /// Note: This will only return a handle if the actor exists outside of a pool.
-    pub async fn actor_event_handle<A: Actor>(&mut self) -> Option<Act<A>> {
-        self.get_data::<<A::Channel as Channel<A, A::Event>>::Sender>()
-            .await
-            .and_then(|handle| (!handle.is_closed()).then(|| Act(handle)))
-    }
-
-    /// Get the pool of a specified actor if it exists in this runtime's scope
-    pub async fn pool_with_metric<A, M>(&mut self) -> Option<Pool<A, M>>
-    where
-        A: 'static + Actor + Send + Sync,
-        M: 'static + Hash + Eq + Clone + Send + Sync,
-    {
-        match self.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await {
-            Some(arc) => {
-                if arc.write().await.verify() {
-                    Some(Pool(arc))
-                } else {
-                    self.remove_data::<Arc<RwLock<ActorPool<A, M>>>>().await;
-                    None
-                }
-            }
-            None => None,
-        }
-    }
 }
 
 impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Get the scope id
     pub fn id(&self) -> ScopeId {
         self.scope_id
-    }
-
-    pub async fn lock(&self) -> LockedRuntimeScope<'_, Reg> {
-        let registry = self.registry.write().await;
-        LockedRuntimeScope { scope: self, registry }
-    }
-
-    pub async fn atomic<F: FnOnce(LockedRuntimeScope<'_, Reg>)>(&self, f: F) {
-        let registry = self.registry.write().await;
-        f(LockedRuntimeScope { scope: self, registry });
     }
 
     /// Launch a new root runtime scope
@@ -136,7 +39,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     pub(crate) async fn new<P: Into<Option<usize>> + Send, S: Into<String>, O: Into<Option<S>>>(
-        registry: Arc<RwLock<Reg>>,
+        registry: Reg,
         parent_scope_id: P,
         name: O,
         shutdown_handle: Option<ShutdownHandle>,
@@ -145,8 +48,6 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let name_opt = name.into().map(Into::into);
         let parent_id = parent_scope_id.into();
         let scope_id = registry
-            .write()
-            .await
             .new_scope(
                 parent_id.clone(),
                 |id| name_opt.unwrap_or_else(|| format!("Scope {}", id)),
@@ -197,8 +98,6 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     ) -> Self {
         let scope_id = self
             .registry
-            .write()
-            .await
             .new_scope(self.scope_id, name_fn, shutdown_handle.clone(), abort_handle.clone())
             .await;
         Self {
@@ -229,67 +128,39 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
         log::debug!("Adding {} to scope {}", std::any::type_name::<T>(), self.scope_id);
         self.registry
-            .write()
-            .await
             .add_data(&self.scope_id, data)
             .await
             .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
-    pub(crate) async fn add_data_to_parent<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
-        if let Some(parent_id) = self.parent_id {
-            log::debug!("Adding {} to parent scope {}", std::any::type_name::<T>(), parent_id);
-            self.registry
-                .write()
-                .await
-                .add_data(&parent_id, data)
-                .await
-                .expect(&format!("Scope {} is missing...", parent_id))
-        }
-    }
-
-    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self) {
+    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self) -> DepStatus<T> {
         self.registry
-            .write()
-            .await
             .depend_on::<T>(&self.scope_id)
             .await
             .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
-    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
-        self.registry.read().await.get_data(&self.scope_id).await
+    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&self) -> DepStatus<T> {
+        self.registry.get_data(&self.scope_id).await
+    }
+
+    pub(crate) async fn get_data_opt<T: 'static + Send + Sync + Clone>(&self) -> Option<T> {
+        self.get_data().await.into()
     }
 
     /// Request a dependency and wait for it to be added, forming a link between this scope and
     /// the requested data. If the data is removed from this scope, it will be shut down.
-    pub async fn link_data<T: 'static + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
-        let mut lock = self.lock().await;
-        let status = T::request(&mut lock).await;
-        T::link(&mut lock).await;
-        drop(lock);
-        match status {
-            DepStatus::Ready(t) => Ok(t),
-            DepStatus::Waiting(mut recv) => {
-                if let Err(_) = recv.recv().await {
-                    anyhow::bail!("Failed to acquire dependencies for {}", std::any::type_name::<T>());
-                }
-                T::instantiate(&mut self.lock().await)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<T>(), e))
-            }
-        }
+    pub async fn link_data<T: 'static + Clone + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
+        T::link(self).await
     }
 
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
         log::debug!("Removing {} from scope {}", std::any::type_name::<T>(), self.scope_id);
-        self.registry.write().await.remove_data(&self.scope_id).await.ok().flatten()
+        self.registry.remove_data(&self.scope_id).await.ok().flatten()
     }
 
     pub(crate) async fn service(&mut self) -> Service {
         self.registry
-            .read()
-            .await
             .get_service(&self.scope_id)
             .await
             .expect(&format!("Scope {} is missing...", self.scope_id))
@@ -297,7 +168,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Update this scope's service status
     pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()> {
-        self.registry.write().await.update_status(&self.scope_id, status).await
+        self.registry.update_status(&self.scope_id, status).await
     }
 
     /// Await the tasks in this runtime's scope
@@ -306,7 +177,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         for handle in self.join_handles.drain(..) {
             handle.await.ok();
         }
-        self.registry.write().await.drop_scope(&self.scope_id).await;
+        self.registry.drop_scope(&self.scope_id).await;
     }
 
     /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
@@ -315,21 +186,19 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         Self: Sized,
     {
-        self.registry.write().await.abort(&self.scope_id).await;
+        self.registry.abort(&self.scope_id).await;
     }
 
-    pub async fn print(&mut self) {
-        self.registry.read().await.print(&self.scope_id).await;
+    pub async fn print(&self) {
+        self.registry.print(&self.scope_id).await;
     }
 
-    pub async fn print_root(&mut self) {
-        self.registry.read().await.print(&0).await;
+    pub async fn print_root(&self) {
+        self.registry.print(&0).await;
     }
 
-    pub async fn service_tree(&mut self) -> ServiceTree {
+    pub async fn service_tree(&self) -> ServiceTree {
         self.registry
-            .read()
-            .await
             .service_tree(&self.scope_id)
             .await
             .expect(&format!("Scope {} is missing...", self.scope_id))
@@ -347,47 +216,40 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Get an actor's event handle, if it exists in this scope.
     /// Note: This will only return a handle if the actor exists outside of a pool.
-    pub async fn actor_event_handle<A: Actor>(&mut self) -> Option<Act<A>> {
-        self.get_data::<<A::Channel as Channel<A, A::Event>>::Sender>()
+    pub async fn actor_event_handle<A: 'static + Actor>(&self) -> Option<Act<A>> {
+        self.get_data_opt::<Act<A>>()
             .await
-            .and_then(|handle| (!handle.is_closed()).then(|| Act(handle)))
+            .and_then(|handle| (!handle.is_closed()).then(|| handle))
     }
 
     /// Send an event to a given actor, if it exists in this scope
-    pub async fn send_actor_event<A: Actor>(&mut self, event: A::Event) -> anyhow::Result<()> {
+    pub async fn send_actor_event<A: 'static + Actor>(&self, event: A::Event) -> anyhow::Result<()> {
         let mut handle = self
-            .get_data::<<A::Channel as Channel<A, A::Event>>::Sender>()
+            .get_data_opt::<Act<A>>()
             .await
             .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
-        Sender::<A::Event>::send(&mut handle, event).await
+        handle.send(event).await
     }
 
     /// Get a shared reference to a system if it exists in this runtime's scope
-    pub async fn system<S: 'static + System + Send + Sync>(&mut self) -> Option<Sys<S>> {
-        if let Some(actor) = self.get_data::<<S::Channel as Channel<S, S::Event>>::Sender>().await {
-            if let Some(state) = self.get_data::<S::State>().await {
-                return Some(Sys {
-                    actor: Act(actor),
-                    state: Res(state),
-                });
+    pub async fn system<S: 'static + System + Send + Sync>(&self) -> Option<Sys<S>> {
+        if let Some(actor) = self.get_data_opt::<Act<S>>().await {
+            if let Some(state) = self.get_data_opt::<Res<S::State>>().await {
+                return Some(Sys { actor, state });
             }
         }
         None
     }
 
     /// Get a shared resource if it exists in this runtime's scope
-    pub async fn resource<R: 'static + Send + Sync + Clone>(&mut self) -> Option<Res<R>> {
-        self.get_data::<R>().await.map(|res| Res(res))
+    pub async fn resource<R: 'static + Send + Sync + Clone>(&self) -> Option<Res<R>> {
+        self.get_data_opt::<Res<R>>().await
     }
 
     /// Add a shared resource and get a reference to it
     pub async fn add_resource<R: 'static + Send + Sync + Clone>(&mut self, resource: R) -> Res<R> {
-        self.add_data(resource.clone()).await;
-        if let Some(broadcaster) = self.remove_data::<broadcast::Sender<PhantomData<Res<R>>>>().await {
-            log::debug!("Broadcasting creation of Res<{}>", std::any::type_name::<R>());
-            broadcaster.send(PhantomData).ok();
-        }
+        self.add_data(Res(resource.clone())).await;
         Res(resource)
     }
 
@@ -397,12 +259,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         A: 'static + Actor + Send + Sync,
         M: 'static + Hash + Eq + Clone + Send + Sync,
     {
-        match self.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await {
-            Some(arc) => {
-                if arc.write().await.verify() {
-                    Some(Pool(arc))
+        match self.get_data_opt::<Pool<A, M>>().await {
+            Some(pool) => {
+                if pool.write().await.verify() {
+                    Some(pool)
                 } else {
-                    self.remove_data::<Arc<RwLock<ActorPool<A, M>>>>().await;
+                    self.remove_data::<Pool<A, M>>().await;
                     None
                 }
             }
@@ -416,12 +278,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Self: 'static + Sized,
         A: 'static + Actor + Send + Sync,
     {
-        match self.get_data::<Arc<RwLock<ActorPool<A, ()>>>>().await {
-            Some(arc) => {
-                if arc.write().await.verify() {
-                    Some(Pool(arc))
+        match self.get_data_opt::<Pool<A, ()>>().await {
+            Some(pool) => {
+                if pool.write().await.verify() {
+                    Some(pool)
                 } else {
-                    self.remove_data::<Arc<RwLock<ActorPool<A, ()>>>>().await;
+                    self.remove_data::<Pool<A, ()>>().await;
                     None
                 }
             }
@@ -517,10 +379,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             );
         }
         let supervisor_handle = supervisor_handle.into();
-        self.add_data(state).await;
+        self.add_data(Res(state)).await;
         self.common_spawn::<_, _, Sys<A>, _>(actor, supervisor_handle, true, |scope| {
             async move {
-                scope.remove_data::<A::State>().await;
+                scope.remove_data::<Res<A::State>>().await;
             }
             .boxed()
         })
@@ -558,41 +420,24 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let shutdown_handle = actor_rt.shutdown_handle.clone();
         let handle = actor_rt.handle();
         if sender_in_parent {
-            self.add_data(handle.clone().into_inner()).await;
+            self.add_data(handle.clone()).await;
         } else {
-            actor_rt.add_data(handle.clone().into_inner()).await;
+            actor_rt.add_data(handle.clone()).await;
         }
         let res = AssertUnwindSafe(actor.init(&mut actor_rt)).catch_unwind().await;
         let mut actor = Self::handle_init_res(res, &mut actor_rt, actor).await?;
-        let dep_status = A::Dependencies::request(&mut actor_rt.lock().await).await;
         let child_task = tokio::spawn(async move {
-            let deps = match dep_status {
-                DepStatus::Ready(deps) => deps,
-                DepStatus::Waiting(mut recv) => {
-                    log::debug!(
-                        "{} waiting for dependencies {}",
-                        std::any::type_name::<A>(),
-                        std::any::type_name::<A::Dependencies>()
-                    );
-                    if let Err(_) = recv.recv().await {
-                        panic!("Failed to acquire dependencies for {}", std::any::type_name::<A>());
-                    }
-                    log::debug!("{} acquired dependencies!", std::any::type_name::<A>());
-                    A::Dependencies::instantiate(&mut actor_rt.lock().await)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Cannot spawn {}: {}", std::any::type_name::<A>(), e))
-                        .unwrap()
-                }
-            };
-            A::Dependencies::link(&mut actor_rt.lock().await).await;
-            if let Some(broadcaster) = actor_rt.remove_data::<broadcast::Sender<PhantomData<B>>>().await {
-                log::debug!("Broadcasting creation of {}", std::any::type_name::<B>());
-                broadcaster.send(PhantomData).ok();
-            }
-
-            let res = Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
+            let res = Abortable::new(
+                AssertUnwindSafe(async {
+                    let deps = A::Dependencies::link(&mut actor_rt.scope).await?;
+                    actor.run(&mut actor_rt, deps).await
+                })
+                .catch_unwind(),
+                abort_registration,
+            )
+            .await;
             cleanup_fn(&mut actor_rt.scope).await;
-            actor_rt.remove_data::<<A::Channel as Channel<A, A::Event>>::Sender>().await;
+            actor_rt.remove_data::<Act<A>>().await;
             Self::handle_run_res(res, &mut actor_rt, supervisor_handle, actor).await
         });
         self.join_handles_mut().push(child_task);
@@ -672,9 +517,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         child_scope.abort().await;
         child_scope.join().await;
         if let Some(mut supervisor) = supervisor_handle {
-            match res.ok().map(Result::ok) {
-                Some(res) => match res {
-                    Some(res) => match res {
+            match res {
+                Ok(res) => match res {
+                    Ok(res) => match res {
                         Ok(_) => {
                             supervisor
                                 .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
@@ -682,12 +527,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                         }
 
                         Err(e) => {
+                            log::error!("{} exited with error: {}", std::any::type_name::<A>(), e);
                             supervisor
                                 .send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
                                 .await
                         }
                     },
-                    None => {
+                    Err(_) => {
+                        log::error!("{} panicked!", std::any::type_name::<A>());
                         supervisor
                             .send(Sup::Event::report_err(ErrorReport::new(
                                 state.into(),
@@ -697,7 +544,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                             .await
                     }
                 },
-                None => {
+                Err(_) => {
                     supervisor
                         .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
                         .await
@@ -708,9 +555,13 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 Ok(res) => match res {
                     Ok(res) => match res {
                         Ok(_) => Ok(()),
-                        Err(e) => anyhow::bail!(e),
+                        Err(e) => {
+                            log::error!("{} exited with error: {}", std::any::type_name::<A>(), e);
+                            anyhow::bail!(e)
+                        }
                     },
                     Err(_) => {
+                        log::error!("{} panicked!", std::any::type_name::<A>());
                         anyhow::bail!("Panicked!")
                     }
                 },
@@ -747,7 +598,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             supervisor_handle: supervisor_handle.into(),
         };
         f(&mut scoped_pool).await?;
-        self.add_data(Arc::new(RwLock::new(pool))).await;
+        self.add_data(Pool(Arc::new(RwLock::new(pool)))).await;
         Ok(())
     }
 
@@ -781,9 +632,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let pool = match self.pool_with_metric::<A, M>().await {
             Some(res) => res,
             None => {
-                let pool = Arc::new(RwLock::new(ActorPool::<A, M>::default()));
+                let pool = Pool(Arc::new(RwLock::new(ActorPool::<A, M>::default())));
                 self.add_data(pool.clone()).await;
-                Pool(pool)
+                pool
             }
         };
         if pool.write().await.get_by_metric(&metric).is_some() {
@@ -844,7 +695,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             None => {
                 let mut pool = ActorPool::<A, ()>::default();
                 pool.push_no_metric(handle.clone());
-                self.add_data(Arc::new(RwLock::new(pool))).await;
+                self.add_data(Pool(Arc::new(RwLock::new(pool)))).await;
             }
         };
         Ok((handle, shutdown_handle, abort_handle))
@@ -872,7 +723,7 @@ where
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     pub(crate) async fn new<P: Into<Option<usize>> + Send, S: Into<String>, O: Into<Option<S>>>(
-        registry: Arc<RwLock<Reg>>,
+        registry: Reg,
         actor: &A,
         parent_scope_id: P,
         name: O,

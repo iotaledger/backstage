@@ -127,7 +127,8 @@ impl<A: Actor, M: Hash + Clone> DataWrapper<Arc<RwLock<ActorPool<A, M>>>> for Po
     }
 }
 
-pub type BasicPool<A: Actor> = Pool<A, ()>;
+/// A basic actor pool with no metrics
+pub type BasicPool<A> = Pool<A, ()>;
 
 /// A pool of actors which can be queried for actor handles
 pub struct ActorPool<A: Actor, M: Hash + Clone> {

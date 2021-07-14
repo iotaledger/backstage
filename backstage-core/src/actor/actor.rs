@@ -1,6 +1,7 @@
 use super::{ActorError, Channel, Dependencies, SupervisorEvent};
 use crate::{
     actor::ShutdownStream,
+    prelude::Act,
     runtime::{ActorScopedRuntime, RegistryAccess, RuntimeScope},
 };
 use async_trait::async_trait;
@@ -16,7 +17,7 @@ where
     Self: Sized + Send + Sync,
 {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Dependencies: Dependencies + Send + Sync;
+    type Dependencies: Dependencies + Clone + Send + Sync;
     /// The type of event this actor will receive
     type Event: 'static + Send + Sync;
     /// The type of channel this actor will use to receive events
@@ -58,13 +59,13 @@ where
     /// Start with this actor as the root scope
     async fn start_as_root<Reg: 'static + RegistryAccess + Send + Sync>(mut self) -> anyhow::Result<()>
     where
-        Self: Sized,
+        Self: 'static + Sized,
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let mut scope = Reg::instantiate(Self::name(), Some(shutdown_handle.clone()), Some(abort_handle)).await;
-        scope.add_data(sender.clone()).await;
+        scope.add_data(Act::<Self>(sender.clone())).await;
         let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
             scope,
             handle: sender,
@@ -72,7 +73,7 @@ where
             shutdown_handle,
             supervisor_handle: None,
         };
-        let deps = Self::Dependencies::instantiate(&mut actor_rt.lock().await)
+        let deps = Self::Dependencies::instantiate(&mut actor_rt.scope)
             .await
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))
             .unwrap();
