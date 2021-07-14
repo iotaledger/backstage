@@ -72,19 +72,19 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {}
 impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + Sync> Dependencies for Pool<A, M> {
     async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         // TODO: Verify the pool is not empty
-        Ok(Pool(scope.get_data::<Arc<RwLock<ActorPool<A, M>>>>().await.get().await?))
+        scope.get_data().await.get().await
     }
 
     async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
             .pool_with_metric()
             .await
-            .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<ActorPool<A, M>>()))
+            .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<Pool<A, M>>()))
     }
 
     async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         // TODO: Verify the pool is not empty
-        Ok(Pool(scope.depend_on::<Arc<RwLock<ActorPool<A, M>>>>().await.get().await?))
+        scope.depend_on().await.get().await
     }
 }
 
