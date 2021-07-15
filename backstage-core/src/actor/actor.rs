@@ -52,7 +52,7 @@ where
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
 
     /// Get this actor's name
-    fn name() -> Cow<'static, str> {
+    fn name(&self) -> Cow<'static, str> {
         std::any::type_name::<Self>().into()
     }
 
