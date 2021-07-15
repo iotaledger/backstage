@@ -425,7 +425,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         log::debug!("Spawning {}", std::any::type_name::<A>());
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut actor_rt = self
-            .child_actor(&actor, A::name(), Some(abort_handle.clone()), supervisor_handle.clone())
+            .child_actor(&actor, actor.name(), Some(abort_handle.clone()), supervisor_handle.clone())
             .await?;
         let shutdown_handle = actor_rt.shutdown_handle.clone();
         let handle = actor_rt.handle();
