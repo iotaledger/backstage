@@ -148,6 +148,16 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         self.get_data().await.into()
     }
 
+    /// Query the registry for a dependency. This will return immediately whether or not it exists.
+    pub async fn query_data<T: 'static + Clone + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
+        T::instantiate(self).await
+    }
+
+    /// Request a dependency and wait for it to be available.
+    pub async fn request_data<T: 'static + Clone + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
+        T::request(self).await
+    }
+
     /// Request a dependency and wait for it to be added, forming a link between this scope and
     /// the requested data. If the data is removed from this scope, it will be shut down.
     pub async fn link_data<T: 'static + Clone + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {

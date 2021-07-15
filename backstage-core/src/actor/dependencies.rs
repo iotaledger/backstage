@@ -1,11 +1,10 @@
 use super::{Actor, System};
 use crate::{
-    prelude::{ActorPool, Pool, RegistryAccess},
+    prelude::{Pool, RegistryAccess},
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
-use std::{hash::Hash, sync::Arc};
-use tokio::sync::RwLock;
+use std::hash::Hash;
 
 /// Defines dependencies that an actor or system can check for
 #[async_trait]
@@ -85,6 +84,21 @@ impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + S
     async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         // TODO: Verify the pool is not empty
         scope.depend_on().await.get().await
+    }
+}
+
+#[async_trait]
+impl<D: 'static + Dependencies + Clone + Send + Sync> Dependencies for Option<D> {
+    async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(scope.get_data::<D>().await.get_opt())
+    }
+
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(D::instantiate(scope).await.ok())
+    }
+
+    async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+        Ok(scope.get_data::<D>().await.get_opt())
     }
 }
 
