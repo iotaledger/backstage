@@ -1,10 +1,10 @@
 use super::*;
 use crate::actor::{
-    ActorError, ActorRequest, Dependencies, ErrorReport, EventDriven, Service, ServiceTree, ShutdownHandle, ShutdownStream, StatusChange,
-    SuccessReport, SupervisorEvent,
+    ActorError, ActorPool, ActorRequest, BasicActorPool, Dependencies, ErrorReport, EventDriven, KeyedActorPool, Service, ServiceTree,
+    ShutdownHandle, ShutdownStream, StatusChange, SuccessReport, SupervisorEvent,
 };
 use futures::{future::Aborted, FutureExt};
-use std::{hash::Hash, panic::AssertUnwindSafe};
+use std::panic::AssertUnwindSafe;
 
 /// A runtime which defines a particular scope and functionality to
 /// create tasks within it.
@@ -263,37 +263,17 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Res(resource)
     }
 
-    /// Get the pool of a specified actor if it exists in this runtime's scope
-    pub async fn pool_with_metric<A, M>(&mut self) -> Option<Pool<A, M>>
+    /// Get the pool of a specified type if it exists in this runtime's scope
+    pub async fn pool<P>(&mut self) -> Option<Pool<P>>
     where
-        A: 'static + Actor + Send + Sync,
-        M: 'static + Hash + Eq + Clone + Send + Sync,
+        P: 'static + ActorPool + Send + Sync,
     {
-        match self.get_data_opt::<Pool<A, M>>().await {
+        match self.get_data_opt::<Pool<P>>().await {
             Some(pool) => {
                 if pool.write().await.verify() {
                     Some(pool)
                 } else {
-                    self.remove_data::<Pool<A, M>>().await;
-                    None
-                }
-            }
-            None => None,
-        }
-    }
-
-    /// Get the pool of a specified actor if it exists in this runtime's scope
-    pub async fn pool<A>(&mut self) -> Option<Pool<A, ()>>
-    where
-        Self: 'static + Sized,
-        A: 'static + Actor + Send + Sync,
-    {
-        match self.get_data_opt::<Pool<A, ()>>().await {
-            Some(pool) => {
-                if pool.write().await.verify() {
-                    Some(pool)
-                } else {
-                    self.remove_data::<Pool<A, ()>>().await;
+                    self.remove_data::<Pool<P>>().await;
                     None
                 }
             }
@@ -583,132 +563,73 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new pool of actors of a given type with some metric
-    pub async fn spawn_pool<A, M, Sup, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
+    pub async fn spawn_pool_with<Sup, I, F, P: ActorPool>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
-        A: 'static + Actor + Send + Sync,
         Sup: EventDriven,
         Sup::Event: SupervisorEvent,
-        M: 'static + Hash + Clone + Eq + Send + Sync,
         I: Into<Option<Act<Sup>>>,
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, M, Reg, Sup>) -> BoxFuture<'b, anyhow::Result<()>>,
+        P: 'static + Send + Sync,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Reg, Sup, P>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
-        if self.pool_with_metric::<A, M>().await.is_some() {
-            let service = self.service().await;
-            panic!(
-                "Attempted to add a duplicate pool ({}) to scope {} ({})",
-                std::any::type_name::<Pool<A, M>>(),
-                self.scope_id,
-                service.name
-            );
-        }
-        let mut pool = ActorPool::default();
-        let mut scoped_pool = ScopedActorPool {
+        f(&mut self.spawn_pool(supervisor_handle).await).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    pub async fn spawn_pool<Sup, I, P: ActorPool>(&mut self, supervisor_handle: I) -> ScopedActorPool<'_, Reg, Sup, P>
+    where
+        Sup: EventDriven,
+        Sup::Event: SupervisorEvent,
+        I: Into<Option<Act<Sup>>>,
+        P: 'static + Send + Sync,
+    {
+        let pool = if let Some(pool) = self.pool::<P>().await {
+            pool
+        } else {
+            let pool = Pool::<P>::default();
+            self.add_data(pool.clone()).await;
+            pool
+        };
+        let scoped_pool = ScopedActorPool {
             scope: self,
-            pool: &mut pool,
+            pool,
             supervisor_handle: supervisor_handle.into(),
         };
-        f(&mut scoped_pool).await?;
-        self.add_data(Pool(Arc::new(RwLock::new(pool)))).await;
-        Ok(())
+        scoped_pool
     }
 
-    /// Spawn a new pool of actors of a given type with no metrics
-    pub async fn spawn_basic_pool<A, Sup, I, F>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
-    where
-        A: 'static + Actor + Send + Sync,
-        Sup: EventDriven,
-        Sup::Event: SupervisorEvent,
-        I: Into<Option<Act<Sup>>>,
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<A, (), Reg, Sup>) -> BoxFuture<'b, anyhow::Result<()>>,
-    {
-        self.spawn_pool(supervisor_handle, f).await
-    }
-
-    /// Spawn a new actor into a pool, creating a pool if needed
-    pub async fn spawn_into_pool_with_metric<A, M, Sup, I>(
+    pub async fn spawn_into_pool<Sup, I, P: ActorPool>(
         &mut self,
-        actor: A,
-        metric: M,
         supervisor_handle: I,
-    ) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
+        actor: P::Actor,
+    ) -> anyhow::Result<(Act<P::Actor>, ShutdownHandle, AbortHandle)>
     where
-        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
         Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
-        M: 'static + Hash + Eq + Clone + Send + Sync,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
         I: Into<Option<Act<Sup>>>,
+        P: 'static + BasicActorPool + Send + Sync,
+        P::Actor: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     {
-        let pool = match self.pool_with_metric::<A, M>().await {
-            Some(res) => res,
-            None => {
-                let pool = Pool(Arc::new(RwLock::new(ActorPool::<A, M>::default())));
-                self.add_data(pool.clone()).await;
-                pool
-            }
-        };
-        if pool.write().await.get_by_metric(&metric).is_some() {
-            let service = self.service().await;
-            panic!(
-                "Attempted to add a duplicate metric to pool {} in scope {} ({})",
-                std::any::type_name::<Pool<A, M>>(),
-                self.scope_id,
-                service.name
-            );
-        }
-        let supervisor_handle = supervisor_handle.into();
-        let (handle, shutdown_handle, abort_handle) = self
-            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
-            .await?;
-        pool.write().await.push(handle.clone(), metric);
-        Ok((handle, shutdown_handle, abort_handle))
+        let mut pool = self.spawn_pool::<_, _, P>(supervisor_handle).await;
+        pool.spawn(actor).await
     }
 
-    /// Spawn a new actor into a pool with a default metric, creating a pool if needed
-    pub async fn spawn_into_pool_with_default_metric<A, M, Sup, I>(
+    pub async fn spawn_into_pool_keyed<Sup, I, P: ActorPool>(
         &mut self,
-        actor: A,
         supervisor_handle: I,
-    ) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
+        key: P::Key,
+        actor: P::Actor,
+    ) -> anyhow::Result<(Act<P::Actor>, ShutdownHandle, AbortHandle)>
     where
-        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
         Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
-        M: 'static + Hash + Eq + Clone + Default + Send + Sync,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
         I: Into<Option<Act<Sup>>>,
+        P: 'static + KeyedActorPool + Send + Sync,
+        P::Actor: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     {
-        self.spawn_into_pool_with_metric(actor, M::default(), supervisor_handle).await
-    }
-
-    /// Spawn a new actor into a pool with no metrics, creating a pool if needed
-    pub async fn spawn_into_pool<A, Sup, I>(
-        &mut self,
-        actor: A,
-        supervisor_handle: I,
-    ) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
-    where
-        A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
-        Sup: 'static + EventDriven,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
-        I: Into<Option<Act<Sup>>>,
-    {
-        let supervisor_handle = supervisor_handle.into();
-        let (handle, shutdown_handle, abort_handle) = self
-            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
-            .await?;
-        match self.pool::<A>().await {
-            Some(res) => {
-                res.write().await.push_no_metric(handle.clone());
-            }
-            None => {
-                let mut pool = ActorPool::<A, ()>::default();
-                pool.push_no_metric(handle.clone());
-                self.add_data(Pool(Arc::new(RwLock::new(pool)))).await;
-            }
-        };
-        Ok((handle, shutdown_handle, abort_handle))
+        let mut pool = self.spawn_pool::<_, _, P>(supervisor_handle).await;
+        pool.spawn_keyed(key, actor).await
     }
 }
 
@@ -833,38 +754,63 @@ where
     }
 }
 /// A scope for an actor pool, which only allows spawning of the specified actor
-pub struct ScopedActorPool<'a, A, M, Reg, Sup>
+pub struct ScopedActorPool<'a, Reg, Sup, P>
 where
-    A: Actor,
-    M: Hash + Clone,
     Reg: 'static + RegistryAccess + Send + Sync,
     Sup: EventDriven,
     Sup::Event: SupervisorEvent,
+    P: ActorPool,
 {
     scope: &'a mut RuntimeScope<Reg>,
-    pool: &'a mut ActorPool<A, M>,
+    pool: Pool<P>,
     supervisor_handle: Option<Act<Sup>>,
 }
 
-impl<'a, A, M, Reg, Sup> ScopedActorPool<'a, A, M, Reg, Sup>
+impl<'a, Reg, Sup, P> ScopedActorPool<'a, Reg, Sup, P>
 where
-    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
-    M: Hash + Eq + Clone,
+    P::Actor: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
     Reg: 'static + RegistryAccess + Send + Sync,
     Sup: 'static + EventDriven,
     Sup::Event: SupervisorEvent,
-    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
+    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+    P: BasicActorPool,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn_with_metric(&mut self, actor: A, metric: M) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
+    pub async fn spawn(&mut self, actor: P::Actor) -> anyhow::Result<(Act<P::Actor>, ShutdownHandle, AbortHandle)>
     where
-        A: 'static + Send + Sync,
+        P::Actor: 'static + Send + Sync,
     {
-        if self.pool.get_by_metric(&metric).is_some() {
+        let mut pool = self.pool.write().await;
+        let supervisor_handle = self.supervisor_handle.clone();
+        let (handle, shutdown_handle, abort_handle) = self
+            .scope
+            .common_spawn::<_, _, Act<P::Actor>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .await?;
+        pool.push(handle.clone());
+        Ok((handle, shutdown_handle, abort_handle))
+    }
+}
+
+impl<'a, Reg, Sup, P> ScopedActorPool<'a, Reg, Sup, P>
+where
+    P::Actor: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+    Reg: 'static + RegistryAccess + Send + Sync,
+    Sup: 'static + EventDriven,
+    Sup::Event: SupervisorEvent,
+    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+    P: KeyedActorPool,
+{
+    /// Spawn a new actor into this pool
+    pub async fn spawn_keyed(&mut self, key: P::Key, actor: P::Actor) -> anyhow::Result<(Act<P::Actor>, ShutdownHandle, AbortHandle)>
+    where
+        P::Actor: 'static + Send + Sync,
+    {
+        let mut pool = self.pool.write().await;
+        if pool.get(&key).is_some() {
             let service = self.scope.service().await;
             panic!(
                 "Attempted to add a duplicate metric to pool {} in scope {} ({})",
-                std::any::type_name::<Pool<A, M>>(),
+                std::any::type_name::<Pool<P>>(),
                 self.scope.scope_id,
                 service.name
             );
@@ -872,50 +818,9 @@ where
         let supervisor_handle = self.supervisor_handle.clone();
         let (handle, shutdown_handle, abort_handle) = self
             .scope
-            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
+            .common_spawn::<_, _, Act<P::Actor>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
             .await?;
-        self.pool.push(handle.clone(), metric);
-        Ok((handle, shutdown_handle, abort_handle))
-    }
-}
-
-impl<'a, A, M, Reg, Sup> ScopedActorPool<'a, A, M, Reg, Sup>
-where
-    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
-    M: Hash + Eq + Clone + Default,
-    Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: 'static + EventDriven,
-    Sup::Event: SupervisorEvent,
-    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
-{
-    /// Spawn a new actor into this pool
-    pub async fn spawn_default_metric(&mut self, actor: A) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
-    where
-        A: 'static + Send + Sync,
-    {
-        self.spawn_with_metric(actor, M::default()).await
-    }
-}
-
-impl<'a, A, Reg, Sup> ScopedActorPool<'a, A, (), Reg, Sup>
-where
-    A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
-    Reg: 'static + RegistryAccess + Send + Sync,
-    Sup: 'static + EventDriven,
-    Sup::Event: SupervisorEvent,
-    <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
-{
-    /// Spawn a new actor into this pool
-    pub async fn spawn(&mut self, actor: A) -> anyhow::Result<(Act<A>, ShutdownHandle, AbortHandle)>
-    where
-        A: 'static + Send + Sync,
-    {
-        let supervisor_handle = self.supervisor_handle.clone();
-        let (handle, shutdown_handle, abort_handle) = self
-            .scope
-            .common_spawn::<_, _, Act<A>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
-            .await?;
-        self.pool.push_no_metric(handle.clone());
+        pool.push(key, handle.clone());
         Ok((handle, shutdown_handle, abort_handle))
     }
 }

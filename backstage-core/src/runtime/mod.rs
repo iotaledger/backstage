@@ -3,6 +3,7 @@ use anymap::{
     any::{CloneAny, UncheckedAnyExt},
     raw::Entry,
 };
+use async_recursion::async_recursion;
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
@@ -395,7 +396,7 @@ impl Registry {
         }
     }
 
-    #[async_recursion::async_recursion]
+    #[async_recursion]
     async fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             match prop {

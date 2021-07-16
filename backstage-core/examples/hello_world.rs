@@ -117,10 +117,10 @@ impl Actor for Launcher {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         let my_handle = rt.handle();
-        rt.spawn_pool(my_handle.clone(), |pool| {
+        rt.spawn_pool_with::<_, _, _, MapPool<_, _>>(my_handle.clone(), |pool| {
             async move {
                 for i in 0..10 {
-                    let (_handle, _, _) = pool.spawn_with_metric(builder.clone().num(i).build(), i as i32).await?;
+                    pool.spawn_keyed(i as i32, builder.clone().num(i).build()).await?;
                 }
                 Ok(())
             }
@@ -150,13 +150,8 @@ impl Actor for Launcher {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool_with_metric::<HelloWorld, i32>().await {
-                        //pool.write().await.send_all(event).await.expect("Failed to pass along message!");
-                        pool.write()
-                            .await
-                            .send_by_metric(&i, event)
-                            .await
-                            .expect("Failed to pass along message!");
+                    if let Some(pool) = rt.pool::<MapPool<HelloWorld, i32>>().await {
+                        pool.write().await.send(&i, event).await.expect("Failed to pass along message!");
                         i += 1;
                     }
                 }
@@ -173,8 +168,9 @@ impl Actor for Launcher {
                         match e.error.request() {
                             ActorRequest::Restart => {
                                 info!("Restarting {} {}", e.state.name, e.state.num);
-                                let i = e.state.num;
-                                rt.spawn_into_pool_with_metric(e.state, i, my_handle.clone()).await?;
+                                let i = e.state.num as i32;
+                                rt.spawn_into_pool_keyed::<_, _, MapPool<HelloWorld, i32>>(my_handle.clone(), i, e.state)
+                                    .await?;
                             }
                             ActorRequest::Reschedule(_) => todo!(),
                             ActorRequest::Finish => (),

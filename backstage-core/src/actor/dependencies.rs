@@ -1,10 +1,9 @@
-use super::{Actor, System};
+use super::{Actor, ActorPool, System};
 use crate::{
     prelude::{Pool, RegistryAccess},
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
-use std::hash::Hash;
 
 /// Defines dependencies that an actor or system can check for
 #[async_trait]
@@ -68,21 +67,19 @@ impl<A: 'static + Actor + Send + Sync> Dependencies for Act<A> {}
 impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {}
 
 #[async_trait]
-impl<A: 'static + Actor + Send + Sync, M: 'static + Hash + Eq + Clone + Send + Sync> Dependencies for Pool<A, M> {
+impl<P: 'static + ActorPool + Send + Sync> Dependencies for Pool<P> {
     async fn request<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
-        // TODO: Verify the pool is not empty
         scope.get_data().await.get().await
     }
 
     async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         scope
-            .pool_with_metric()
+            .pool()
             .await
-            .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<Pool<A, M>>()))
+            .ok_or_else(|| anyhow::anyhow!("Missing actor pool dependency: {}", std::any::type_name::<Pool<P>>()))
     }
 
     async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
-        // TODO: Verify the pool is not empty
         scope.depend_on().await.get().await
     }
 }
