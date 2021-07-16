@@ -34,7 +34,7 @@ pub trait Receiver<E: Send> {
 }
 
 /// A tokio mpsc channel implementation
-pub struct TokioChannel<E>(PhantomData<E>);
+pub struct TokioChannel<E>(PhantomData<fn(E) -> E>);
 
 #[async_trait]
 impl<C: 'static + Send + Sync, E: 'static + Send + Sync> Channel<C, E> for TokioChannel<E> {

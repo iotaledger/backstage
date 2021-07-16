@@ -324,7 +324,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
-            panic!(
+            anyhow::bail!(
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
                 std::any::type_name::<A>(),
                 self.scope_id,
@@ -361,7 +361,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
-            panic!(
+            anyhow::bail!(
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
                 std::any::type_name::<A>(),
                 self.scope_id,
@@ -813,7 +813,7 @@ where
         let mut pool = self.pool.write().await;
         if pool.get(&key).is_some() {
             let service = self.scope.service().await;
-            panic!(
+            anyhow::bail!(
                 "Attempted to add a duplicate metric to pool {} in scope {} ({})",
                 std::any::type_name::<Pool<P>>(),
                 self.scope.scope_id,

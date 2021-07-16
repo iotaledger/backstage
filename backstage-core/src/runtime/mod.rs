@@ -587,7 +587,7 @@ impl DepSignal {
 #[derive(Clone, Default)]
 pub struct DepHandle<T> {
     flag: Arc<DepFlag>,
-    _type: PhantomData<T>,
+    _type: PhantomData<fn(T) -> T>,
 }
 
 impl<T: 'static + Clone> Future for DepHandle<T> {
