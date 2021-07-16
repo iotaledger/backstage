@@ -65,7 +65,12 @@ where
         let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let mut scope = Reg::instantiate(self.name(), Some(shutdown_handle.clone()), Some(abort_handle)).await;
-        scope.add_data(Act::<Self>(sender.clone())).await;
+        scope
+            .add_data(Act::<Self> {
+                sender: sender.clone(),
+                shutdown_handle: shutdown_handle.clone(),
+            })
+            .await;
         let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
             scope,
             handle: sender,

@@ -597,6 +597,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         scoped_pool
     }
 
+    /// Spawn an actor into a pool
     pub async fn spawn_into_pool<Sup, I, P: ActorPool>(
         &mut self,
         supervisor_handle: I,
@@ -614,6 +615,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         pool.spawn(actor).await
     }
 
+    /// Spawn an actor into a keyed pool
     pub async fn spawn_into_pool_keyed<Sup, I, P: ActorPool>(
         &mut self,
         supervisor_handle: I,
@@ -680,7 +682,10 @@ where
 
     /// Get this actors's handle
     pub fn handle(&self) -> Act<A> {
-        Act(self.handle.clone())
+        Act {
+            sender: self.handle.clone(),
+            shutdown_handle: self.shutdown_handle.clone(),
+        }
     }
 
     /// Get this actors's shutdown handle
@@ -822,5 +827,13 @@ where
             .await?;
         pool.push(key, handle.clone());
         Ok((handle, shutdown_handle, abort_handle))
+    }
+
+    /// Shutdown the actor with the given key
+    pub async fn shutdown(&mut self, key: P::Key) -> anyhow::Result<()> {
+        let pool = self.pool.read().await;
+        pool.get(&key)
+            .map(|handle| handle.shutdown())
+            .ok_or_else(|| anyhow::anyhow!("No actor for given key!"))
     }
 }

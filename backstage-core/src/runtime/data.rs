@@ -1,8 +1,5 @@
-use crate::actor::{Actor, ActorPool, Channel, EventDriven, IdPool, Sender, System};
-use lru::LruCache;
+use crate::actor::{ActorPool, Channel, EventDriven, Sender, ShutdownHandle, System};
 use std::{
-    collections::HashMap,
-    hash::Hash,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -56,19 +53,28 @@ impl<S: System> Clone for Sys<S> {
 }
 
 /// An actor handle, used to send events
-pub struct Act<A: EventDriven>(pub <A::Channel as Channel<A, A::Event>>::Sender);
+pub struct Act<A: EventDriven> {
+    pub(crate) sender: <A::Channel as Channel<A, A::Event>>::Sender,
+    pub(crate) shutdown_handle: ShutdownHandle,
+}
+
+impl<A: EventDriven> Act<A> {
+    pub(crate) fn shutdown(&self) {
+        self.shutdown_handle.shutdown();
+    }
+}
 
 impl<A: EventDriven> Deref for Act<A> {
     type Target = <A::Channel as Channel<A, A::Event>>::Sender;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.sender
     }
 }
 
 impl<A: EventDriven> DerefMut for Act<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.sender
     }
 }
 
@@ -77,24 +83,27 @@ where
     <A::Channel as Channel<A, A::Event>>::Sender: Clone,
 {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            sender: self.sender.clone(),
+            shutdown_handle: self.shutdown_handle.clone(),
+        }
     }
 }
 
 impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A, A::Event>>::Sender> for Act<A> {
     fn into_inner(self) -> <A::Channel as Channel<A, A::Event>>::Sender {
-        self.0
+        self.sender
     }
 }
 
 #[async_trait::async_trait]
 impl<A: EventDriven> Sender<A::Event> for Act<A> {
     async fn send(&mut self, event: A::Event) -> anyhow::Result<()> {
-        self.0.send(event).await
+        self.sender.send(event).await
     }
 
     fn is_closed(&self) -> bool {
-        self.0.is_closed()
+        self.sender.is_closed()
     }
 }
 
