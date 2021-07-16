@@ -59,7 +59,8 @@ pub struct Act<A: EventDriven> {
 }
 
 impl<A: EventDriven> Act<A> {
-    pub(crate) fn shutdown(&self) {
+    /// Shut down the actor with this handle. Use with care!
+    pub fn shutdown(&self) {
         self.shutdown_handle.shutdown();
     }
 }

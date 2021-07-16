@@ -828,12 +828,4 @@ where
         pool.push(key, handle.clone());
         Ok((handle, shutdown_handle, abort_handle))
     }
-
-    /// Shutdown the actor with the given key
-    pub async fn shutdown(&mut self, key: P::Key) -> anyhow::Result<()> {
-        let pool = self.pool.read().await;
-        pool.get(&key)
-            .map(|handle| handle.shutdown())
-            .ok_or_else(|| anyhow::anyhow!("No actor for given key!"))
-    }
 }
