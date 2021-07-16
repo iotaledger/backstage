@@ -51,6 +51,8 @@ pub trait KeyedActorPool: ActorPool {
 
     fn get_mut(&mut self, key: &Self::Key) -> Option<&mut Act<Self::Actor>>;
 
+    fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send>;
+
     async fn send(&mut self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
         if let Some(handle) = KeyedActorPool::get_mut(self, key) {
             handle.send(event).await
@@ -235,5 +237,9 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A,
 
     fn get_mut(&mut self, key: &Self::Key) -> Option<&mut Act<Self::Actor>> {
         self.map.get_mut(key)
+    }
+
+    fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send> {
+        Box::new(self.map.iter())
     }
 }
