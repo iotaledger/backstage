@@ -34,6 +34,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         scope.update_status(ServiceStatus::Running).await.ok();
         let res = f(&mut scope).await;
         scope.update_status(ServiceStatus::Stopping).await.ok();
+        if res.is_err() {
+            scope.abort().await;
+        }
         scope.join().await;
         res
     }
@@ -121,6 +124,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         child_scope.update_status(ServiceStatus::Running).await.ok();
         let res = Abortable::new(f(&mut child_scope), abort_registration).await;
         child_scope.update_status(ServiceStatus::Stopping).await.ok();
+        if let Ok(Err(_)) = res {
+            child_scope.abort().await;
+        }
         child_scope.join().await;
         res.map_err(|_| anyhow::anyhow!("Aborted scope!")).and_then(|res| res)
     }
