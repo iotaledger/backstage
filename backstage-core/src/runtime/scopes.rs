@@ -441,52 +441,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     where
         Sup: EventDriven,
         Sup::Event: SupervisorEvent,
-        A: Actor + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
+        A: Actor,
     {
-        let service = child_scope.service().await;
-        if let Some(supervisor) = child_scope.supervisor_handle.as_mut() {
-            match res.ok() {
-                Some(res) => match res {
-                    Ok(_) => Ok(state),
-                    Err(e) => {
-                        supervisor
-                            .send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
-                            .await
-                            .ok();
-                        child_scope.abort().await;
-                        child_scope.join().await;
-                        anyhow::bail!("Actor Error!");
-                    }
-                },
-                None => {
-                    supervisor
-                        .send(Sup::Event::report_err(ErrorReport::new(
-                            state.into(),
-                            service,
-                            ActorError::RuntimeError(ActorRequest::Restart),
-                        )))
-                        .await
-                        .ok();
+        match res {
+            Ok(res) => match res {
+                Ok(_) => Ok(state),
+                Err(e) => {
                     child_scope.abort().await;
                     child_scope.join().await;
-                    anyhow::bail!("Panicked!");
+                    anyhow::bail!(e)
                 }
-            }
-        } else {
-            match res {
-                Ok(res) => match res {
-                    Ok(_) => Ok(state),
-                    Err(e) => {
-                        child_scope.abort().await;
-                        child_scope.join().await;
-                        anyhow::bail!(e)
-                    }
-                },
-                Err(_) => {
-                    child_scope.abort().await;
-                    child_scope.join().await;
-                    anyhow::bail!("Panicked!")
-                }
+            },
+            Err(_) => {
+                child_scope.abort().await;
+                child_scope.join().await;
+                anyhow::bail!("Panicked!")
             }
         }
     }
@@ -701,6 +670,57 @@ where
     {
         let handle = self.handle();
         self.scope.spawn_system(actor, state, handle).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    pub async fn spawn_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + Send + Sync,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Reg, A, P>) -> BoxFuture<'b, anyhow::Result<()>>,
+    {
+        let handle = self.handle();
+        self.scope.spawn_pool_with::<A, _, F, P>(handle, f).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    pub async fn spawn_pool<P: ActorPool>(&mut self) -> ScopedActorPool<'_, Reg, A, P>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + Send + Sync,
+    {
+        let handle = self.handle();
+        self.scope.spawn_pool::<A, _, P>(handle).await
+    }
+
+    /// Spawn an actor into a pool
+    pub async fn spawn_into_pool<P: ActorPool>(&mut self, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + BasicActorPool + Send + Sync,
+        P::Actor: Actor + Into<<<A as EventDriven>::Event as SupervisorEvent>::ChildStates>,
+    {
+        let handle = self.handle();
+        self.scope.spawn_into_pool::<A, _, P>(handle, actor).await
+    }
+
+    /// Spawn an actor into a keyed pool
+    pub async fn spawn_into_pool_keyed<P: ActorPool>(&mut self, key: P::Key, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + KeyedActorPool + Send + Sync,
+        P::Actor: Actor + Into<<<A as EventDriven>::Event as SupervisorEvent>::ChildStates>,
+    {
+        let handle = self.handle();
+        self.scope.spawn_into_pool_keyed::<A, _, P>(handle, key, actor).await
     }
 
     /// Get the next event from the event receiver

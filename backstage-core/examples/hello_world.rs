@@ -117,17 +117,10 @@ impl Actor for Launcher {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         let my_handle = rt.handle();
-        rt.spawn_pool_with::<_, _, _, MapPool<_, _>>(my_handle.clone(), |pool| {
-            async move {
-                for i in 0..10 {
-                    pool.spawn_keyed(i as i32, builder.clone().num(i).build()).await?;
-                }
-                Ok(())
-            }
-            .boxed()
-        })
-        .await
-        .expect("Failed to create actor pool!");
+        for i in 0..10 {
+            rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i as i32, builder.clone().num(i).build())
+                .await?;
+        }
 
         tokio::task::spawn(ctrl_c(my_handle.into_inner()));
         Ok(())
@@ -144,7 +137,6 @@ impl Actor for Launcher {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Running).await.ok();
-        let my_handle = rt.handle();
         let mut i = 0;
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -169,8 +161,7 @@ impl Actor for Launcher {
                             ActorRequest::Restart => {
                                 info!("Restarting {} {}", e.state.name, e.state.num);
                                 let i = e.state.num as i32;
-                                rt.spawn_into_pool_keyed::<_, _, MapPool<HelloWorld, i32>>(my_handle.clone(), i, e.state)
-                                    .await?;
+                                rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i, e.state).await?;
                             }
                             ActorRequest::Reschedule(_) => todo!(),
                             ActorRequest::Finish => (),
