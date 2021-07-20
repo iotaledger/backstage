@@ -190,10 +190,10 @@ pub trait RegistryAccess: Clone {
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> usize;
+    ) -> anyhow::Result<usize>;
 
     /// Drop the scope and all child scopes
-    async fn drop_scope(&self, scope_id: &ScopeId);
+    async fn drop_scope(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
 
     /// Add arbitrary data to this scope
     async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()>;
@@ -205,23 +205,23 @@ pub trait RegistryAccess: Clone {
     async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
 
     /// Get arbitrary data from this scope
-    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> DepStatus<T>;
+    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>>;
 
     /// Get this scope's service
-    async fn get_service(&self, scope_id: &ScopeId) -> Option<Service>;
+    async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service>;
 
     /// Update the status of this scope
     async fn update_status(&self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
 
     /// Abort this scope
-    async fn abort(&self, scope_id: &ScopeId);
+    async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
 
     /// Print the tree hierarchy starting with this scope
     /// NOTE: To print the entire tree, use scope id `&0` as it will always refer to the root
     async fn print(&self, scope_id: &ScopeId);
 
     /// Request the service tree from this scope
-    async fn service_tree(&self, scope_id: &ScopeId) -> Option<ServiceTree>;
+    async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree>;
 }
 
 /// The central registry that stores all data for the application.
@@ -274,22 +274,25 @@ impl Registry {
     }
 
     /// Drop a scope and all of its children recursively
-    pub(crate) fn drop_scope(&mut self, scope_id: &ScopeId) {
-        if let Some(scope) = self.scopes.remove(scope_id) {
-            log::debug!("Dropping scope {} ({})", scope_id, scope.service.name);
-            for child in scope.children.iter() {
-                self.drop_scope(child);
-            }
-            for &data_id in scope.created.iter() {
-                if self.data[data_id].take().is_some() {
-                    self.data_pool.return_id(data_id);
-                }
-            }
-            if let Some(parent) = scope.parent.and_then(|parent_id| self.scopes.get_mut(&parent_id)) {
-                parent.children.retain(|id| id != scope_id);
-            }
-            self.scope_pool.return_id(*scope_id);
+    pub(crate) fn drop_scope(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
+        let scope = self
+            .scopes
+            .remove(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        log::debug!("Dropping scope {} ({})", scope_id, scope.service.name);
+        for child in scope.children.iter() {
+            self.drop_scope(child)?;
         }
+        for &data_id in scope.created.iter() {
+            if self.data[data_id].take().is_some() {
+                self.data_pool.return_id(data_id);
+            }
+        }
+        if let Some(parent) = scope.parent.and_then(|parent_id| self.scopes.get_mut(&parent_id)) {
+            parent.children.retain(|id| id != scope_id);
+        }
+        self.scope_pool.return_id(*scope_id);
+        Ok(())
     }
 
     pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
@@ -297,29 +300,26 @@ impl Registry {
     }
 
     pub(crate) async fn depend_on_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
-        let status = self.get_data_raw(scope_id, data_type);
-        if let Some(scope) = self.scopes.get_mut(scope_id) {
-            Ok(match scope.dependencies.as_mut().entry(data_type) {
-                Entry::Occupied(mut e) => {
-                    let val = unsafe { e.get_mut().downcast_mut_unchecked::<Dependency>() };
-                    val.upgrade();
-                    match val {
-                        Dependency::Linked(f) => RawDepStatus::Waiting(f.clone()),
-                        _ => panic!(),
-                    }
+        let status = self.get_data_raw(scope_id, data_type)?;
+        let scope = self.scopes.get_mut(scope_id).unwrap();
+        Ok(match scope.dependencies.as_mut().entry(data_type) {
+            Entry::Occupied(mut e) => {
+                let val = unsafe { e.get_mut().downcast_mut_unchecked::<Dependency>() };
+                val.upgrade();
+                match val {
+                    Dependency::Linked(f) => RawDepStatus::Waiting(f.clone()),
+                    _ => panic!(),
                 }
-                Entry::Vacant(v) => {
-                    let flag = DepSignal::default();
-                    unsafe { v.insert(Box::new(Dependency::Linked(flag.clone()))) };
-                    if let RawDepStatus::Ready(t) = status {
-                        flag.signal_raw(t).await;
-                    }
-                    RawDepStatus::Waiting(flag)
+            }
+            Entry::Vacant(v) => {
+                let flag = DepSignal::default();
+                unsafe { v.insert(Box::new(Dependency::Linked(flag.clone()))) };
+                if let RawDepStatus::Ready(t) = status {
+                    flag.signal_raw(t).await;
                 }
-            })
-        } else {
-            anyhow::bail!("No scope with id {}!", scope_id)
-        }
+                RawDepStatus::Waiting(flag)
+            }
+        })
     }
 
     /// Add some arbitrary data to a scope and its children recursively
@@ -446,87 +446,101 @@ impl Registry {
     }
 
     /// Get a reference to some arbitrary data from the given scope
-    pub(crate) fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> DepStatus<T> {
-        match self
-            .scopes
-            .get(scope_id)
-            .and_then(|scope| scope.data.get(&TypeId::of::<T>()))
-            .and_then(|data_id| self.data[*data_id].as_ref())
-            .map(|t| *unsafe { t.clone().downcast_unchecked::<T>() })
-        {
-            Some(d) => DepStatus::Ready(d),
-            None => {
-                let flag = DepSignal::default();
-                self.scopes
-                    .get_mut(scope_id)
-                    .unwrap()
-                    .dependencies
-                    .insert(Dependency::Once(flag.clone()));
-                DepStatus::Waiting(flag.handle())
-            }
-        }
+    pub(crate) fn get_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
+        Ok(
+            match self
+                .scopes
+                .get(scope_id)
+                .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+                .data
+                .get(&TypeId::of::<T>())
+                .and_then(|&data_id| self.data[data_id].as_ref())
+                .map(|t| *unsafe { t.clone().downcast_unchecked::<T>() })
+            {
+                Some(d) => DepStatus::Ready(d),
+                None => {
+                    let flag = DepSignal::default();
+                    self.scopes
+                        .get_mut(scope_id)
+                        .unwrap()
+                        .dependencies
+                        .insert(Dependency::Once(flag.clone()));
+                    DepStatus::Waiting(flag.handle())
+                }
+            },
+        )
     }
 
-    pub(crate) fn get_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> RawDepStatus {
-        match self
-            .scopes
-            .get(scope_id)
-            .and_then(|scope| scope.data.get(&data_type))
-            .and_then(|data_id| self.data[*data_id].clone())
-        {
-            Some(d) => RawDepStatus::Ready(d),
-            None => {
-                let flag = DepSignal::default();
-                self.scopes
-                    .get_mut(scope_id)
-                    .unwrap()
-                    .dependencies
-                    .insert(Dependency::Once(flag.clone()));
-                RawDepStatus::Waiting(flag)
-            }
-        }
+    pub(crate) fn get_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
+        Ok(
+            match self
+                .scopes
+                .get(scope_id)
+                .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+                .data
+                .get(&data_type)
+                .and_then(|&data_id| self.data[data_id].clone())
+            {
+                Some(d) => RawDepStatus::Ready(d),
+                None => {
+                    let flag = DepSignal::default();
+                    self.scopes
+                        .get_mut(scope_id)
+                        .unwrap()
+                        .dependencies
+                        .insert(Dependency::Once(flag.clone()));
+                    RawDepStatus::Waiting(flag)
+                }
+            },
+        )
     }
 
-    #[allow(unused)]
-    /// Get a mutable reference to some arbitrary data from the given scope
-    pub(crate) fn get_data_mut<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> Option<&mut T> {
+    pub(crate) fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service> {
         self.scopes
             .get(scope_id)
-            .and_then(|scope| scope.data.get(&TypeId::of::<T>()).cloned())
-            .and_then(move |data_id| self.data[data_id].as_mut().map(|t| unsafe { t.downcast_mut_unchecked::<T>() }))
-    }
-
-    pub(crate) fn get_service(&self, scope_id: &ScopeId) -> Option<Service> {
-        self.scopes.get(scope_id).map(|scope| scope.service.clone())
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))
+            .map(|scope| scope.service.clone())
     }
 
     pub(crate) fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
         self.scopes
             .get_mut(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))
             .map(|scope| scope.service.update_status(status))
-            .ok_or_else(|| anyhow::anyhow!("Scope {} does not exist!", scope_id))
     }
 
-    pub(crate) fn abort(&mut self, scope_id: &ScopeId) {
+    pub(crate) fn abort(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
         for child in self
             .scopes
             .get(&scope_id)
-            .map(|scope| scope.children.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .children
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
         {
-            self.abort(&child);
+            self.abort(&child).ok();
         }
         self.scopes.get_mut(scope_id).map(|scope| scope.abort());
+        Ok(())
     }
 
     pub(crate) fn print(&self, scope_id: &ScopeId) {
         log::debug!("Registry ({}):\n{}", scope_id, PrintableRegistry(self, *scope_id))
     }
 
-    pub(crate) fn service_tree(&self, scope_id: &ScopeId) -> Option<ServiceTree> {
-        self.scopes.get(scope_id).map(|scope| ServiceTree {
+    pub(crate) fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
+        let scope = self
+            .scopes
+            .get(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        Ok(ServiceTree {
             service: scope.service.clone(),
-            children: scope.children.iter().filter_map(|id| self.service_tree(id)).collect(),
+            children: scope
+                .children
+                .iter()
+                .map(|id| self.service_tree(id))
+                .collect::<anyhow::Result<Vec<ServiceTree>>>()?,
         })
     }
 }

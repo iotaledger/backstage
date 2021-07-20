@@ -246,18 +246,16 @@ impl Actor for Launcher {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status(ServiceStatus::Initializing).await.ok();
-        let my_handle = rt.handle();
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(howdy_builder.build(), my_handle.clone()).await?;
-        rt.spawn_actor(hello_world_builder.build(), my_handle.clone()).await?;
+        rt.spawn_actor(howdy_builder.build()).await?;
+        rt.spawn_actor(hello_world_builder.build()).await?;
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         rt.spawn_actor(
             WebsocketBuilder::new()
                 .listen_address(([127, 0, 0, 1], 8000).into())
-                .supervisor_handle(my_handle.clone())
+                .supervisor_handle(rt.handle())
                 .build(),
-            my_handle.clone(),
         )
         .await?;
         tokio::task::spawn(ctrl_c(rt.shutdown_handle()));

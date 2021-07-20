@@ -64,11 +64,12 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
-        let mut scope = Reg::instantiate(self.name(), Some(shutdown_handle.clone()), Some(abort_handle)).await;
+        let mut scope = Reg::instantiate(self.name(), Some(shutdown_handle.clone()), Some(abort_handle.clone())).await;
         scope
             .add_data(Act::<Self> {
                 sender: sender.clone(),
                 shutdown_handle: shutdown_handle.clone(),
+                abort_handle: abort_handle.clone(),
             })
             .await;
         let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
@@ -76,6 +77,7 @@ where
             handle: sender,
             receiver,
             shutdown_handle,
+            abort_handle,
             supervisor_handle: None,
         };
         let deps = Self::Dependencies::instantiate(&mut actor_rt.scope)

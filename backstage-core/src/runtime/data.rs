@@ -1,4 +1,5 @@
 use crate::actor::{ActorPool, Channel, EventDriven, Sender, ShutdownHandle, System};
+use futures::future::AbortHandle;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -56,12 +57,18 @@ impl<S: System> Clone for Sys<S> {
 pub struct Act<A: EventDriven> {
     pub(crate) sender: <A::Channel as Channel<A, A::Event>>::Sender,
     pub(crate) shutdown_handle: ShutdownHandle,
+    pub(crate) abort_handle: AbortHandle,
 }
 
 impl<A: EventDriven> Act<A> {
     /// Shut down the actor with this handle. Use with care!
     pub fn shutdown(&self) {
         self.shutdown_handle.shutdown();
+    }
+
+    /// Abort the actor with this handle. Use with care!
+    pub fn abort(&self) {
+        self.abort_handle.abort();
     }
 }
 
@@ -87,6 +94,7 @@ where
         Self {
             sender: self.sender.clone(),
             shutdown_handle: self.shutdown_handle.clone(),
+            abort_handle: self.abort_handle.clone(),
         }
     }
 }
