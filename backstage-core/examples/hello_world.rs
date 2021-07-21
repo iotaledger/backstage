@@ -143,7 +143,7 @@ impl Actor for Launcher {
                 LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
                     if let Some(pool) = rt.pool::<MapPool<HelloWorld, i32>>().await {
-                        pool.write().await.send(&i, event).expect("Failed to pass along message!");
+                        pool.send(&i, event).await.expect("Failed to pass along message!");
                         i += 1;
                     }
                 }

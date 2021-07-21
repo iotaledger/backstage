@@ -4,7 +4,6 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-use tokio::sync::RwLock;
 
 /// Wrapper for data types
 pub trait DataWrapper<T> {
@@ -118,7 +117,7 @@ impl<A: EventDriven> Sender<A::Event> for Act<A> {
 
 /// A pool of actors which can be used as a dependency
 #[derive(Default)]
-pub struct Pool<P: ActorPool>(pub Arc<RwLock<P>>);
+pub struct Pool<P: ActorPool>(pub Arc<P>);
 
 impl<P: ActorPool> Clone for Pool<P> {
     fn clone(&self) -> Self {
@@ -127,15 +126,15 @@ impl<P: ActorPool> Clone for Pool<P> {
 }
 
 impl<P: ActorPool> Deref for Pool<P> {
-    type Target = Arc<RwLock<P>>;
+    type Target = Arc<P>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<P: ActorPool> DataWrapper<Arc<RwLock<P>>> for Pool<P> {
-    fn into_inner(self) -> Arc<RwLock<P>> {
+impl<P: ActorPool> DataWrapper<Arc<P>> for Pool<P> {
+    fn into_inner(self) -> Arc<P> {
         self.0
     }
 }

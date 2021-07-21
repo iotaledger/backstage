@@ -275,7 +275,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         match self.get_data_opt::<Pool<P>>().await {
             Some(pool) => {
-                if pool.write().await.verify() {
+                if pool.verify().await {
                     Some(pool)
                 } else {
                     self.remove_data::<Pool<P>>().await;
@@ -821,13 +821,12 @@ where
     where
         P::Actor: 'static + Send + Sync,
     {
-        let mut pool = self.pool.write().await;
         let supervisor_handle = self.supervisor_handle.clone();
         let handle = self
             .scope
             .common_spawn::<_, _, Act<P::Actor>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
             .await?;
-        pool.push(handle.clone());
+        self.pool.push(handle.clone()).await;
         Ok(handle)
     }
 }
@@ -846,8 +845,7 @@ where
     where
         P::Actor: 'static + Send + Sync,
     {
-        let mut pool = self.pool.write().await;
-        if pool.get(&key).is_some() {
+        if self.pool.get(&key).await.is_some() {
             let service = self.scope.service().await;
             anyhow::bail!(
                 "Attempted to add a duplicate metric to pool {} in scope {} ({})",
@@ -861,7 +859,7 @@ where
             .scope
             .common_spawn::<_, _, Act<P::Actor>, _>(actor, supervisor_handle, false, |_| async move {}.boxed())
             .await?;
-        pool.push(key, handle.clone());
+        self.pool.push(key, handle.clone()).await;
         Ok(handle)
     }
 }

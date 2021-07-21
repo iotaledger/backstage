@@ -1,32 +1,110 @@
 use crate::prelude::*;
+use async_trait::async_trait;
 use lru::LruCache;
+use std::ops::DerefMut;
 use std::{collections::HashMap, hash::Hash};
+use tokio::sync::RwLock;
 
+#[async_trait]
 pub trait ActorPool: Default {
     type Actor: Actor;
 
-    fn verify(&mut self) -> bool;
+    async fn verify(&self) -> bool;
 
-    fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send>;
+    async fn handles(&self) -> Vec<Act<Self::Actor>>;
 
-    fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    where
+        <Self::Actor as Actor>::Event: Clone;
+}
+
+#[async_trait]
+pub trait BasicActorPool: ActorPool {
+    async fn push(&self, handle: Act<Self::Actor>);
+
+    async fn get(&self) -> Option<Act<Self::Actor>>;
+
+    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
+}
+
+#[async_trait]
+pub trait KeyedActorPool: ActorPool {
+    type Key: Send + Sync;
+
+    async fn push(&self, key: Self::Key, handle: Act<Self::Actor>);
+
+    async fn get(&self, key: &Self::Key) -> Option<Act<Self::Actor>>;
+
+    async fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
+}
+
+#[cfg(feature = "rand_pool")]
+pub struct RandomPool<A: Actor> {
+    handles: RwLock<Vec<Act<A>>>,
+}
+
+impl<A: Actor> Default for RandomPool<A> {
+    fn default() -> Self {
+        Self {
+            handles: RwLock::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(feature = "rand_pool")]
+#[async_trait]
+impl<A: Actor> ActorPool for RandomPool<A> {
+    type Actor = A;
+
+    async fn verify(&self) -> bool {
+        let mut handles = self.handles.write().await;
+        handles.retain(|handle| !handle.is_closed());
+        handles.len() != 0
+    }
+
+    async fn handles(&self) -> Vec<Act<A>> {
+        self.handles.read().await.iter().filter(|h| h.is_closed()).cloned().collect()
+    }
+
+    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
     where
         <Self::Actor as Actor>::Event: Clone,
     {
-        for handle in self.handles() {
+        for handle in self.handles.read().await.iter().filter(|h| h.is_closed()) {
             handle.send(event.clone())?;
         }
         Ok(())
     }
 }
 
-pub trait BasicActorPool: ActorPool {
-    fn push(&mut self, handle: Act<Self::Actor>);
+#[cfg(feature = "rand_pool")]
+use rand::Rng;
 
-    fn get(&self) -> Option<&Act<Self::Actor>>;
+#[cfg(feature = "rand_pool")]
+#[async_trait]
+impl<A: Actor> BasicActorPool for RandomPool<A> {
+    async fn push(&self, handle: Act<Self::Actor>) {
+        self.handles.write().await.push(handle);
+    }
 
-    fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
-        if let Some(handle) = self.get() {
+    async fn get(&self) -> Option<Act<Self::Actor>> {
+        let handles = self.handles.read().await;
+        if handles.len() != 0 {
+            let mut rng = rand::thread_rng();
+            handles.get(rng.gen_range(0..handles.len())).cloned()
+        } else {
+            None
+        }
+    }
+
+    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+        let handles = self.handles.read().await;
+        if let Some(handle) = if handles.len() != 0 {
+            let mut rng = rand::thread_rng();
+            handles.get(rng.gen_range(0..handles.len()))
+        } else {
+            None
+        } {
             handle.send(event)
         } else {
             anyhow::bail!("No handles to send to!");
@@ -34,121 +112,117 @@ pub trait BasicActorPool: ActorPool {
     }
 }
 
-pub trait KeyedActorPool: ActorPool {
-    type Key: Send + Sync;
-
-    fn push(&mut self, key: Self::Key, handle: Act<Self::Actor>);
-
-    fn get(&self, key: &Self::Key) -> Option<&Act<Self::Actor>>;
-
-    fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send>;
-
-    fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
-        if let Some(handle) = KeyedActorPool::get(self, key) {
-            handle.send(event)
-        } else {
-            anyhow::bail!("No handle for the given key!");
-        }
-    }
-}
-
-#[cfg(feature = "rand_pool")]
-pub struct RandomPool<A: Actor> {
-    handles: Vec<Act<A>>,
-}
-
-impl<A: Actor> Default for RandomPool<A> {
-    fn default() -> Self {
-        Self { handles: Vec::new() }
-    }
-}
-
-#[cfg(feature = "rand_pool")]
-impl<A: Actor> ActorPool for RandomPool<A> {
-    type Actor = A;
-
-    fn verify(&mut self) -> bool {
-        self.handles.retain(|handle| !handle.is_closed());
-        self.handles.len() != 0
-    }
-
-    fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.handles.iter())
-    }
-}
-
-#[cfg(feature = "rand_pool")]
-impl<A: Actor> BasicActorPool for RandomPool<A> {
-    fn push(&mut self, handle: Act<Self::Actor>) {
-        self.handles.push(handle);
-    }
-
-    fn get(&self) -> Option<&Act<Self::Actor>> {
-        use rand::Rng;
-        if self.handles.len() != 0 {
-            let mut rng = rand::thread_rng();
-            self.handles.get(rng.gen_range(0..self.handles.len()))
-        } else {
-            None
-        }
-    }
-}
-
 pub struct LruPool<A: Actor> {
+    inner: RwLock<LruInner<A>>,
+}
+
+pub struct LruInner<A: Actor> {
     handles: Vec<Option<Act<A>>>,
     lru: LruCache<usize, usize>,
     id_pool: IdPool<usize>,
 }
 
+#[async_trait]
 impl<A: Actor> ActorPool for LruPool<A> {
     type Actor = A;
 
-    fn verify(&mut self) -> bool {
-        for (id, opt) in self.handles.iter_mut().enumerate() {
+    async fn verify(&self) -> bool {
+        let mut lock = self.inner.write().await;
+        let inner = lock.deref_mut();
+        for (id, opt) in inner.handles.iter_mut().enumerate() {
             if opt.is_some() {
                 if opt.as_ref().unwrap().is_closed() {
                     *opt = None;
-                    self.lru.pop(&id);
-                    self.id_pool.return_id(id);
+                    inner.lru.pop(&id);
+                    inner.id_pool.return_id(id);
                 }
             }
         }
-        if self.handles.iter().all(|opt| opt.is_none()) {
+        if inner.handles.iter().all(|opt| opt.is_none()) {
             false
         } else {
             true
         }
     }
 
-    fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.handles.iter().filter_map(Option::as_ref))
+    async fn handles(&self) -> Vec<Act<A>> {
+        self.inner
+            .read()
+            .await
+            .handles
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|h| h.is_closed())
+            .cloned()
+            .collect()
+    }
+
+    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    where
+        <Self::Actor as Actor>::Event: Clone,
+    {
+        for handle in self
+            .inner
+            .read()
+            .await
+            .handles
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter(|h| h.is_closed())
+        {
+            handle.send(event.clone())?;
+        }
+        Ok(())
     }
 }
 
+#[async_trait]
 impl<A: Actor> BasicActorPool for LruPool<A> {
-    fn push(&mut self, handle: Act<Self::Actor>) {
-        let id = self.id_pool.get_id();
-        if id >= self.handles.len() {
-            self.handles.resize(id + 1, None);
+    async fn push(&self, handle: Act<Self::Actor>) {
+        let mut inner = self.inner.write().await;
+        let id = inner.id_pool.get_id();
+        if id >= inner.handles.len() {
+            inner.handles.resize(id + 1, None);
         }
-        self.handles[id] = Some(handle);
-        self.lru.put(id, id);
+        inner.handles[id] = Some(handle);
+        inner.lru.put(id, id);
     }
 
-    /// Get the least recently used handle. WARNING: This will not
-    /// update the LRU as this call does not grant mutable access to
-    /// the pool!
-    fn get(&self) -> Option<&Act<Self::Actor>> {
-        if let Some((&id, _)) = self.lru.peek_lru() {
-            let res = self.handles[id].as_ref();
+    /// Get the least recently used handle
+    async fn get(&self) -> Option<Act<Self::Actor>> {
+        let mut inner = self.inner.write().await;
+        if let Some((id, _)) = inner.lru.pop_lru() {
+            let res = inner.handles[id].clone();
+            inner.lru.put(id, id);
             res
         } else {
             None
         }
     }
+
+    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+        let mut inner = self.inner.write().await;
+        if let Some(handle) = if let Some((id, _)) = inner.lru.pop_lru() {
+            let res = inner.handles[id].clone();
+            inner.lru.put(id, id);
+            res
+        } else {
+            None
+        } {
+            handle.send(event)
+        } else {
+            anyhow::bail!("No handles to send to!");
+        }
+    }
 }
 
 impl<A: Actor> Default for LruPool<A> {
+    fn default() -> Self {
+        Self { inner: Default::default() }
+    }
+}
+
+impl<A: Actor> Default for LruInner<A> {
     fn default() -> Self {
         Self {
             handles: Default::default(),
@@ -159,7 +233,7 @@ impl<A: Actor> Default for LruPool<A> {
 }
 
 pub struct MapPool<A: Actor, M: Hash + Clone> {
-    map: HashMap<M, Act<A>>,
+    map: RwLock<HashMap<M, Act<A>>>,
 }
 
 impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
@@ -168,31 +242,48 @@ impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
     }
 }
 
+#[async_trait]
 impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M> {
     type Actor = A;
 
-    fn verify(&mut self) -> bool {
-        self.map.retain(|_, handle| !handle.is_closed());
-        self.map.len() != 0
+    async fn verify(&self) -> bool {
+        let mut map = self.map.write().await;
+        map.retain(|_, handle| !handle.is_closed());
+        map.len() != 0
     }
 
-    fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.map.values())
+    async fn handles(&self) -> Vec<Act<A>> {
+        self.map.read().await.values().filter(|h| h.is_closed()).cloned().collect()
+    }
+
+    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    where
+        <Self::Actor as Actor>::Event: Clone,
+    {
+        for handle in self.map.read().await.values().filter(|h| h.is_closed()) {
+            handle.send(event.clone())?;
+        }
+        Ok(())
     }
 }
 
+#[async_trait]
 impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A, M> {
     type Key = M;
 
-    fn push(&mut self, key: Self::Key, handle: Act<Self::Actor>) {
-        self.map.insert(key, handle);
+    async fn push(&self, key: Self::Key, handle: Act<Self::Actor>) {
+        self.map.write().await.insert(key, handle);
     }
 
-    fn get(&self, key: &Self::Key) -> Option<&Act<Self::Actor>> {
-        self.map.get(key)
+    async fn get(&self, key: &Self::Key) -> Option<Act<Self::Actor>> {
+        self.map.read().await.get(key).cloned()
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send> {
-        Box::new(self.map.iter())
+    async fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+        if let Some(handle) = self.map.read().await.get(key) {
+            handle.send(event)
+        } else {
+            anyhow::bail!("No handle for the given key!");
+        }
     }
 }
