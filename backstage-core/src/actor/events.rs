@@ -1,6 +1,5 @@
-use std::marker::PhantomData;
-
-use super::{Actor, ActorError, EventDriven, Service, ServiceStatus};
+use super::{Actor, ActorError, EventDriven, Service};
+use std::{borrow::Cow, marker::PhantomData};
 #[derive(Debug)]
 pub struct SuccessReport<T> {
     pub state: T,
@@ -27,13 +26,13 @@ impl<T> ErrorReport<T> {
 }
 #[derive(Debug)]
 pub struct StatusChange<T> {
-    pub prev_status: ServiceStatus,
+    pub prev_status: Cow<'static, str>,
     pub service: Service,
     pub actor_type: T,
 }
 
 impl<T> StatusChange<T> {
-    pub fn new(actor_type: T, prev_status: ServiceStatus, service: Service) -> Self {
+    pub fn new(actor_type: T, prev_status: Cow<'static, str>, service: Service) -> Self {
         Self {
             prev_status,
             service,

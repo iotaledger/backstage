@@ -1,9 +1,9 @@
 use super::*;
 use crate::actor::{
-    ActorError, ActorPool, ActorRequest, BasicActorPool, Dependencies, ErrorReport, EventDriven, KeyedActorPool, Service, ServiceTree,
-    ShutdownHandle, ShutdownStream, StatusChange, SuccessReport, SupervisorEvent,
+    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven, KeyedActorPool, Service,
+    ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange, SuccessReport, SupervisorEvent,
 };
-use futures::{future::Aborted, FutureExt};
+use futures::{future::Aborted, FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
 
 /// A runtime which defines a particular scope and functionality to
@@ -182,8 +182,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Update this scope's service status
-    pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()> {
-        self.registry.update_status(&self.scope_id, status).await
+    pub async fn update_status<S: Status>(&mut self, status: S) -> anyhow::Result<()> {
+        self.registry.update_status(&self.scope_id, CustomStatus(status).into()).await
     }
 
     /// Await the tasks in this runtime's scope
@@ -239,12 +239,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Send an event to a given actor, if it exists in this scope
     pub async fn send_actor_event<A: 'static + Actor>(&self, event: A::Event) -> anyhow::Result<()> {
-        let mut handle = self
+        let handle = self
             .get_data_opt::<Act<A>>()
             .await
             .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
-        handle.send(event).await
+        handle.send(event)
     }
 
     /// Get a shared reference to a system if it exists in this runtime's scope
@@ -474,39 +474,27 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let service = child_scope.service().await;
         child_scope.abort().await;
         child_scope.join().await;
-        if let Some(mut supervisor) = supervisor_handle {
+        if let Some(supervisor) = supervisor_handle {
             match res {
                 Ok(res) => match res {
                     Ok(res) => match res {
-                        Ok(_) => {
-                            supervisor
-                                .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
-                                .await
-                        }
+                        Ok(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(state.into(), service))),
 
                         Err(e) => {
                             log::error!("{} exited with error: {}", std::any::type_name::<A>(), e);
-                            supervisor
-                                .send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
-                                .await
+                            supervisor.send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
                         }
                     },
                     Err(_) => {
                         log::error!("{} panicked!", std::any::type_name::<A>());
-                        supervisor
-                            .send(Sup::Event::report_err(ErrorReport::new(
-                                state.into(),
-                                service,
-                                ActorError::RuntimeError(ActorRequest::Restart),
-                            )))
-                            .await
+                        supervisor.send(Sup::Event::report_err(ErrorReport::new(
+                            state.into(),
+                            service,
+                            ActorError::RuntimeError(ActorRequest::Restart),
+                        )))
                     }
                 },
-                Err(_) => {
-                    supervisor
-                        .send(Sup::Event::report_ok(SuccessReport::new(state.into(), service)))
-                        .await
-                }
+                Err(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(state.into(), service))),
             }
         } else {
             match res {
@@ -761,21 +749,20 @@ where
     Reg: 'static + RegistryAccess + Send + Sync,
 {
     /// Update this scope's service status
-    pub async fn update_status(&mut self, status: ServiceStatus) -> anyhow::Result<()>
+    pub async fn update_status<S: Status>(&mut self, status: S) -> anyhow::Result<()>
     where
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
     {
         if self.supervisor_handle.is_some() {
             let mut service = self.service().await;
-            let prev_status = service.status;
-            service.update_status(status);
+            let prev_status = service.status().clone();
+            service.update_status(CustomStatus(status.clone()));
             self.supervisor_handle
                 .send(Sup::Event::status_change(StatusChange::new(
                     PhantomData::<A>.into(),
                     prev_status,
                     service,
                 )))
-                .await
                 .ok();
         }
         self.scope.update_status(status).await

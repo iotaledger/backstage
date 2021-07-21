@@ -1,6 +1,6 @@
 [package]
 name = "backstage"
-version = "0.2.0"
+version = "1.0.0"
 authors = ["IOTA Stiftung"]
 edition = "2018"
 license-file = "LICENSE"
@@ -17,6 +17,7 @@ async-trait = "0.1"
 async-recursion = "0.3"
 futures = "0.3"
 tokio = { version = "1.5", features = ["sync", "time", "rt"] }
+tokio-stream = "0.1"
 lazy_static = "1.4"
 anyhow = "1.0"
 anymap = "0.12"
@@ -25,21 +26,20 @@ daggy = "0.7"
 lru = "0.6"
 num-traits = "0.2"
 ptree = "0.3"
+log = "0.4" 
 
-log = { version = "0.4", optional = true }
 rand = { version = "0.8", optional = true }
 futures-util = { version = "0.3", optional = true }
-tokio-tungstenite = { version = "0.14", optional = true }
+tokio-tungstenite = { version = "0.15", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0"
 tokio = { version = "1.5", features = ["macros", "rt-multi-thread", "signal"] }
-env_logger = "0.8"
+env_logger = "0.9"
 log = "0.4"
 url = "2.2"
 
 [features]
-default = ["launcher", "prefabs", "rand_pool"]
-launcher = ["log"]
+default = ["prefabs", "rand_pool"]
 prefabs = ["tokio/net", "futures-util", "tokio-tungstenite"]
 rand_pool = ["rand"]

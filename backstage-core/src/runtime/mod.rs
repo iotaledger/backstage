@@ -8,11 +8,12 @@ use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
     task::AtomicWaker,
-    Future, StreamExt,
+    Future,
 };
 use ptree::{write_tree, TreeItem};
 use std::{
     any::TypeId,
+    borrow::Cow,
     collections::{HashMap, HashSet},
     marker::PhantomData,
     ops::{Deref, DerefMut},
@@ -211,7 +212,7 @@ pub trait RegistryAccess: Clone {
     async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service>;
 
     /// Update the status of this scope
-    async fn update_status(&self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()>;
+    async fn update_status(&self, scope_id: &ScopeId, status: Cow<'static, str>) -> anyhow::Result<()>;
 
     /// Abort this scope
     async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
@@ -502,7 +503,7 @@ impl Registry {
             .map(|scope| scope.service.clone())
     }
 
-    pub(crate) fn update_status(&mut self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+    pub(crate) fn update_status(&mut self, scope_id: &ScopeId, status: Cow<'static, str>) -> anyhow::Result<()> {
         self.scopes
             .get_mut(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))

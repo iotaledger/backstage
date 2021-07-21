@@ -44,7 +44,7 @@ pub fn build_hello_world(name: String, num: Option<u32>) -> HelloWorld {
 impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -63,7 +63,7 @@ impl Actor for HelloWorld {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Running).await.ok();
+        rt.update_status(format!("Running {}", self.num)).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {
                 HelloWorldEvent::Print(s) => {
@@ -103,7 +103,7 @@ pub enum LauncherEvents {
 impl Actor for Launcher {
     type Dependencies = ();
     type Event = LauncherEvents;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -143,7 +143,7 @@ impl Actor for Launcher {
                 LauncherEvents::HelloWorld(event) => {
                     info!("Received event for HelloWorld");
                     if let Some(pool) = rt.pool::<MapPool<HelloWorld, i32>>().await {
-                        pool.write().await.send(&i, event).await.expect("Failed to pass along message!");
+                        pool.write().await.send(&i, event).expect("Failed to pass along message!");
                         i += 1;
                     }
                 }
@@ -184,10 +184,10 @@ impl System for Launcher {
     type State = Arc<RwLock<LauncherAPI>>;
 }
 
-pub async fn ctrl_c(mut sender: TokioSender<LauncherEvents>) {
+pub async fn ctrl_c(sender: UnboundedTokioSender<LauncherEvents>) {
     tokio::signal::ctrl_c().await.unwrap();
     let exit_program_event = LauncherEvents::Shutdown { using_ctrl_c: true };
-    sender.send(exit_program_event).await.ok();
+    sender.send(exit_program_event).ok();
 }
 
 #[tokio::main]

@@ -1,9 +1,7 @@
 use crate::prelude::*;
-use async_trait::async_trait;
 use lru::LruCache;
 use std::{collections::HashMap, hash::Hash};
 
-#[async_trait]
 pub trait ActorPool: Default {
     type Actor: Actor;
 
@@ -11,37 +9,31 @@ pub trait ActorPool: Default {
 
     fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send>;
 
-    fn handles_mut<'a>(&'a mut self) -> Box<dyn std::iter::Iterator<Item = &mut Act<Self::Actor>> + 'a + Send>;
-
-    async fn send_all(&mut self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
     where
         <Self::Actor as Actor>::Event: Clone,
     {
-        for handle in self.handles_mut() {
-            handle.send(event.clone()).await?;
+        for handle in self.handles() {
+            handle.send(event.clone())?;
         }
         Ok(())
     }
 }
 
-#[async_trait]
 pub trait BasicActorPool: ActorPool {
     fn push(&mut self, handle: Act<Self::Actor>);
 
     fn get(&self) -> Option<&Act<Self::Actor>>;
 
-    fn get_mut(&mut self) -> Option<&mut Act<Self::Actor>>;
-
-    async fn send(&mut self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
-        if let Some(handle) = self.get_mut() {
-            handle.send(event).await
+    fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+        if let Some(handle) = self.get() {
+            handle.send(event)
         } else {
             anyhow::bail!("No handles to send to!");
         }
     }
 }
 
-#[async_trait]
 pub trait KeyedActorPool: ActorPool {
     type Key: Send + Sync;
 
@@ -49,13 +41,11 @@ pub trait KeyedActorPool: ActorPool {
 
     fn get(&self, key: &Self::Key) -> Option<&Act<Self::Actor>>;
 
-    fn get_mut(&mut self, key: &Self::Key) -> Option<&mut Act<Self::Actor>>;
-
     fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send>;
 
-    async fn send(&mut self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
-        if let Some(handle) = KeyedActorPool::get_mut(self, key) {
-            handle.send(event).await
+    fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+        if let Some(handle) = KeyedActorPool::get(self, key) {
+            handle.send(event)
         } else {
             anyhow::bail!("No handle for the given key!");
         }
@@ -85,10 +75,6 @@ impl<A: Actor> ActorPool for RandomPool<A> {
     fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
         Box::new(self.handles.iter())
     }
-
-    fn handles_mut<'a>(&'a mut self) -> Box<dyn std::iter::Iterator<Item = &mut Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.handles.iter_mut())
-    }
 }
 
 #[cfg(feature = "rand_pool")]
@@ -102,17 +88,6 @@ impl<A: Actor> BasicActorPool for RandomPool<A> {
         if self.handles.len() != 0 {
             let mut rng = rand::thread_rng();
             self.handles.get(rng.gen_range(0..self.handles.len()))
-        } else {
-            None
-        }
-    }
-
-    fn get_mut(&mut self) -> Option<&mut Act<Self::Actor>> {
-        use rand::Rng;
-        if self.handles.len() != 0 {
-            let mut rng = rand::thread_rng();
-            let idx = rng.gen_range(0..self.handles.len());
-            self.handles.get_mut(idx)
         } else {
             None
         }
@@ -148,10 +123,6 @@ impl<A: Actor> ActorPool for LruPool<A> {
     fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
         Box::new(self.handles.iter().filter_map(Option::as_ref))
     }
-
-    fn handles_mut<'a>(&'a mut self) -> Box<dyn std::iter::Iterator<Item = &mut Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.handles.iter_mut().filter_map(Option::as_mut))
-    }
 }
 
 impl<A: Actor> BasicActorPool for LruPool<A> {
@@ -170,16 +141,6 @@ impl<A: Actor> BasicActorPool for LruPool<A> {
     fn get(&self) -> Option<&Act<Self::Actor>> {
         if let Some((&id, _)) = self.lru.peek_lru() {
             let res = self.handles[id].as_ref();
-            res
-        } else {
-            None
-        }
-    }
-
-    fn get_mut(&mut self) -> Option<&mut Act<Self::Actor>> {
-        if let Some((id, _)) = self.lru.pop_lru() {
-            let res = self.handles[id].as_mut();
-            self.lru.put(id, id);
             res
         } else {
             None
@@ -218,10 +179,6 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M> {
     fn handles<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = &Act<Self::Actor>> + 'a + Send> {
         Box::new(self.map.values())
     }
-
-    fn handles_mut<'a>(&'a mut self) -> Box<dyn std::iter::Iterator<Item = &mut Act<Self::Actor>> + 'a + Send> {
-        Box::new(self.map.values_mut())
-    }
 }
 
 impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A, M> {
@@ -233,10 +190,6 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A,
 
     fn get(&self, key: &Self::Key) -> Option<&Act<Self::Actor>> {
         self.map.get(key)
-    }
-
-    fn get_mut(&mut self, key: &Self::Key) -> Option<&mut Act<Self::Actor>> {
-        self.map.get_mut(key)
     }
 
     fn iter<'a>(&'a self) -> Box<dyn std::iter::Iterator<Item = (&Self::Key, &Act<Self::Actor>)> + 'a + Send> {

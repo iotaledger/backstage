@@ -107,8 +107,8 @@ impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A, A::Event>>::Sender> f
 
 #[async_trait::async_trait]
 impl<A: EventDriven> Sender<A::Event> for Act<A> {
-    async fn send(&mut self, event: A::Event) -> anyhow::Result<()> {
-        self.sender.send(event).await
+    fn send(&self, event: A::Event) -> anyhow::Result<()> {
+        self.sender.send(event)
     }
 
     fn is_closed(&self) -> bool {

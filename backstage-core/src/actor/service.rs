@@ -1,31 +1,36 @@
 use num_traits::{FromPrimitive, NumAssignOps};
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::convert::{TryFrom, TryInto};
+use std::fmt::Display;
 use std::ops::{Deref, DerefMut};
 use std::time::SystemTime;
 
-/// The possible statuses a service (application) can be
+/// Defines anything which can be used as an actor's status
+pub trait Status: TryFrom<&'static str> + Display + Clone {}
+impl<T> Status for T where T: TryFrom<&'static str> + Display + Clone {}
+
+#[derive(Clone)]
+pub(crate) struct CustomStatus<T>(pub(crate) T);
+
+/// The possible statuses a service can have
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ServiceStatus {
-    /// Early bootup
+    /// The actor exists, but is not yet running
     Starting = 0,
-    /// Late bootup
+    /// The actor is initializing
     Initializing = 1,
-    /// The service is operational but one or more services failed(Degraded or Maintenance) or in process of being
-    /// fully operational while startup.
-    Degraded = 2,
-    /// The service is fully operational.
-    Running = 3,
-    /// The service is shutting down, should be handled accordingly by active dependent services
-    Stopping = 4,
-    /// The service is maintenance mode, should be handled accordingly by active dependent services
-    Maintenance = 5,
-    /// The service is not running, should be handled accordingly by active dependent services
-    Stopped = 6,
+    /// The actor is running
+    Running = 2,
+    /// The actor is stopping
+    Stopping = 3,
+    /// The actor has successfully stopped
+    Stopped = 4,
 }
 
-impl std::fmt::Display for ServiceStatus {
+impl Display for ServiceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -33,13 +38,32 @@ impl std::fmt::Display for ServiceStatus {
             match self {
                 ServiceStatus::Starting => "Starting",
                 ServiceStatus::Initializing => "Initializing",
-                ServiceStatus::Degraded => "Degraded",
                 ServiceStatus::Running => "Running",
                 ServiceStatus::Stopping => "Stopping",
-                ServiceStatus::Maintenance => "Maintenance",
                 ServiceStatus::Stopped => "Stopped",
             }
         )
+    }
+}
+
+impl TryFrom<&str> for ServiceStatus {
+    type Error = anyhow::Error;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Ok(match s {
+            "Starting" => ServiceStatus::Starting,
+            "Initializing" => ServiceStatus::Initializing,
+            "Running" => ServiceStatus::Running,
+            "Stopping" => ServiceStatus::Stopping,
+            "Stopped" => ServiceStatus::Stopped,
+            _ => anyhow::bail!("Invalid Service Status!"),
+        })
+    }
+}
+
+impl<T: Status> Into<Cow<'static, str>> for CustomStatus<T> {
+    fn into(self) -> Cow<'static, str> {
+        self.0.to_string().into()
     }
 }
 
@@ -80,74 +104,78 @@ impl<T: NumAssignOps + FromPrimitive + Copy> IdPool<T> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
     /// The status of the actor
-    pub status: ServiceStatus,
+    pub status: Cow<'static, str>,
     /// The name of the actor
-    pub name: String,
+    pub name: Cow<'static, str>,
     /// The start timestamp, used to calculated uptime
     pub up_since: SystemTime,
-    /// Accumulated downtime
-    pub downtime_ms: u64,
 }
 
 impl Service {
     /// Create a new Service
-    pub fn new<S: Into<String>>(name: S) -> Self {
+    pub fn new<S: Into<Cow<'static, str>>>(name: S) -> Self {
         Self::default().with_name(name)
     }
     /// Set the service status
-    pub fn with_status(mut self, service_status: ServiceStatus) -> Self {
-        self.status = service_status;
+    pub fn with_status<S: Into<Cow<'static, str>>>(mut self, status: S) -> Self {
+        self.status = status.into();
         self
     }
     /// Update the service status
-    pub fn update_status(&mut self, service_status: ServiceStatus) {
-        self.status = service_status;
+    pub fn update_status<S: Into<Cow<'static, str>>>(&mut self, status: S) {
+        self.status = status.into();
     }
     /// Set the service (application) name
-    pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
+    pub fn with_name<S: Into<Cow<'static, str>>>(mut self, name: S) -> Self {
         self.name = name.into();
         self
     }
     /// Update the service (application) name
-    pub fn update_name<S: Into<String>>(&mut self, name: S) {
+    pub fn update_name<S: Into<Cow<'static, str>>>(&mut self, name: S) {
         self.name = name.into();
-    }
-    /// Set the service downtime in milliseconds
-    pub fn with_downtime_ms(mut self, downtime_ms: u64) -> Self {
-        self.downtime_ms = downtime_ms;
-        self
     }
     /// Check if the service is stopping
     pub fn is_stopping(&self) -> bool {
-        self.status == ServiceStatus::Stopping
+        match self.status.as_ref().try_into() {
+            Ok(ServiceStatus::Stopping) => true,
+            _ => false,
+        }
     }
     /// Check if the service is stopped
     pub fn is_stopped(&self) -> bool {
-        self.status == ServiceStatus::Stopped
+        match self.status.as_ref().try_into() {
+            Ok(ServiceStatus::Stopped) => true,
+            _ => false,
+        }
     }
     /// Check if the service is running
     pub fn is_running(&self) -> bool {
-        self.status == ServiceStatus::Running
+        match self.status.as_ref().try_into() {
+            Ok(ServiceStatus::Running) => true,
+            _ => false,
+        }
     }
     /// Check if the service is starting
     pub fn is_starting(&self) -> bool {
-        self.status == ServiceStatus::Starting
+        match self.status.as_ref().try_into() {
+            Ok(ServiceStatus::Starting) => true,
+            _ => false,
+        }
     }
     /// Check if the service is initializing
     pub fn is_initializing(&self) -> bool {
-        self.status == ServiceStatus::Initializing
+        match self.status.as_ref().try_into() {
+            Ok(ServiceStatus::Initializing) => true,
+            _ => false,
+        }
     }
-    /// Check if the service is in maintenance
-    pub fn is_maintenance(&self) -> bool {
-        self.status == ServiceStatus::Maintenance
-    }
-    /// Check if the service is degraded
-    pub fn is_degraded(&self) -> bool {
-        self.status == ServiceStatus::Degraded
+    /// Get the status of this service
+    pub fn status(&self) -> &Cow<'static, str> {
+        &self.status
     }
     /// Get the service status
-    pub fn service_status(&self) -> &ServiceStatus {
-        &self.status
+    pub fn service_status(&self) -> anyhow::Result<ServiceStatus> {
+        ServiceStatus::try_from(self.status.as_ref())
     }
 }
 
@@ -157,7 +185,6 @@ impl Default for Service {
             status: Default::default(),
             name: Default::default(),
             up_since: SystemTime::now(),
-            downtime_ms: Default::default(),
         }
     }
 }
@@ -203,7 +230,7 @@ impl TreeItem for ServiceTree {
     }
 }
 
-impl std::fmt::Display for ServiceTree {
+impl Display for ServiceTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut buf = std::io::Cursor::new(Vec::<u8>::new());
         ptree::write_tree(self, &mut buf).ok();

@@ -1,5 +1,5 @@
 use super::*;
-use crate::actor::{EventDriven, Service, ServiceStatus, ShutdownStream, TokioChannel, TokioSender};
+use crate::actor::{EventDriven, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 
@@ -83,7 +83,7 @@ impl RegistryAccess for ArcedRegistry {
         self.registry.read().await.get_service(scope_id)
     }
 
-    async fn update_status(&self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+    async fn update_status(&self, scope_id: &ScopeId, status: Cow<'static, str>) -> anyhow::Result<()> {
         self.registry.write().await.update_status(scope_id, status)
     }
 
@@ -128,7 +128,7 @@ enum RequestType {
     GetService(ScopeId),
     UpdateStatus {
         scope_id: ScopeId,
-        status: ServiceStatus,
+        status: Cow<'static, str>,
     },
     Abort(ScopeId),
     Print(ScopeId),
@@ -172,7 +172,7 @@ where
 {
     type Dependencies = ();
     type Event = RegistryActorRequest;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -229,7 +229,7 @@ where
 
 /// A registry owned by an actor in the runtime and accessible via a tokio channel
 pub struct ActorRegistry {
-    handle: TokioSender<RegistryActorRequest>,
+    handle: UnboundedTokioSender<RegistryActorRequest>,
 }
 
 impl Clone for ActorRegistry {
@@ -257,7 +257,7 @@ where
         let scope_id = registry.new_scope(None, |_| "Registry".to_string(), None, None);
         let child_scope_id = registry.new_scope(scope_id, |_| name.into(), inner_shutdown_handle, inner_abort_handle);
         let mut actor = RegistryActor { registry };
-        let (sender, receiver) = TokioChannel::new(&actor).await.unwrap();
+        let (sender, receiver) = UnboundedTokioChannel::new(&actor).await.unwrap();
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let actor_registry = ActorRegistry { handle: sender.clone() };
         let (abort_handle, _) = AbortHandle::new_pair();
@@ -380,7 +380,7 @@ where
         }
     }
 
-    async fn update_status(&self, scope_id: &ScopeId, status: ServiceStatus) -> anyhow::Result<()> {
+    async fn update_status(&self, scope_id: &ScopeId, status: Cow<'static, str>) -> anyhow::Result<()> {
         let (request, recv) = RegistryActorRequest::new(RequestType::UpdateStatus {
             scope_id: *scope_id,
             status,

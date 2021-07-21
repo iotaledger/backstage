@@ -70,7 +70,7 @@ pub struct HelloWorld {
 impl Actor for HelloWorld {
     type Dependencies = ();
     type Event = HelloWorldEvent;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -143,7 +143,7 @@ pub struct Howdy;
 impl Actor for Howdy {
     type Dependencies = ();
     type Event = HowdyEvent;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -162,7 +162,7 @@ impl Actor for Howdy {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        let (counter, mut hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
+        let (counter, hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
         rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -170,10 +170,7 @@ impl Actor for Howdy {
                     info!("Howdy printing: {}", s);
                     counter.write().await.counter += 1;
                     info!("Printed {} times", counter.read().await.counter);
-                    hello_world
-                        .send(HelloWorldEvent::Print(s))
-                        .await
-                        .expect("Failed to pass along message!");
+                    hello_world.send(HelloWorldEvent::Print(s)).expect("Failed to pass along message!");
                 }
             }
         }
@@ -234,7 +231,7 @@ impl TryFrom<(SocketAddr, Message)> for LauncherEvents {
 impl Actor for Launcher {
     type Event = LauncherEvents;
     type Dependencies = ();
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
@@ -272,24 +269,24 @@ impl Actor for Launcher {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Running).await.ok();
-        let mut websocket_handle = rt
+        rt.update_status("Launched").await.ok();
+        let websocket_handle = rt
             .actor_event_handle::<Websocket<Self>>()
             .await
             .ok_or_else(|| anyhow::anyhow!("No websocket!"))?;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
-                    //info!("Received hello world message: {:?}", event);
+                    // info!("Received hello world message: {:?}", event);
                     rt.send_actor_event::<HelloWorld>(event).await?;
                 }
                 LauncherEvents::Howdy(event) => {
-                    //info!("Received howdy message: {:?}", event);
+                    // info!("Received howdy message: {:?}", event);
                     rt.send_actor_event::<Howdy>(event).await?;
                 }
                 LauncherEvents::WebsocketMsg(peer, msg) => {
                     info!("Received websocket message: {:?}", msg);
-                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into())).await?;
+                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into()))?;
                 }
                 LauncherEvents::ReportExit(res) => match res {
                     Ok(s) => {}
@@ -341,11 +338,10 @@ async fn startup() -> anyhow::Result<()> {
             scope
                 .spawn_task(|rt| {
                     async move {
-                        let mut launcher_handle = rt.link_data::<Act<Launcher>>().await?;
+                        let launcher_handle = rt.link_data::<Act<Launcher>>().await?;
                         for _ in 0..3 {
                             launcher_handle
                                 .send(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
-                                .await
                                 .unwrap();
                         }
                         let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
@@ -359,7 +355,7 @@ async fn startup() -> anyhow::Result<()> {
                 })
                 .await;
             tokio::time::sleep(Duration::from_secs(1)).await;
-            //scope.print_root().await;
+            // scope.print_root().await;
             log::info!("Service Tree:\n{}", scope.service_tree().await);
             Ok(())
         }

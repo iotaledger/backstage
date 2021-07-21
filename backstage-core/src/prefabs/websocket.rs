@@ -1,6 +1,8 @@
 use super::*;
 use crate::{
-    actor::{build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, TokioChannel, TokioSender},
+    actor::{
+        build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender,
+    },
     prelude::{Act, ActorScopedRuntime, DataWrapper, RegistryAccess},
 };
 use futures::{FutureExt, SinkExt, StreamExt};
@@ -23,7 +25,7 @@ where
     <Sup::Event as TryFrom<(SocketAddr, Message)>>::Error: Send,
 {
     listen_address: SocketAddr,
-    connections: HashMap<SocketAddr, TokioSender<Message>>,
+    connections: HashMap<SocketAddr, UnboundedTokioSender<Message>>,
     supervisor_handle: Act<Sup>,
 }
 
@@ -59,7 +61,7 @@ pub enum WebsocketChildren {
 #[derive(Clone, Debug)]
 pub struct Connection {
     peer: SocketAddr,
-    sender: TokioSender<Message>,
+    sender: UnboundedTokioSender<Message>,
 }
 
 #[async_trait]
@@ -71,7 +73,7 @@ where
 {
     type Dependencies = ();
     type Event = WebsocketChildren;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup2: EventDriven>(
         &mut self,
@@ -149,8 +151,8 @@ where
         while let Some(evt) = rt.next_event().await {
             match evt {
                 WebsocketChildren::Response(peer, msg) => {
-                    if let Some(conn) = self.connections.get_mut(&peer) {
-                        if let Err(_) = conn.send(msg).await {
+                    if let Some(conn) = self.connections.get(&peer) {
+                        if let Err(_) = conn.send(msg) {
                             self.connections.remove(&peer);
                         }
                     }
@@ -161,7 +163,7 @@ where
                 }
                 WebsocketChildren::Received(addr, msg) => {
                     if let Ok(msg) = (addr, msg).try_into() {
-                        if let Err(_) = self.supervisor_handle.send(msg).await {
+                        if let Err(_) = self.supervisor_handle.send(msg) {
                             break;
                         }
                     }
@@ -184,7 +186,7 @@ struct Responder {
 impl Actor for Responder {
     type Dependencies = ();
     type Event = Message;
-    type Channel = TokioChannel<Self::Event>;
+    type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
