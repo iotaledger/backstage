@@ -331,7 +331,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             let service = self.service().await;
             anyhow::bail!(
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                std::any::type_name::<A>(),
+                actor.name(),
                 self.scope_id,
                 service.name
             );
@@ -363,7 +363,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             let service = self.service().await;
             anyhow::bail!(
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                std::any::type_name::<A>(),
+                actor.name(),
                 self.scope_id,
                 service.name
             );
@@ -402,7 +402,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         B: 'static + Send + Sync,
         for<'b> F: 'static + Send + Sync + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, ()>,
     {
-        log::debug!("Spawning {}", std::any::type_name::<A>());
+        log::debug!("Spawning {}", actor.name());
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut actor_rt = self
             .child_actor(&actor, actor.name(), abort_handle.clone(), supervisor_handle.clone())
@@ -464,7 +464,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         res: Result<std::thread::Result<Result<(), ActorError>>, Aborted>,
         child_scope: &mut ActorScopedRuntime<A, Reg, Sup>,
         supervisor_handle: Option<Act<Sup>>,
-        state: A,
+        actor: A,
     ) -> anyhow::Result<()>
     where
         Sup: EventDriven,
@@ -478,23 +478,23 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             match res {
                 Ok(res) => match res {
                     Ok(res) => match res {
-                        Ok(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(state.into(), service))),
+                        Ok(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(actor.into(), service))),
 
                         Err(e) => {
-                            log::error!("{} exited with error: {}", std::any::type_name::<A>(), e);
-                            supervisor.send(Sup::Event::report_err(ErrorReport::new(state.into(), service, e)))
+                            log::error!("{} exited with error: {}", actor.name(), e);
+                            supervisor.send(Sup::Event::report_err(ErrorReport::new(actor.into(), service, e)))
                         }
                     },
                     Err(_) => {
-                        log::error!("{} panicked!", std::any::type_name::<A>());
+                        log::error!("{} panicked!", actor.name());
                         supervisor.send(Sup::Event::report_err(ErrorReport::new(
-                            state.into(),
+                            actor.into(),
                             service,
                             ActorError::RuntimeError(ActorRequest::Restart),
                         )))
                     }
                 },
-                Err(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(state.into(), service))),
+                Err(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(actor.into(), service))),
             }
         } else {
             match res {
@@ -502,12 +502,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     Ok(res) => match res {
                         Ok(_) => Ok(()),
                         Err(e) => {
-                            log::error!("{} exited with error: {}", std::any::type_name::<A>(), e);
+                            log::error!("{} exited with error: {}", actor.name(), e);
                             anyhow::bail!(e)
                         }
                     },
                     Err(_) => {
-                        log::error!("{} panicked!", std::any::type_name::<A>());
+                        log::error!("{} panicked!", actor.name());
                         anyhow::bail!("Panicked!")
                     }
                 },

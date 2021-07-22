@@ -66,11 +66,12 @@ impl<T: 'static + Clone + Send + Sync> Into<Option<T>> for DepStatus<T> {
             DepStatus::Ready(t) => Some(t),
             DepStatus::Waiting(h) => {
                 if h.flag.set.load(Ordering::Relaxed) {
-                    h.flag
-                        .val
-                        .try_read()
-                        .ok()
-                        .and_then(|lock| lock.clone().map(|d| *unsafe { d.downcast_unchecked() }))
+                    h.flag.val.try_read().ok().and_then(|lock| {
+                        lock.clone().map(|d| {
+                            log::trace!("About to downcast a ready dep to type {}", std::any::type_name::<T>());
+                            *unsafe { d.downcast_unchecked() }
+                        })
+                    })
                 } else {
                     None
                 }
@@ -106,7 +107,10 @@ pub(crate) enum RawDepStatus {
 impl RawDepStatus {
     pub fn with_type<T: 'static + Clone + Send + Sync>(self) -> DepStatus<T> {
         match self {
-            RawDepStatus::Ready(t) => DepStatus::Ready(*unsafe { t.downcast_unchecked() }),
+            RawDepStatus::Ready(t) => {
+                log::trace!("About to downcast a raw dep to type {}", std::any::type_name::<T>());
+                DepStatus::Ready(*unsafe { t.downcast_unchecked() })
+            }
             RawDepStatus::Waiting(s) => DepStatus::Waiting(s.handle()),
         }
     }
@@ -160,6 +164,7 @@ impl Scope {
             abort.abort();
         }
         for dep in self.dependencies.as_mut().drain() {
+            log::trace!("About to downcast dependency while aborting scope {}", self.id);
             match *unsafe { dep.downcast_unchecked() } {
                 Dependency::Once(f) | Dependency::Linked(f) => {
                     f.cancel();
@@ -305,6 +310,7 @@ impl Registry {
         let scope = self.scopes.get_mut(scope_id).unwrap();
         Ok(match scope.dependencies.as_mut().entry(data_type) {
             Entry::Occupied(mut e) => {
+                log::trace!("About to downcast for upgrading a dep in scope {}", scope_id);
                 let val = unsafe { e.get_mut().downcast_mut_unchecked::<Dependency>() };
                 val.upgrade();
                 match val {
@@ -314,6 +320,7 @@ impl Registry {
             }
             Entry::Vacant(v) => {
                 let flag = DepSignal::default();
+                log::trace!("About to insert linked dependency in scope {}", scope_id);
                 unsafe { v.insert(Box::new(Dependency::Linked(flag.clone()))) };
                 if let RawDepStatus::Ready(t) = status {
                     flag.signal_raw(t).await;
@@ -349,12 +356,13 @@ impl Registry {
     }
 
     /// Remove some data from this scope and its children.
-    /// NOTE: This will only remove data if this scope originally added it! Otherwise,
-    /// this fn will return an error.
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
-        self.remove_data_raw(scope_id, TypeId::of::<T>())
-            .await
-            .map(|o| o.map(|data| *unsafe { data.downcast_unchecked::<T>() }))
+        self.remove_data_raw(scope_id, TypeId::of::<T>()).await.map(|o| {
+            o.map(|data| {
+                log::trace!("About to downcast for remove_data call in scope {}", scope_id);
+                *unsafe { data.downcast_unchecked::<T>() }
+            })
+        })
     }
 
     pub(crate) async fn remove_data_raw(
@@ -403,12 +411,10 @@ impl Registry {
             match prop {
                 Propagation::Add(data_id) => {
                     scope.data.insert(data_type, data_id);
-                    if let Some(dep) = scope
-                        .dependencies
-                        .as_mut()
-                        .remove(&data_type)
-                        .map(|d| *unsafe { d.downcast_unchecked::<Dependency>() })
-                    {
+                    if let Some(dep) = scope.dependencies.as_mut().remove(&data_type).map(|d| {
+                        log::trace!("About to downcast for add propagation in scope {}", scope_id);
+                        *unsafe { d.downcast_unchecked::<Dependency>() }
+                    }) {
                         match dep {
                             Dependency::Once(ref f) | Dependency::Linked(ref f) => {
                                 f.signal_raw(self.data[data_id].clone().unwrap()).await;
@@ -424,12 +430,10 @@ impl Registry {
                 }
                 Propagation::Remove => {
                     scope.data.remove(&data_type);
-                    if let Some(Dependency::Linked(_)) = scope
-                        .dependencies
-                        .as_mut()
-                        .remove(&data_type)
-                        .map(|d| *unsafe { d.downcast_unchecked() })
-                    {
+                    if let Some(Dependency::Linked(_)) = scope.dependencies.as_mut().remove(&data_type).map(|d| {
+                        log::trace!("About to downcast for remove propagation in scope {}", scope_id);
+                        *unsafe { d.downcast_unchecked() }
+                    }) {
                         log::debug!(
                             "Aborting scope {} ({}) due to a removed critical dependency!",
                             scope.id,
@@ -456,8 +460,10 @@ impl Registry {
                 .data
                 .get(&TypeId::of::<T>())
                 .and_then(|&data_id| self.data[data_id].as_ref())
-                .map(|t| *unsafe { t.clone().downcast_unchecked::<T>() })
-            {
+                .map(|d| {
+                    log::trace!("About to downcast for get_data call in scope {}", scope_id);
+                    *unsafe { d.clone().downcast_unchecked::<T>() }
+                }) {
                 Some(d) => DepStatus::Ready(d),
                 None => {
                     let flag = DepSignal::default();
@@ -615,7 +621,10 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
                 Ok(lock) => Poll::Ready(
                     lock.clone()
                         .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
-                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
+                        .map(|d| {
+                            log::trace!("About to downcast dependency (1/2)");
+                            *unsafe { d.downcast_unchecked::<T>() }
+                        }),
                 ),
                 Err(_) => Poll::Pending,
             };
@@ -630,7 +639,10 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
                 Ok(lock) => Poll::Ready(
                     lock.clone()
                         .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
-                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
+                        .map(|d| {
+                            log::trace!("About to downcast dependency (2/2)");
+                            *unsafe { d.downcast_unchecked::<T>() }
+                        }),
                 ),
                 Err(_) => Poll::Pending,
             }
@@ -651,9 +663,10 @@ impl<'a> TreeItem for PrintableRegistry<'a> {
         if let Some(scope) = registry.scopes.get(&scope_id) {
             write!(
                 f,
-                "{} ({}), Uptime {} ms, Data {:?}",
+                "{} ({}) - {}, Uptime {} ms, Data {:?}",
                 scope_id,
                 scope.service.name,
+                scope.service.status,
                 scope.service.up_since.elapsed().unwrap().as_millis(),
                 scope.created
             )

@@ -351,7 +351,12 @@ where
         });
         self.handle.0.send(request).map_err(|e| anyhow::anyhow!("{}", e))?;
         if let ResponseType::RemoveData(r) = recv.await.unwrap() {
-            r.map(|o| o.map(|d| *unsafe { d.downcast_unchecked::<T>() }))
+            r.map(|o| {
+                o.map(|d| {
+                    log::trace!("About to downcast removed data to type {}", std::any::type_name::<T>());
+                    *unsafe { d.downcast_unchecked::<T>() }
+                })
+            })
         } else {
             panic!("Wrong response type!")
         }
