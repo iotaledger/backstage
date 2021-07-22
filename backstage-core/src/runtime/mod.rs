@@ -564,20 +564,20 @@ impl Registry {
 pub(crate) struct DepFlag {
     waker: AtomicWaker,
     set: AtomicBool,
-    val: Arc<RwLock<Option<Box<dyn CloneAny + Send + Sync>>>>,
+    val: RwLock<Option<Box<dyn CloneAny + Send + Sync>>>,
 }
 
 impl DepFlag {
     pub(crate) async fn signal<T: 'static + Clone + Send + Sync>(&self, val: T) {
+        *self.val.write().await = Some(Box::new(val));
         self.set.store(true, Ordering::Relaxed);
         self.waker.wake();
-        *self.val.write().await = Some(Box::new(val));
     }
 
     pub(crate) async fn signal_raw(&self, val: Box<dyn CloneAny + Send + Sync>) {
+        *self.val.write().await = Some(val);
         self.set.store(true, Ordering::Relaxed);
         self.waker.wake();
-        *self.val.write().await = Some(val);
     }
 
     pub(crate) fn cancel(&self) {

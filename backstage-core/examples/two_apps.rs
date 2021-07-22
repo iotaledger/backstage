@@ -230,7 +230,7 @@ impl TryFrom<(SocketAddr, Message)> for LauncherEvents {
 #[async_trait]
 impl Actor for Launcher {
     type Event = LauncherEvents;
-    type Dependencies = ();
+    type Dependencies = (Act<HelloWorld>, Act<Howdy>, Act<Websocket<Self>>);
     type Channel = UnboundedTokioChannel<Self::Event>;
 
     async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
@@ -262,7 +262,7 @@ impl Actor for Launcher {
     async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
         &mut self,
         rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-        _deps: Self::Dependencies,
+        (hello_world, howdy, websocket): Self::Dependencies,
     ) -> Result<(), ActorError>
     where
         Self: Sized,
@@ -270,23 +270,21 @@ impl Actor for Launcher {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         rt.update_status("Launched").await.ok();
-        let websocket_handle = rt
-            .actor_event_handle::<Websocket<Self>>()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("No websocket!"))?;
         while let Some(evt) = rt.next_event().await {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
                     // info!("Received hello world message: {:?}", event);
-                    rt.send_actor_event::<HelloWorld>(event).await?;
+                    //rt.send_actor_event::<HelloWorld>(event).await?;
+                    hello_world.send(event)?;
                 }
                 LauncherEvents::Howdy(event) => {
                     // info!("Received howdy message: {:?}", event);
-                    rt.send_actor_event::<Howdy>(event).await?;
+                    //rt.send_actor_event::<Howdy>(event).await?;
+                    howdy.send(event)?;
                 }
                 LauncherEvents::WebsocketMsg(peer, msg) => {
                     info!("Received websocket message: {:?}", msg);
-                    websocket_handle.send(WebsocketChildren::Response(peer, "bonjour".into()))?;
+                    websocket.send(WebsocketChildren::Response(peer, "bonjour".into()))?;
                 }
                 LauncherEvents::ReportExit(res) => match res {
                     Ok(s) => {}
@@ -320,7 +318,7 @@ async fn ctrl_c(shutdown_handle: ShutdownHandle) {
 
 #[tokio::main]
 async fn main() {
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_LOG", "debug, backstage=trace");
     env_logger::init();
 
     startup().await.unwrap();
