@@ -342,20 +342,20 @@ pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
     } else {
-        let (child, state) = (children.remove(0), ident_paths.into_iter().next().unwrap().1.remove(0));
+        let state = ident_paths.into_iter().next().unwrap().1.remove(0);
         quote! {
             #(#attrs)*
             #vis enum #ident #generics {
                 #[doc="Event variant used to report child actor exiting. Contains the actor's state and a request from the child."]
                 ReportExit(Result<SuccessReport<#state>, ErrorReport<#state>>),
                 #[doc="Event variant used to report child status changes."]
-                StatusChange(StatusChange<std::marker::PhantomData<#child>>),
+                StatusChange(StatusChange<std::marker::PhantomData<#state>>),
                 #variants
             }
 
             impl SupervisorEvent for #ident {
                 type ChildStates = #state;
-                type Children = std::marker::PhantomData<#child>;
+                type Children = std::marker::PhantomData<#state>;
 
                 fn report(res: Result<SuccessReport<Self::ChildStates>, ErrorReport<Self::ChildStates>>) -> Self
                 where
