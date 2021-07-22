@@ -359,7 +359,11 @@ impl Registry {
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
         self.remove_data_raw(scope_id, TypeId::of::<T>()).await.map(|o| {
             o.map(|data| {
-                log::trace!("About to downcast for remove_data call in scope {}", scope_id);
+                log::trace!(
+                    "About to downcast for remove_data call in scope {} for {}",
+                    scope_id,
+                    std::any::type_name::<T>()
+                );
                 *unsafe { data.downcast_unchecked::<T>() }
             })
         })
@@ -461,7 +465,11 @@ impl Registry {
                 .get(&TypeId::of::<T>())
                 .and_then(|&data_id| self.data[data_id].as_ref())
                 .map(|d| {
-                    log::trace!("About to downcast for get_data call in scope {}", scope_id);
+                    log::trace!(
+                        "About to downcast for get_data call in scope {} for {}",
+                        scope_id,
+                        std::any::type_name::<T>()
+                    );
                     *unsafe { d.clone().downcast_unchecked::<T>() }
                 }) {
                 Some(d) => DepStatus::Ready(d),
