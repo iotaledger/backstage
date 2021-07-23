@@ -26,7 +26,8 @@ daggy = "0.7"
 lru = "0.6"
 num-traits = "0.2"
 ptree = "0.3"
-log = "0.4" 
+log = "0.4"
+uuid = { version = "0.8", features = ["v4", "serde"] }
 
 rand = { version = "0.8", optional = true }
 futures-util = { version = "0.3", optional = true }

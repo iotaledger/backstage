@@ -8,7 +8,7 @@ use std::panic::AssertUnwindSafe;
 
 /// A runtime which defines a particular scope and functionality to
 /// create tasks within it.
-pub struct RuntimeScope<Reg: RegistryAccess> {
+pub struct RuntimeScope<Reg> {
     pub(crate) scope_id: ScopeId,
     pub(crate) parent_id: Option<ScopeId>,
     pub(crate) registry: Reg,
@@ -17,8 +17,13 @@ pub struct RuntimeScope<Reg: RegistryAccess> {
 
 impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     /// Get the scope id
-    pub fn id(&self) -> ScopeId {
-        self.scope_id
+    pub fn id(&self) -> &ScopeId {
+        &self.scope_id
+    }
+
+    /// Get the parent's scope id, if one exists
+    pub fn parent_id(&self) -> &Option<ScopeId> {
+        &self.parent_id
     }
 
     /// Launch a new root runtime scope
@@ -31,7 +36,6 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let mut scope = Reg::instantiate("Root", None, None).await;
         scope.update_status(ServiceStatus::Running).await.ok();
         let res = f(&mut scope).await;
-        scope.update_status(ServiceStatus::Stopping).await.ok();
         if res.is_err() {
             scope.abort().await;
         }
@@ -39,7 +43,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         res
     }
 
-    pub(crate) async fn new<P: Into<Option<usize>> + Send, S: Into<String>, O: Into<Option<S>>>(
+    pub(crate) async fn new<P: Into<Option<ScopeId>> + Send, S: Into<String>, O: Into<Option<S>>>(
         registry: Reg,
         parent_scope_id: P,
         name: O,
@@ -83,6 +87,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     ) -> anyhow::Result<ActorScopedRuntime<A, Reg, Sup>>
     where
         A: Actor,
+
         Sup: EventDriven,
         S: Into<String>,
         O: Into<Option<S>>,
@@ -119,7 +124,6 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         let mut child_scope = self.child::<String, _>(None, None, Some(abort_handle)).await;
         child_scope.update_status(ServiceStatus::Running).await.ok();
         let res = Abortable::new(f(&mut child_scope), abort_registration).await;
-        child_scope.update_status(ServiceStatus::Stopping).await.ok();
         if let Ok(Err(_)) = res {
             child_scope.abort().await;
         }
@@ -128,7 +132,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
-        log::debug!("Adding {} to scope {}", std::any::type_name::<T>(), self.scope_id);
+        log::debug!("Adding {} to scope {:x}", std::any::type_name::<T>(), self.scope_id.as_fields().0);
         self.registry
             .add_data(&self.scope_id, data)
             .await
@@ -170,8 +174,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
-        log::debug!("Removing {} from scope {}", std::any::type_name::<T>(), self.scope_id);
+        log::debug!(
+            "Removing {} from scope {:x}",
+            std::any::type_name::<T>(),
+            self.scope_id.as_fields().0
+        );
         self.registry.remove_data(&self.scope_id).await.ok().flatten()
+    }
+
+    pub(crate) async fn remove_data_from_parent<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
+        if let Some(parent_id) = self.parent_id.as_ref() {
+            log::debug!("Removing {} from scope {:x}", std::any::type_name::<T>(), parent_id.as_fields().0);
+            self.registry.remove_data(parent_id).await.ok().flatten()
+        } else {
+            None
+        }
     }
 
     pub(crate) async fn service(&mut self) -> Service {
@@ -188,7 +205,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Await the tasks in this runtime's scope
     pub(crate) async fn join(&mut self) {
-        log::debug!("Joining scope {}", self.scope_id);
+        log::debug!("Joining scope {:x}", self.scope_id.as_fields().0);
         for handle in self.join_handles.drain(..) {
             handle.await.ok();
         }
@@ -204,14 +221,13 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         self.registry.abort(&self.scope_id).await.ok();
     }
 
-    pub async fn print(&self) {
-        self.registry.print(&self.scope_id).await;
+    /// Use your powers for ill and shut down some other scope.
+    /// This will return an error if the scope does not exist.
+    pub async fn shutdown_scope(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
+        self.registry.abort(scope_id).await
     }
 
-    pub async fn print_root(&self) {
-        self.registry.print(&0).await;
-    }
-
+    /// Get the service tree beginning with this scope
     pub async fn service_tree(&self) -> ServiceTree {
         self.registry
             .service_tree(&self.scope_id)
@@ -219,14 +235,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             .expect(&format!("Scope {} is missing...", self.scope_id))
     }
 
-    /// Get the join handles of this runtime's scoped tasks
-    pub(crate) fn join_handles(&self) -> &Vec<JoinHandle<anyhow::Result<()>>> {
-        &self.join_handles
+    /// Get the service tree beginning with a given scope
+    pub async fn service_tree_at_scope(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
+        self.registry.service_tree(scope_id).await
     }
 
-    /// Mutably get the join handles of this runtime's scoped tasks
-    pub(crate) fn join_handles_mut(&mut self) -> &mut Vec<JoinHandle<anyhow::Result<()>>> {
-        &mut self.join_handles
+    /// Get the entire service tree
+    pub async fn root_service_tree(&self) -> anyhow::Result<ServiceTree> {
+        self.registry.service_tree(&ROOT_SCOPE).await
     }
 
     /// Get an actor's event handle, if it exists in this scope.
@@ -268,6 +284,16 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Res(resource)
     }
 
+    /// Add a global, shared resource and get a reference to it
+    pub async fn add_global_resource<R: 'static + Send + Sync + Clone>(&mut self, resource: R) -> Res<R> {
+        log::debug!("Adding {} to root scope", std::any::type_name::<Res<R>>());
+        self.registry
+            .add_data(&ROOT_SCOPE, Res(resource.clone()))
+            .await
+            .expect(&format!("The root scope is missing..."));
+        Res(resource)
+    }
+
     /// Get the pool of a specified type if it exists in this runtime's scope
     pub async fn pool<P>(&mut self) -> Option<Pool<P>>
     where
@@ -293,7 +319,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let mut child_scope = self
-            .child_name_with(|scope_id| format!("Task {}", scope_id), None, Some(abort_handle.clone()))
+            .child_name_with(
+                |scope_id| format!("Task {:x}", scope_id.as_fields().0),
+                None,
+                Some(abort_handle.clone()),
+            )
             .await;
         let child_task = tokio::spawn(async move {
             let res = Abortable::new(AssertUnwindSafe(f(&mut child_scope)).catch_unwind(), abort_registration).await;
@@ -314,7 +344,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 }
             }
         });
-        self.join_handles_mut().push(child_task);
+        self.join_handles.push(child_task);
         abort_handle
     }
 
@@ -333,7 +363,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
                 actor.name(),
                 self.scope_id,
-                service.name
+                service.name()
             );
         }
         let supervisor_handle = supervisor_handle.into();
@@ -365,14 +395,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                 "Attempted to add a duplicate actor ({}) to scope {} ({})",
                 actor.name(),
                 self.scope_id,
-                service.name
+                service.name()
             );
         }
         let supervisor_handle = supervisor_handle.into();
         self.add_data(Res(state)).await;
         self.common_spawn::<_, _, Sys<A>, _>(actor, supervisor_handle, true, |scope| {
             async move {
-                scope.remove_data::<Res<A::State>>().await;
+                scope.remove_data_from_parent::<Res<A::State>>().await;
             }
             .boxed()
         })
@@ -400,6 +430,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         B: 'static + Send + Sync,
+
         for<'b> F: 'static + Send + Sync + FnOnce(&'b mut RuntimeScope<Reg>) -> BoxFuture<'b, ()>,
     {
         log::debug!("Spawning {}", actor.name());
@@ -426,10 +457,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             )
             .await;
             cleanup_fn(&mut actor_rt.scope).await;
-            actor_rt.remove_data::<Act<A>>().await;
+            if sender_in_parent {
+                actor_rt.remove_data_from_parent::<Act<A>>().await;
+            } else {
+                actor_rt.remove_data::<Act<A>>().await;
+            }
             Self::handle_run_res(res, &mut actor_rt, supervisor_handle, actor).await
         });
-        self.join_handles_mut().push(child_task);
+        self.join_handles.push(child_task);
         Ok(handle)
     }
 
@@ -525,6 +560,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         Sup::Event: SupervisorEvent,
         I: Into<Option<Act<Sup>>>,
         P: 'static + Send + Sync,
+
         for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Reg, Sup, P>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
         f(&mut self.spawn_pool(supervisor_handle).await).await
@@ -592,7 +628,7 @@ pub struct ActorScopedRuntime<A, Reg, Sup>
 where
     A: Actor,
     Sup: EventDriven,
-    Reg: 'static + RegistryAccess + Send + Sync,
+    Reg: 'static,
 {
     pub(crate) scope: RuntimeScope<Reg>,
     pub(crate) handle: <A::Channel as Channel<A, A::Event>>::Sender,
@@ -608,7 +644,7 @@ where
     Sup: EventDriven,
     Reg: 'static + RegistryAccess + Send + Sync,
 {
-    pub(crate) async fn new<P: Into<Option<usize>> + Send, S: Into<String>, O: Into<Option<S>>>(
+    pub(crate) async fn new<P: Into<Option<ScopeId>> + Send, S: Into<String>, O: Into<Option<S>>>(
         registry: Reg,
         actor: &A,
         parent_scope_id: P,
@@ -773,8 +809,6 @@ impl<A, Reg, Sup> Deref for ActorScopedRuntime<A, Reg, Sup>
 where
     A: Actor,
     Sup: EventDriven,
-    Sup::Event: SupervisorEvent,
-    Reg: 'static + RegistryAccess + Send + Sync,
 {
     type Target = RuntimeScope<Reg>;
 
@@ -787,8 +821,6 @@ impl<A, Reg, Sup> DerefMut for ActorScopedRuntime<A, Reg, Sup>
 where
     A: Actor,
     Sup: EventDriven,
-    Sup::Event: SupervisorEvent,
-    Reg: 'static + RegistryAccess + Send + Sync,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.scope
@@ -851,7 +883,7 @@ where
                 "Attempted to add a duplicate metric to pool {} in scope {} ({})",
                 std::any::type_name::<Pool<P>>(),
                 self.scope.scope_id,
-                service.name
+                service.name()
             );
         }
         let supervisor_handle = self.supervisor_handle.clone();

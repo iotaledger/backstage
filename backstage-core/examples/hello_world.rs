@@ -148,8 +148,7 @@ impl Actor for Launcher {
                     }
                 }
                 LauncherEvents::Shutdown { using_ctrl_c: _ } => {
-                    debug!("Exiting launcher");
-                    break;
+                    rt.shutdown_scope(&ROOT_SCOPE).await.ok();
                 }
                 LauncherEvents::ReportExit(res) => match res {
                     Ok(s) => {
@@ -170,8 +169,8 @@ impl Actor for Launcher {
                     }
                 },
                 LauncherEvents::StatusChange(s) => {
-                    info!("{} status changed ({} -> {})!", s.service.name, s.prev_status, s.service.status);
-                    debug!("\n{}", rt.service_tree().await);
+                    info!("{} status changed ({} -> {})!", s.service.name(), s.prev_status, s.service.status());
+                    debug!("\n{}", rt.root_service_tree().await.unwrap());
                 }
             }
         }
@@ -202,7 +201,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::<ArcedRegistry>::launch(|scope| {
+    RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
             scope
                 .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))

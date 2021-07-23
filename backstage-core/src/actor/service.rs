@@ -1,11 +1,13 @@
-use num_traits::{FromPrimitive, NumAssignOps};
+use crate::prelude::ScopeId;
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
-use std::convert::{TryFrom, TryInto};
-use std::fmt::Display;
-use std::ops::{Deref, DerefMut};
-use std::time::SystemTime;
+use std::{
+    borrow::Cow,
+    convert::{TryFrom, TryInto},
+    fmt::Display,
+    ops::{Deref, DerefMut},
+    time::SystemTime,
+};
 
 /// Defines anything which can be used as an actor's status
 pub trait Status: TryFrom<&'static str> + Display + Clone {}
@@ -73,48 +75,28 @@ impl Default for ServiceStatus {
     }
 }
 
-/// A pool of unique IDs which can be assigned to services
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct IdPool<T: NumAssignOps + FromPrimitive + Copy> {
-    pool: Vec<T>,
-}
-
-impl<T: NumAssignOps + FromPrimitive + Copy> IdPool<T> {
-    /// Get a new unique ID
-    pub fn get_id(&mut self) -> T {
-        if self.pool.len() == 0 {
-            self.pool.push(T::from_isize(1).unwrap());
-            T::from_isize(0).unwrap()
-        } else if self.pool.len() == 1 {
-            let id = self.pool[0];
-            self.pool[0] += T::from_isize(1).unwrap();
-            id
-        } else {
-            self.pool.pop().unwrap()
-        }
-    }
-
-    /// Return an unused id
-    pub fn return_id(&mut self, id: T) {
-        self.pool.push(id);
-    }
-}
-
 /// An actor's service metrics
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
+    /// The scope ID of this service
+    scope_id: ScopeId,
     /// The status of the actor
-    pub status: Cow<'static, str>,
+    status: Cow<'static, str>,
     /// The name of the actor
-    pub name: Cow<'static, str>,
+    name: Cow<'static, str>,
     /// The start timestamp, used to calculated uptime
-    pub up_since: SystemTime,
+    up_since: SystemTime,
 }
 
 impl Service {
     /// Create a new Service
-    pub fn new<S: Into<Cow<'static, str>>>(name: S) -> Self {
-        Self::default().with_name(name)
+    pub fn new<S: Into<Cow<'static, str>>>(scope_id: ScopeId, name: S) -> Self {
+        Self {
+            scope_id,
+            status: ServiceStatus::Starting.to_string().into(),
+            name: name.into(),
+            up_since: SystemTime::now(),
+        }
     }
     /// Set the service status
     pub fn with_status<S: Into<Cow<'static, str>>>(mut self, status: S) -> Self {
@@ -169,23 +151,25 @@ impl Service {
             _ => false,
         }
     }
+    /// Get the service scope id
+    pub fn scope_id(&self) -> &ScopeId {
+        &self.scope_id
+    }
     /// Get the status of this service
     pub fn status(&self) -> &Cow<'static, str> {
         &self.status
     }
+    /// Get the name of this service
+    pub fn name(&self) -> &Cow<'static, str> {
+        &self.name
+    }
+    /// Get the service uptime in milliseconds
+    pub fn up_since(&self) -> &SystemTime {
+        &self.up_since
+    }
     /// Get the service status
     pub fn service_status(&self) -> anyhow::Result<ServiceStatus> {
         ServiceStatus::try_from(self.status.as_ref())
-    }
-}
-
-impl Default for Service {
-    fn default() -> Self {
-        Self {
-            status: Default::default(),
-            name: Default::default(),
-            up_since: SystemTime::now(),
-        }
     }
 }
 
@@ -218,10 +202,11 @@ impl TreeItem for ServiceTree {
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
         write!(
             f,
-            "{}: {}, uptime: {}",
-            self.service.name,
-            self.service.status,
-            self.service.up_since.elapsed().unwrap().as_millis()
+            "{} ({:x}) - {}, Uptime {} ms",
+            self.service.name(),
+            self.scope_id.as_fields().0,
+            self.service.status(),
+            self.service.up_since().elapsed().unwrap().as_millis(),
         )
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::actor::{EventDriven, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender};
+use crate::actor::{EventDriven, Service, ShutdownStream, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 
@@ -51,7 +51,7 @@ impl RegistryAccess for ArcedRegistry {
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<ScopeId> {
         Ok(self
             .registry
             .write()
@@ -91,10 +91,6 @@ impl RegistryAccess for ArcedRegistry {
         self.registry.write().await.abort(scope_id)
     }
 
-    async fn print(&self, scope_id: &ScopeId) {
-        self.registry.read().await.print(scope_id)
-    }
-
     async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
         self.registry.read().await.service_tree(scope_id)
     }
@@ -131,12 +127,11 @@ enum RequestType {
         status: Cow<'static, str>,
     },
     Abort(ScopeId),
-    Print(ScopeId),
     ServiceTree(ScopeId),
 }
 
 enum ResponseType {
-    NewScope(usize),
+    NewScope(ScopeId),
     DropScope(anyhow::Result<()>),
     AddData(anyhow::Result<()>),
     DependOn(anyhow::Result<RawDepStatus>),
@@ -145,7 +140,6 @@ enum ResponseType {
     GetService(anyhow::Result<Service>),
     UpdateStatus(anyhow::Result<()>),
     Abort(anyhow::Result<()>),
-    Print,
     ServiceTree(anyhow::Result<ServiceTree>),
 }
 
@@ -188,7 +182,10 @@ where
     ) -> Result<(), crate::actor::ActorError>
     where
         Self: Sized,
+        Sup::Event: SupervisorEvent,
+        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
+        rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(e) = rt.next_event().await {
             let res = match e.req {
                 RequestType::NewScope {
@@ -213,16 +210,12 @@ where
                     ResponseType::UpdateStatus(self.registry.update_status(&scope_id, status))
                 }
                 RequestType::Abort(scope_id) => ResponseType::Abort(self.registry.abort(&scope_id)),
-                RequestType::Print(scope_id) => {
-                    self.registry.print(&scope_id);
-                    ResponseType::Print
-                }
                 RequestType::ServiceTree(scope_id) => ResponseType::ServiceTree(self.registry.service_tree(&scope_id)),
             };
             e.responder.send(res).ok();
         }
         log::debug!("Registry actor shutting down!");
-        self.registry.print(&0);
+        self.registry.print(&ROOT_SCOPE);
         Ok(())
     }
 }
@@ -292,7 +285,7 @@ where
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<ScopeId> {
         let (request, recv) = RegistryActorRequest::new(RequestType::NewScope {
             parent: parent.into(),
             name_fn: Box::new(name_fn),
@@ -351,12 +344,7 @@ where
         });
         self.handle.0.send(request).map_err(|e| anyhow::anyhow!("{}", e))?;
         if let ResponseType::RemoveData(r) = recv.await.unwrap() {
-            r.map(|o| {
-                o.map(|d| {
-                    log::trace!("About to downcast removed data to type {}", std::any::type_name::<T>());
-                    *unsafe { d.downcast_unchecked::<T>() }
-                })
-            })
+            r.map(|o| o.map(|d| *unsafe { d.downcast_unchecked::<T>() }))
         } else {
             panic!("Wrong response type!")
         }
@@ -403,15 +391,6 @@ where
         self.handle.0.send(request).map_err(|e| anyhow::anyhow!("{}", e))?;
         if let ResponseType::Abort(r) = recv.await.unwrap() {
             r
-        } else {
-            panic!("Wrong response type!")
-        }
-    }
-
-    async fn print(&self, scope_id: &ScopeId) {
-        let (request, recv) = RegistryActorRequest::new(RequestType::Print(*scope_id));
-        self.handle.0.send(request).ok();
-        if let ResponseType::Print = recv.await.unwrap() {
         } else {
             panic!("Wrong response type!")
         }

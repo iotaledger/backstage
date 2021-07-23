@@ -25,6 +25,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::{sync::RwLock, task::JoinHandle};
+pub use uuid::Uuid;
 
 mod data;
 pub use data::*;
@@ -34,8 +35,11 @@ mod access;
 pub use access::*;
 
 /// An alias type indicating that this is a scope id
-pub type ScopeId = usize;
+pub type ScopeId = Uuid;
 type DataId = usize;
+
+/// The root scope id, which is always a zeroed uuid
+pub const ROOT_SCOPE: Uuid = Uuid::nil();
 
 #[derive(Clone)]
 enum Dependency {
@@ -66,12 +70,11 @@ impl<T: 'static + Clone + Send + Sync> Into<Option<T>> for DepStatus<T> {
             DepStatus::Ready(t) => Some(t),
             DepStatus::Waiting(h) => {
                 if h.flag.set.load(Ordering::Relaxed) {
-                    h.flag.val.try_read().ok().and_then(|lock| {
-                        lock.clone().map(|d| {
-                            log::trace!("About to downcast a ready dep to type {}", std::any::type_name::<T>());
-                            *unsafe { d.downcast_unchecked() }
-                        })
-                    })
+                    h.flag
+                        .val
+                        .try_read()
+                        .ok()
+                        .and_then(|lock| lock.clone().map(|d| *unsafe { d.downcast_unchecked() }))
                 } else {
                     None
                 }
@@ -107,10 +110,7 @@ pub(crate) enum RawDepStatus {
 impl RawDepStatus {
     pub fn with_type<T: 'static + Clone + Send + Sync>(self) -> DepStatus<T> {
         match self {
-            RawDepStatus::Ready(t) => {
-                log::trace!("About to downcast a raw dep to type {}", std::any::type_name::<T>());
-                DepStatus::Ready(*unsafe { t.downcast_unchecked() })
-            }
+            RawDepStatus::Ready(t) => DepStatus::Ready(*unsafe { t.downcast_unchecked() }),
             RawDepStatus::Waiting(s) => DepStatus::Waiting(s.handle()),
         }
     }
@@ -119,9 +119,6 @@ impl RawDepStatus {
 /// A scope, which marks data as usable for a given task
 pub struct Scope {
     id: ScopeId,
-    // TODO: Maybe use a stack here to allow overwriting parent's
-    // data without deleting it from the child scope?
-    // Of course this means figuring out how to propagate removal properly
     data: HashMap<TypeId, DataId>,
     service: Service,
     shutdown_handle: Option<ShutdownHandle>,
@@ -134,7 +131,7 @@ pub struct Scope {
 
 impl Scope {
     fn new(
-        id: usize,
+        id: ScopeId,
         parent: Option<&Scope>,
         name: String,
         shutdown_handle: Option<ShutdownHandle>,
@@ -143,7 +140,7 @@ impl Scope {
         Scope {
             id,
             data: parent.map(|p| p.data.clone()).unwrap_or_default(),
-            service: Service::new(name),
+            service: Service::new(id, name),
             shutdown_handle,
             abort_handle,
             dependencies: anymap::Map::new(),
@@ -156,7 +153,7 @@ impl Scope {
     /// Abort the tasks in this scope. This will shutdown tasks that have
     /// shutdown handles instead.
     fn abort(&mut self) {
-        log::debug!("Aborting scope {} ({})", self.id, self.service.name);
+        log::debug!("Aborting scope {:x} ({})", self.id.as_fields().0, self.service.name());
         let (shutdown_handle, abort_handle) = (&mut self.shutdown_handle, &mut self.abort_handle);
         if let Some(handle) = shutdown_handle.take() {
             handle.shutdown();
@@ -164,7 +161,6 @@ impl Scope {
             abort.abort();
         }
         for dep in self.dependencies.as_mut().drain() {
-            log::trace!("About to downcast dependency while aborting scope {}", self.id);
             match *unsafe { dep.downcast_unchecked() } {
                 Dependency::Once(f) | Dependency::Linked(f) => {
                     f.cancel();
@@ -196,7 +192,7 @@ pub trait RegistryAccess: Clone {
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> anyhow::Result<usize>;
+    ) -> anyhow::Result<ScopeId>;
 
     /// Drop the scope and all child scopes
     async fn drop_scope(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
@@ -222,10 +218,6 @@ pub trait RegistryAccess: Clone {
     /// Abort this scope
     async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
 
-    /// Print the tree hierarchy starting with this scope
-    /// NOTE: To print the entire tree, use scope id `&0` as it will always refer to the root
-    async fn print(&self, scope_id: &ScopeId);
-
     /// Request the service tree from this scope
     async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree>;
 }
@@ -238,7 +230,6 @@ pub struct Registry {
     data: Vec<Option<Box<dyn CloneAny + Send + Sync>>>,
     data_pool: IdPool<DataId>,
     scopes: HashMap<ScopeId, Scope>,
-    scope_pool: IdPool<ScopeId>,
 }
 
 impl Default for Registry {
@@ -247,7 +238,6 @@ impl Default for Registry {
             data: Vec::with_capacity(100),
             data_pool: Default::default(),
             scopes: Default::default(),
-            scope_pool: Default::default(),
         }
     }
 }
@@ -260,8 +250,17 @@ impl Registry {
         name_fn: F,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> usize {
-        let scope_id = self.scope_pool.get_id();
+    ) -> ScopeId {
+        let scope_id = if self.scopes.is_empty() {
+            ROOT_SCOPE
+        } else {
+            loop {
+                let id = Uuid::new_v4();
+                if !self.scopes.contains_key(&id) {
+                    break id;
+                }
+            }
+        };
         let parent = parent.into();
         if let Some(parent_id) = parent {
             self.scopes.entry(parent_id).and_modify(|scope| {
@@ -285,7 +284,7 @@ impl Registry {
             .scopes
             .remove(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        log::debug!("Dropping scope {} ({})", scope_id, scope.service.name);
+        log::debug!("Dropping scope {:x} ({})", scope_id.as_fields().0, scope.service.name());
         for child in scope.children.iter() {
             self.drop_scope(child)?;
         }
@@ -297,7 +296,6 @@ impl Registry {
         if let Some(parent) = scope.parent.and_then(|parent_id| self.scopes.get_mut(&parent_id)) {
             parent.children.retain(|id| id != scope_id);
         }
-        self.scope_pool.return_id(*scope_id);
         Ok(())
     }
 
@@ -310,7 +308,6 @@ impl Registry {
         let scope = self.scopes.get_mut(scope_id).unwrap();
         Ok(match scope.dependencies.as_mut().entry(data_type) {
             Entry::Occupied(mut e) => {
-                log::trace!("About to downcast for upgrading a dep in scope {}", scope_id);
                 let val = unsafe { e.get_mut().downcast_mut_unchecked::<Dependency>() };
                 val.upgrade();
                 match val {
@@ -320,7 +317,6 @@ impl Registry {
             }
             Entry::Vacant(v) => {
                 let flag = DepSignal::default();
-                log::trace!("About to insert linked dependency in scope {}", scope_id);
                 unsafe { v.insert(Box::new(Dependency::Linked(flag.clone()))) };
                 if let RawDepStatus::Ready(t) = status {
                     flag.signal_raw(t).await;
@@ -345,7 +341,17 @@ impl Registry {
             .scopes
             .get_mut(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let data_id = self.data_pool.get_id();
+        let data_id = {
+            if let Some(data_id) = scope.data.get(&data_type) {
+                if scope.created.contains(data_id) {
+                    *data_id
+                } else {
+                    self.data_pool.get_id().ok_or_else(|| anyhow::anyhow!("Out of space for data!"))?
+                }
+            } else {
+                self.data_pool.get_id().ok_or_else(|| anyhow::anyhow!("Out of space for data!"))?
+            }
+        };
         if self.data.len() <= data_id {
             self.data.resize_with(data_id + 10, || None);
         }
@@ -357,16 +363,9 @@ impl Registry {
 
     /// Remove some data from this scope and its children.
     pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&mut self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
-        self.remove_data_raw(scope_id, TypeId::of::<T>()).await.map(|o| {
-            o.map(|data| {
-                log::trace!(
-                    "About to downcast for remove_data call in scope {} for {}",
-                    scope_id,
-                    std::any::type_name::<T>()
-                );
-                *unsafe { data.downcast_unchecked::<T>() }
-            })
-        })
+        self.remove_data_raw(scope_id, TypeId::of::<T>())
+            .await
+            .map(|o| o.map(|data| *unsafe { data.downcast_unchecked::<T>() }))
     }
 
     pub(crate) async fn remove_data_raw(
@@ -374,36 +373,21 @@ impl Registry {
         scope_id: &ScopeId,
         data_type: TypeId,
     ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>> {
-        if let Some((creator_scope, data)) = {
-            self.scopes
-                .get(scope_id)
-                .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-                .data
-                .get(&data_type)
-                .cloned()
-                .and_then(|data_id| {
-                    self.data[data_id].take().map(|data| {
-                        let mut creator_scope = self.scopes.get(scope_id).unwrap();
-                        self.data_pool.return_id(data_id);
-                        // Check if we created the data
-                        // If not, climb the parent tree until we find the scope that did
-                        // If we never find that scope, just remove it anyway I guess
-                        while !creator_scope.created.contains(&data_id) {
-                            if let Some(parent) = creator_scope.parent.and_then(|parent_id| self.scopes.get(&parent_id)) {
-                                creator_scope = parent;
-                            } else {
-                                break;
-                            }
-                        }
-                        (creator_scope.id, data)
-                    })
-                })
-        }
-        .map(|(scope_id, data)| (self.scopes.get_mut(&scope_id).unwrap(), data))
-        {
-            let scope_id = creator_scope.id;
-            self.propagate_data_raw(&scope_id, data_type, Propagation::Remove).await;
-            Ok(Some(data))
+        let scope = self
+            .scopes
+            .get_mut(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        if let Some(data_id) = scope.data.get(&data_type) {
+            if scope.created.remove(data_id) {
+                let data = self.data[*data_id].take();
+                if data.is_some() {
+                    self.data_pool.return_id(*data_id);
+                }
+                self.propagate_data_raw(&scope_id, data_type, Propagation::Remove).await;
+                Ok(data)
+            } else {
+                anyhow::bail!("Tried to remove data not created by scope {}!", scope_id);
+            }
         } else {
             Ok(None)
         }
@@ -415,10 +399,12 @@ impl Registry {
             match prop {
                 Propagation::Add(data_id) => {
                     scope.data.insert(data_type, data_id);
-                    if let Some(dep) = scope.dependencies.as_mut().remove(&data_type).map(|d| {
-                        log::trace!("About to downcast for add propagation in scope {}", scope_id);
-                        *unsafe { d.downcast_unchecked::<Dependency>() }
-                    }) {
+                    if let Some(dep) = scope
+                        .dependencies
+                        .as_mut()
+                        .remove(&data_type)
+                        .map(|d| *unsafe { d.downcast_unchecked::<Dependency>() })
+                    {
                         match dep {
                             Dependency::Once(ref f) | Dependency::Linked(ref f) => {
                                 f.signal_raw(self.data[data_id].clone().unwrap()).await;
@@ -429,23 +415,41 @@ impl Registry {
                         }
                     }
                     for child in scope.children.clone() {
+                        if let Some(scope) = self.scopes.get(&child) {
+                            if let Some(data_id) = scope.data.get(&data_type) {
+                                if scope.created.contains(data_id) {
+                                    // This scope created some data of this type, so we don't want to overwrite it
+                                    continue;
+                                }
+                            }
+                        }
                         self.propagate_data_raw(&child, data_type, prop).await;
                     }
                 }
                 Propagation::Remove => {
                     scope.data.remove(&data_type);
-                    if let Some(Dependency::Linked(_)) = scope.dependencies.as_mut().remove(&data_type).map(|d| {
-                        log::trace!("About to downcast for remove propagation in scope {}", scope_id);
-                        *unsafe { d.downcast_unchecked() }
-                    }) {
+                    if let Some(Dependency::Linked(_)) = scope
+                        .dependencies
+                        .as_mut()
+                        .remove(&data_type)
+                        .map(|d| *unsafe { d.downcast_unchecked() })
+                    {
                         log::debug!(
                             "Aborting scope {} ({}) due to a removed critical dependency!",
                             scope.id,
-                            scope.service.name
+                            scope.service.name()
                         );
                         scope.abort();
                     } else {
                         for child in scope.children.clone() {
+                            if let Some(scope) = self.scopes.get(&child) {
+                                if let Some(data_id) = scope.data.get(&data_type) {
+                                    if scope.created.contains(data_id) {
+                                        // This scope created some data of this type, so we don't want to remove it
+                                        continue;
+                                    }
+                                }
+                            }
                             self.propagate_data_raw(&child, data_type, prop).await;
                         }
                     }
@@ -464,14 +468,8 @@ impl Registry {
                 .data
                 .get(&TypeId::of::<T>())
                 .and_then(|&data_id| self.data[data_id].as_ref())
-                .map(|d| {
-                    log::trace!(
-                        "About to downcast for get_data call in scope {} for {}",
-                        scope_id,
-                        std::any::type_name::<T>()
-                    );
-                    *unsafe { d.clone().downcast_unchecked::<T>() }
-                }) {
+                .map(|d| *unsafe { d.clone().downcast_unchecked::<T>() })
+            {
                 Some(d) => DepStatus::Ready(d),
                 None => {
                     let flag = DepSignal::default();
@@ -592,6 +590,7 @@ pub(crate) struct DepSignal {
 }
 
 impl DepSignal {
+    #[allow(unused)]
     pub(crate) async fn signal<T: 'static + Clone + Send + Sync>(self, val: T) {
         self.flag.signal(val).await
     }
@@ -629,10 +628,7 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
                 Ok(lock) => Poll::Ready(
                     lock.clone()
                         .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
-                        .map(|d| {
-                            log::trace!("About to downcast dependency (1/2)");
-                            *unsafe { d.downcast_unchecked::<T>() }
-                        }),
+                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
                 ),
                 Err(_) => Poll::Pending,
             };
@@ -647,10 +643,7 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
                 Ok(lock) => Poll::Ready(
                     lock.clone()
                         .ok_or_else(|| anyhow::anyhow!("Dependency notification canceled!"))
-                        .map(|d| {
-                            log::trace!("About to downcast dependency (2/2)");
-                            *unsafe { d.downcast_unchecked::<T>() }
-                        }),
+                        .map(|d| *unsafe { d.downcast_unchecked::<T>() }),
                 ),
                 Err(_) => Poll::Pending,
             }
@@ -672,10 +665,10 @@ impl<'a> TreeItem for PrintableRegistry<'a> {
             write!(
                 f,
                 "{} ({}) - {}, Uptime {} ms, Data {:?}",
+                scope.service.name(),
                 scope_id,
-                scope.service.name,
-                scope.service.status,
-                scope.service.up_since.elapsed().unwrap().as_millis(),
+                scope.service.status(),
+                scope.service.up_since().elapsed().unwrap().as_millis(),
                 scope.created
             )
         } else {

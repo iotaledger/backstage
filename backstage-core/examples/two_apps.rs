@@ -97,7 +97,7 @@ impl Actor for HelloWorld {
                     info!("HelloWorld printing: {}", s);
                     count += 1;
                     if count == 3 {
-                        rt.print_root().await;
+                        debug!("\n{}", rt.root_service_tree().await.unwrap());
                         panic!("I counted to 3!");
                     }
                 }
@@ -274,12 +274,12 @@ impl Actor for Launcher {
             match evt {
                 LauncherEvents::HelloWorld(event) => {
                     // info!("Received hello world message: {:?}", event);
-                    //rt.send_actor_event::<HelloWorld>(event).await?;
+                    // rt.send_actor_event::<HelloWorld>(event).await?;
                     hello_world.send(event)?;
                 }
                 LauncherEvents::Howdy(event) => {
                     // info!("Received howdy message: {:?}", event);
-                    //rt.send_actor_event::<Howdy>(event).await?;
+                    // rt.send_actor_event::<Howdy>(event).await?;
                     howdy.send(event)?;
                 }
                 LauncherEvents::WebsocketMsg(peer, msg) => {

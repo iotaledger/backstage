@@ -1,46 +1,61 @@
 use crate::prelude::*;
 use async_trait::async_trait;
 use lru::LruCache;
-use std::ops::DerefMut;
-use std::{collections::HashMap, hash::Hash};
+use std::{collections::HashMap, hash::Hash, ops::DerefMut};
 use tokio::sync::RwLock;
 
+/// An actor pool which contains some number of handles
 #[async_trait]
 pub trait ActorPool: Default {
+    /// The actor type of this pool
     type Actor: Actor;
 
+    /// Verify the pool by removing any closed handles. An empty pool is invalid.
     async fn verify(&self) -> bool;
 
+    /// Get a copy of the handles in this pool
     async fn handles(&self) -> Vec<Act<Self::Actor>>;
 
+    /// Send a cloneable event to all handles in this pool
     async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
     where
         <Self::Actor as Actor>::Event: Clone;
 }
 
+/// A basic actor pool which allows retrieving handles via its internal method
 #[async_trait]
 pub trait BasicActorPool: ActorPool {
+    /// Push a handle into the pool
     async fn push(&self, handle: Act<Self::Actor>);
 
+    /// Get a handle from the pool
     async fn get(&self) -> Option<Act<Self::Actor>>;
 
+    /// Send to a handle in the pool
     async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
 }
 
+/// A keyed actor pool which can be accessed via some metric
 #[async_trait]
 pub trait KeyedActorPool: ActorPool {
+    /// The key that identifies each handle in the pool
     type Key: Send + Sync;
 
+    /// Push a handle into the pool
     async fn push(&self, key: Self::Key, handle: Act<Self::Actor>);
 
+    /// Get a handle from the pool via a key
     async fn get(&self, key: &Self::Key) -> Option<Act<Self::Actor>>;
 
+    /// Iterate the key/handle pairs in the pool
     async fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Self::Key, Act<Self::Actor>)> + 'a>;
 
+    /// Send to a handle in the pool with a key
     async fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
 }
 
 #[cfg(feature = "rand_pool")]
+/// A pool which randomly returns a handle
 pub struct RandomPool<A: Actor> {
     handles: RwLock<Vec<Act<A>>>,
 }
@@ -117,11 +132,12 @@ impl<A: Actor> BasicActorPool for RandomPool<A> {
     }
 }
 
+/// A pool which returns the least recently used handle
 pub struct LruPool<A: Actor> {
     inner: RwLock<LruInner<A>>,
 }
 
-pub struct LruInner<A: Actor> {
+struct LruInner<A: Actor> {
     handles: Vec<Option<Act<A>>>,
     lru: LruCache<usize, usize>,
     id_pool: IdPool<usize>,
@@ -185,7 +201,7 @@ impl<A: Actor> ActorPool for LruPool<A> {
 impl<A: Actor> BasicActorPool for LruPool<A> {
     async fn push(&self, handle: Act<Self::Actor>) {
         let mut inner = self.inner.write().await;
-        let id = inner.id_pool.get_id();
+        let id = inner.id_pool.get_id().expect("Out of space for handles!");
         if id >= inner.handles.len() {
             inner.handles.resize(id + 1, None);
         }
@@ -240,6 +256,7 @@ impl<A: Actor> Default for LruInner<A> {
     }
 }
 
+/// A keyed pool which stores handles in a HashMap
 pub struct MapPool<A: Actor, M: Hash + Clone> {
     map: RwLock<HashMap<M, Act<A>>>,
 }
