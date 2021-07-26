@@ -1,5 +1,5 @@
 use super::*;
-use crate::actor::{EventDriven, Service, ShutdownStream, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender};
+use crate::actor::{CustomStatus, EventDriven, Service, ShutdownStream, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 
@@ -185,7 +185,9 @@ where
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        rt.update_status(ServiceStatus::Running).await.ok();
+        self.registry
+            .update_status(rt.id(), CustomStatus(ServiceStatus::Running).into())
+            .ok();
         while let Some(e) = rt.next_event().await {
             let res = match e.req {
                 RequestType::NewScope {
