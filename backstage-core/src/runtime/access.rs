@@ -56,11 +56,12 @@ impl RegistryAccess for ArcedRegistry {
             .registry
             .write()
             .await
-            .new_scope(parent, name_fn, shutdown_handle, abort_handle))
+            .new_scope(parent, name_fn, shutdown_handle, abort_handle)
+            .await)
     }
 
     async fn drop_scope(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        self.registry.write().await.drop_scope(scope_id)
+        self.registry.write().await.drop_scope(scope_id).await
     }
 
     async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
@@ -68,7 +69,7 @@ impl RegistryAccess for ArcedRegistry {
     }
 
     async fn depend_on<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
-        self.registry.write().await.depend_on::<T>(scope_id).await
+        self.registry.read().await.depend_on::<T>(scope_id).await
     }
 
     async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
@@ -76,23 +77,23 @@ impl RegistryAccess for ArcedRegistry {
     }
 
     async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
-        self.registry.write().await.get_data(scope_id)
+        self.registry.read().await.get_data(scope_id).await
     }
 
     async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service> {
-        self.registry.read().await.get_service(scope_id)
+        self.registry.read().await.get_service(scope_id).await
     }
 
     async fn update_status(&self, scope_id: &ScopeId, status: Cow<'static, str>) -> anyhow::Result<()> {
-        self.registry.write().await.update_status(scope_id, status)
+        self.registry.read().await.update_status(scope_id, status).await
     }
 
     async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        self.registry.write().await.abort(scope_id)
+        self.registry.read().await.abort(scope_id).await
     }
 
     async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
-        self.registry.read().await.service_tree(scope_id)
+        self.registry.read().await.service_tree(scope_id).await
     }
 }
 
@@ -186,7 +187,8 @@ where
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
         self.registry
-            .update_status(rt.id(), CustomStatus(ServiceStatus::Running).into())
+            .update_status(rt.id(), CustomStatus(ServiceStatus::Running))
+            .await
             .ok();
         while let Some(e) = rt.next_event().await {
             let res = match e.req {
@@ -195,8 +197,8 @@ where
                     name_fn,
                     shutdown_handle,
                     abort_handle,
-                } => ResponseType::NewScope(self.registry.new_scope(parent, name_fn, shutdown_handle, abort_handle)),
-                RequestType::DropScope(scope_id) => ResponseType::DropScope(self.registry.drop_scope(&scope_id)),
+                } => ResponseType::NewScope(self.registry.new_scope(parent, name_fn, shutdown_handle, abort_handle).await),
+                RequestType::DropScope(scope_id) => ResponseType::DropScope(self.registry.drop_scope(&scope_id).await),
                 RequestType::AddData { scope_id, data_type, data } => {
                     ResponseType::AddData(self.registry.add_data_raw(&scope_id, data_type, data).await)
                 }
@@ -206,18 +208,19 @@ where
                 RequestType::RemoveData { scope_id, data_type } => {
                     ResponseType::RemoveData(self.registry.remove_data_raw(&scope_id, data_type).await)
                 }
-                RequestType::GetData { scope_id, data_type } => ResponseType::GetData(self.registry.get_data_raw(&scope_id, data_type)),
-                RequestType::GetService(scope_id) => ResponseType::GetService(self.registry.get_service(&scope_id)),
-                RequestType::UpdateStatus { scope_id, status } => {
-                    ResponseType::UpdateStatus(self.registry.update_status(&scope_id, status))
+                RequestType::GetData { scope_id, data_type } => {
+                    ResponseType::GetData(self.registry.get_data_raw(&scope_id, data_type).await)
                 }
-                RequestType::Abort(scope_id) => ResponseType::Abort(self.registry.abort(&scope_id)),
-                RequestType::ServiceTree(scope_id) => ResponseType::ServiceTree(self.registry.service_tree(&scope_id)),
+                RequestType::GetService(scope_id) => ResponseType::GetService(self.registry.get_service(&scope_id).await),
+                RequestType::UpdateStatus { scope_id, status } => {
+                    ResponseType::UpdateStatus(self.registry.update_status(&scope_id, status).await)
+                }
+                RequestType::Abort(scope_id) => ResponseType::Abort(self.registry.abort(&scope_id).await),
+                RequestType::ServiceTree(scope_id) => ResponseType::ServiceTree(self.registry.service_tree(&scope_id).await),
             };
             e.responder.send(res).ok();
         }
         log::debug!("Registry actor shutting down!");
-        self.registry.print(&ROOT_SCOPE);
         Ok(())
     }
 }
@@ -249,8 +252,10 @@ where
         Self: Send + Sized,
     {
         let mut registry = Registry::default();
-        let scope_id = registry.new_scope(None, |_| "Registry".to_string(), None, None);
-        let child_scope_id = registry.new_scope(scope_id, |_| name.into(), inner_shutdown_handle, inner_abort_handle);
+        let scope_id = registry.new_scope(None, |_| "Registry".to_string(), None, None).await;
+        let child_scope_id = registry
+            .new_scope(scope_id, |_| name.into(), inner_shutdown_handle, inner_abort_handle)
+            .await;
         let mut actor = RegistryActor { registry };
         let (sender, receiver) = UnboundedTokioChannel::new(&actor).await.unwrap();
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
