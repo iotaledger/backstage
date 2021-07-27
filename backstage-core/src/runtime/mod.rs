@@ -1,4 +1,4 @@
-use crate::actor::{Actor, Channel, IdPool, Sender, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
+use crate::actor::{Actor, Channel, Sender, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
 use anymap::{
     any::{CloneAny, UncheckedAnyExt},
     raw::Entry,
@@ -36,7 +36,6 @@ pub use access::*;
 
 /// An alias type indicating that this is a scope id
 pub type ScopeId = Uuid;
-type DataId = usize;
 
 /// The root scope id, which is always a zeroed uuid
 pub const ROOT_SCOPE: Uuid = Uuid::nil();
@@ -119,12 +118,12 @@ impl RawDepStatus {
 /// A scope, which marks data as usable for a given task
 pub struct Scope {
     id: ScopeId,
-    data: HashMap<TypeId, DataId>,
+    created_data: HashMap<TypeId, Arc<Box<dyn CloneAny + Send + Sync>>>,
+    visible_data: HashMap<TypeId, Arc<Box<dyn CloneAny + Send + Sync>>>,
     service: Service,
     shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
     dependencies: anymap::Map<dyn CloneAny + Send + Sync>,
-    created: HashSet<DataId>,
     parent: Option<ScopeId>,
     children: HashSet<ScopeId>,
 }
@@ -139,12 +138,12 @@ impl Scope {
     ) -> Self {
         Scope {
             id,
-            data: parent.map(|p| p.data.clone()).unwrap_or_default(),
+            created_data: Default::default(),
+            visible_data: parent.map(|p| p.visible_data.clone()).unwrap_or_default(),
             service: Service::new(id, name),
             shutdown_handle,
             abort_handle,
             dependencies: anymap::Map::new(),
-            created: Default::default(),
             parent: parent.map(|p| p.id),
             children: Default::default(),
         }
@@ -227,16 +226,12 @@ pub trait RegistryAccess: Clone {
 /// the global dyn vector. Two id pools manage the reusable indexes
 /// for this data.
 pub struct Registry {
-    data: Vec<Option<Box<dyn CloneAny + Send + Sync>>>,
-    data_pool: IdPool<DataId>,
     scopes: HashMap<ScopeId, Scope>,
 }
 
 impl Default for Registry {
     fn default() -> Self {
         Self {
-            data: Vec::with_capacity(100),
-            data_pool: Default::default(),
             scopes: Default::default(),
         }
     }
@@ -288,11 +283,6 @@ impl Registry {
         for child in scope.children.iter() {
             self.drop_scope(child)?;
         }
-        for &data_id in scope.created.iter() {
-            if self.data[data_id].take().is_some() {
-                self.data_pool.return_id(data_id);
-            }
-        }
         if let Some(parent) = scope.parent.and_then(|parent_id| self.scopes.get_mut(&parent_id)) {
             parent.children.retain(|id| id != scope_id);
         }
@@ -341,23 +331,10 @@ impl Registry {
             .scopes
             .get_mut(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let data_id = {
-            if let Some(data_id) = scope.data.get(&data_type) {
-                if scope.created.contains(data_id) {
-                    *data_id
-                } else {
-                    self.data_pool.get_id().ok_or_else(|| anyhow::anyhow!("Out of space for data!"))?
-                }
-            } else {
-                self.data_pool.get_id().ok_or_else(|| anyhow::anyhow!("Out of space for data!"))?
-            }
-        };
-        if self.data.len() <= data_id {
-            self.data.resize_with(data_id + 10, || None);
-        }
-        self.data[data_id].replace(data);
-        scope.created.insert(data_id);
-        self.propagate_data_raw(scope_id, data_type, Propagation::Add(data_id)).await;
+
+        let arc_data = Arc::new(data);
+        scope.created_data.insert(data_type, arc_data.clone());
+        self.propagate_data_raw(scope_id, data_type, Propagation::Add(arc_data)).await;
         Ok(())
     }
 
@@ -377,19 +354,12 @@ impl Registry {
             .scopes
             .get_mut(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        if let Some(data_id) = scope.data.get(&data_type) {
-            if scope.created.remove(data_id) {
-                let data = self.data[*data_id].take();
-                if data.is_some() {
-                    self.data_pool.return_id(*data_id);
-                }
-                self.propagate_data_raw(&scope_id, data_type, Propagation::Remove).await;
-                Ok(data)
-            } else {
-                anyhow::bail!("Tried to remove data not created by scope {}!", scope_id);
-            }
+        if let Some(arc_data) = scope.created_data.remove(&data_type) {
+            self.propagate_data_raw(&scope_id, data_type, Propagation::Remove).await;
+            let data = Arc::try_unwrap(arc_data).ok();
+            Ok(data)
         } else {
-            Ok(None)
+            anyhow::bail!("Tried to remove data not created by scope {}!", scope_id);
         }
     }
 
@@ -397,8 +367,8 @@ impl Registry {
     async fn propagate_data_raw(&mut self, scope_id: &ScopeId, data_type: TypeId, prop: Propagation) {
         if let Some(scope) = self.scopes.get_mut(scope_id) {
             match prop {
-                Propagation::Add(data_id) => {
-                    scope.data.insert(data_type, data_id);
+                Propagation::Add(ref arc_data) => {
+                    scope.visible_data.insert(data_type, arc_data.clone());
                     if let Some(dep) = scope
                         .dependencies
                         .as_mut()
@@ -407,7 +377,7 @@ impl Registry {
                     {
                         match dep {
                             Dependency::Once(ref f) | Dependency::Linked(ref f) => {
-                                f.signal_raw(self.data[data_id].clone().unwrap()).await;
+                                f.signal_raw(arc_data.as_ref().clone()).await;
                             }
                         }
                         if let Dependency::Linked(_) = dep {
@@ -415,19 +385,11 @@ impl Registry {
                         }
                     }
                     for child in scope.children.clone() {
-                        if let Some(scope) = self.scopes.get(&child) {
-                            if let Some(data_id) = scope.data.get(&data_type) {
-                                if scope.created.contains(data_id) {
-                                    // This scope created some data of this type, so we don't want to overwrite it
-                                    continue;
-                                }
-                            }
-                        }
-                        self.propagate_data_raw(&child, data_type, prop).await;
+                        self.propagate_data_raw(&child, data_type, prop.clone()).await;
                     }
                 }
                 Propagation::Remove => {
-                    scope.data.remove(&data_type);
+                    scope.visible_data.remove(&data_type);
                     if let Some(Dependency::Linked(_)) = scope
                         .dependencies
                         .as_mut()
@@ -442,15 +404,7 @@ impl Registry {
                         scope.abort();
                     } else {
                         for child in scope.children.clone() {
-                            if let Some(scope) = self.scopes.get(&child) {
-                                if let Some(data_id) = scope.data.get(&data_type) {
-                                    if scope.created.contains(data_id) {
-                                        // This scope created some data of this type, so we don't want to remove it
-                                        continue;
-                                    }
-                                }
-                            }
-                            self.propagate_data_raw(&child, data_type, prop).await;
+                            self.propagate_data_raw(&child, data_type, prop.clone()).await;
                         }
                     }
                 }
@@ -465,10 +419,9 @@ impl Registry {
                 .scopes
                 .get(scope_id)
                 .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-                .data
+                .visible_data
                 .get(&TypeId::of::<T>())
-                .and_then(|&data_id| self.data[data_id].as_ref())
-                .map(|d| *unsafe { d.clone().downcast_unchecked::<T>() })
+                .map(|d| *unsafe { d.as_ref().clone().downcast_unchecked::<T>() })
             {
                 Some(d) => DepStatus::Ready(d),
                 None => {
@@ -490,9 +443,9 @@ impl Registry {
                 .scopes
                 .get(scope_id)
                 .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-                .data
+                .visible_data
                 .get(&data_type)
-                .and_then(|&data_id| self.data[data_id].clone())
+                .map(|arc_data| arc_data.as_ref().clone())
             {
                 Some(d) => RawDepStatus::Ready(d),
                 None => {
@@ -664,12 +617,13 @@ impl<'a> TreeItem for PrintableRegistry<'a> {
         if let Some(scope) = registry.scopes.get(&scope_id) {
             write!(
                 f,
-                "{} ({}) - {}, Uptime {} ms, Data {:?}",
+                "{} ({}) - {}, Uptime {} ms, Created data {:?}, Visible data {:?}",
                 scope.service.name(),
                 scope_id,
                 scope.service.status(),
                 scope.service.up_since().elapsed().unwrap().as_millis(),
-                scope.created
+                scope.created_data.values(),
+                scope.visible_data.values()
             )
         } else {
             write!(f, "{}", scope_id)
@@ -701,8 +655,8 @@ impl<'a> std::fmt::Display for PrintableRegistry<'a> {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 enum Propagation {
-    Add(DataId),
+    Add(Arc<Box<dyn CloneAny + Send + Sync>>),
     Remove,
 }
