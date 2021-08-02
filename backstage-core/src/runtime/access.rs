@@ -65,7 +65,7 @@ impl RegistryAccess for ArcedRegistry {
     }
 
     async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
-        self.registry.write().await.add_data(scope_id, data).await
+        self.registry.read().await.add_data(scope_id, data).await
     }
 
     async fn depend_on<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
@@ -73,7 +73,7 @@ impl RegistryAccess for ArcedRegistry {
     }
 
     async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
-        self.registry.write().await.remove_data(scope_id).await
+        self.registry.read().await.remove_data(scope_id).await
     }
 
     async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
