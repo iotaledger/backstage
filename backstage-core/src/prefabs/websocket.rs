@@ -151,24 +151,31 @@ where
         while let Some(evt) = rt.next_event().await {
             match evt {
                 WebsocketChildren::Response(peer, msg) => {
+                    log::trace!("Received response for peer {}: {}", peer, msg);
                     if let Some(conn) = self.connections.get(&peer) {
+                        log::trace!("Sending response to peer");
                         if let Err(_) = conn.send(msg) {
+                            log::trace!("Peer was not found!");
                             self.connections.remove(&peer);
                         }
                     }
                 }
                 WebsocketChildren::Connection(conn) => {
                     // Store this connection
+                    log::trace!("Received new connection for peer {}", conn.peer);
                     self.connections.insert(conn.peer, conn.sender);
                 }
                 WebsocketChildren::Received(addr, msg) => {
+                    log::trace!("Received message from peer {}: {}", addr, msg);
                     if let Ok(msg) = (addr, msg).try_into() {
                         if let Err(_) = self.supervisor_handle.send(msg) {
+                            log::trace!("Failed to pass message to supervisor!");
                             break;
                         }
                     }
                 }
                 WebsocketChildren::Close(peer) => {
+                    log::trace!("Received close command for peer {}", peer);
                     self.connections.remove(&peer);
                 }
             }
