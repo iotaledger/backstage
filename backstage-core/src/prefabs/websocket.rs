@@ -99,15 +99,17 @@ where
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
                             let responder_handle = rt.spawn_actor_unsupervised(Responder { sender }).await?;
-                            let responder_sender = responder_handle.clone().into_inner();
+                            rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Connection(Connection {
+                                peer,
+                                sender: responder_handle.clone().into_inner(),
+                            }))
+                            .await?;
                             rt.spawn_task(move |rt| {
                                 async move {
                                     rt.update_status(ServiceStatus::Running).await.ok();
                                     while let Some(Ok(msg)) = receiver.next().await {
                                         match msg {
                                             Message::Close(_) => {
-                                                responder_handle.shutdown();
-                                                rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer)).await?;
                                                 break;
                                             }
                                             msg => {
@@ -116,17 +118,14 @@ where
                                             }
                                         }
                                     }
+                                    responder_handle.shutdown();
+                                    rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer)).await?;
                                     rt.update_status(ServiceStatus::Stopped).await.ok();
                                     Ok(())
                                 }
                                 .boxed()
                             })
                             .await;
-                            rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Connection(Connection {
-                                peer,
-                                sender: responder_sender,
-                            }))
-                            .await?;
                         }
                     }
                 }
