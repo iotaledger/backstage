@@ -466,23 +466,16 @@ impl Registry {
 
     #[async_recursion]
     pub(crate) async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        for child in self
+        let scope = self
             .scopes
-            .get(&scope_id)
+            .get(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
             .read()
-            .await
-            .children
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            self.abort(&child).await.ok();
+            .await;
+        for child in scope.children.iter() {
+            self.abort(child).await.ok();
         }
-        if let Some(scope) = self.scopes.get(scope_id) {
-            let scope = scope.read().await;
-            scope.abort();
-        }
+        scope.abort();
         Ok(())
     }
 
