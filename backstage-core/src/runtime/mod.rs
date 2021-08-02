@@ -147,17 +147,17 @@ impl Scope {
 
     /// Abort the tasks in this scope. This will shutdown tasks that have
     /// shutdown handles instead.
-    fn abort(&self) {
+    fn abort(&mut self) {
         log::debug!("Aborting scope {:x} ({})", self.id.as_fields().0, self.service.name());
-        let (shutdown_handle, abort_handle) = (&self.shutdown_handle, &self.abort_handle);
-        if let Some(handle) = shutdown_handle {
+        let (shutdown_handle, abort_handle) = (&mut self.shutdown_handle, &mut self.abort_handle);
+        if let Some(handle) = shutdown_handle.take() {
             handle.shutdown();
-        } else if let Some(abort) = abort_handle {
+        } else if let Some(abort) = abort_handle.take() {
             abort.abort();
         }
-        for dep in self.dependencies.values() {
-            match unsafe { dep.downcast_ref_unchecked() } {
-                Dependency::Once(ref f) | Dependency::Linked(ref f) => {
+        for (_, dep) in self.dependencies.drain() {
+            match *unsafe { dep.downcast_unchecked() } {
+                Dependency::Once(f) | Dependency::Linked(f) => {
                     f.cancel();
                 }
             }
@@ -466,11 +466,11 @@ impl Registry {
 
     #[async_recursion]
     pub(crate) async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        let scope = self
+        let mut scope = self
             .scopes
             .get(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-            .read()
+            .write()
             .await;
         for child in scope.children.iter() {
             self.abort(child).await.ok();
@@ -539,7 +539,7 @@ impl DepSignal {
         self.flag.signal_raw(val).await
     }
 
-    pub(crate) fn cancel(&self) {
+    pub(crate) fn cancel(self) {
         self.flag.cancel();
     }
 
