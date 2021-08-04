@@ -98,7 +98,7 @@ where
                         let peer = socket.peer_addr().unwrap_or(peer);
                         if let Ok(stream) = accept_async(socket).await {
                             let (sender, mut receiver) = stream.split();
-                            let responder_handle = rt.spawn_actor_unsupervised(Responder { sender }).await?;
+                            let responder_handle = rt.spawn_actor_unsupervised(Responder { sender, peer }).await?;
                             rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Connection(Connection {
                                 peer,
                                 sender: responder_handle.clone().into_inner(),
@@ -186,6 +186,7 @@ where
 
 struct Responder {
     sender: SplitSink<WebSocketStream<TcpStream>, Message>,
+    peer: SocketAddr,
 }
 
 #[async_trait]
@@ -216,5 +217,9 @@ impl Actor for Responder {
             self.sender.send(msg).await.map_err(|e| ActorError::from(anyhow::anyhow!(e)))?;
         }
         Ok(())
+    }
+
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        format!("Responder ({})", self.peer).into()
     }
 }
