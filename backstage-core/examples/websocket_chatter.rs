@@ -245,7 +245,10 @@ impl Actor for Launcher {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
-        rt.spawn_actor(howdy_builder.build()).await?;
+        if let Err(InitError(howdy, e)) = rt.spawn_actor(howdy_builder.build()).await {
+            log::error!("Failed to init Howdy actor: {}", e);
+            rt.spawn_actor(howdy).await?;
+        }
         rt.spawn_actor(hello_world_builder.build()).await?;
         rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
         rt.spawn_actor(

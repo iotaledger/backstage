@@ -86,9 +86,9 @@ where
             .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))
             .unwrap();
         let res = AssertUnwindSafe(self.init(&mut actor_rt)).catch_unwind().await;
-        let mut actor = RuntimeScope::handle_init_res::<_, ()>(res, &mut actor_rt, self).await?;
-        let res = Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
-        RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, actor).await
+        RuntimeScope::handle_init_res::<_, ()>(res, &mut actor_rt).await?;
+        let res = Abortable::new(AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
+        RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, self).await
     }
 }
 

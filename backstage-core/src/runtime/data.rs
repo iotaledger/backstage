@@ -1,11 +1,10 @@
+use super::ScopeId;
 use crate::actor::{ActorPool, Channel, EventDriven, Sender, ShutdownHandle, System};
 use futures::future::AbortHandle;
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
-
-use super::ScopeId;
 
 /// Wrapper for data types
 pub trait DataWrapper<T> {

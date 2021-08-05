@@ -1,5 +1,11 @@
+use super::Actor;
 use anyhow::anyhow;
-use std::time::Duration;
+use std::{
+    error::Error,
+    fmt::{Debug, Display},
+    ops::Deref,
+    time::Duration,
+};
 use thiserror::Error;
 
 /// Potential actor errors
@@ -59,6 +65,12 @@ impl From<anyhow::Error> for ActorError {
     }
 }
 
+impl<S: Actor> From<InitError<S>> for ActorError {
+    fn from(e: InitError<S>) -> Self {
+        e.1.into()
+    }
+}
+
 /// Possible requests an actor can make to its supervisor
 #[derive(Debug, Clone)]
 pub enum ActorRequest {
@@ -72,3 +84,47 @@ pub enum ActorRequest {
     /// shut down everything and notify the user
     Panic,
 }
+
+/// Synchronous error from initializing an actor.
+/// Contains the actor's state at the time of the error.
+pub struct InitError<S>(pub S, pub anyhow::Error);
+
+impl<S> InitError<S> {
+    /// Access the actor's state
+    pub fn state(&self) -> &S {
+        &self.0
+    }
+
+    /// Access the error
+    pub fn error(&self) -> &anyhow::Error {
+        &self.1
+    }
+}
+
+impl<S> Deref for InitError<S> {
+    type Target = anyhow::Error;
+
+    fn deref(&self) -> &Self::Target {
+        self.error()
+    }
+}
+
+impl<S: Actor> From<(S, anyhow::Error)> for InitError<S> {
+    fn from((state, err): (S, anyhow::Error)) -> Self {
+        Self(state, err)
+    }
+}
+
+impl<S: Actor> Display for InitError<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.1, f)
+    }
+}
+
+impl<S: Actor> Debug for InitError<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self.1, f)
+    }
+}
+
+impl<S: Actor> Error for InitError<S> {}

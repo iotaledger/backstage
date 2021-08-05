@@ -1,7 +1,7 @@
 use super::*;
 use crate::actor::{
-    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven, KeyedActorPool, Service,
-    ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange, SuccessReport, SupervisorEvent,
+    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven, InitError, KeyedActorPool,
+    Service, ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange, SuccessReport, SupervisorEvent,
 };
 use futures::{future::Aborted, FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
@@ -355,7 +355,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new actor with a supervisor handle
-    pub async fn spawn_actor<A, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> anyhow::Result<Act<A>>
+    pub async fn spawn_actor<A, Sup, I>(&mut self, actor: A, supervisor_handle: I) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -365,12 +365,17 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
-            anyhow::bail!(
-                "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                actor.name(),
-                self.scope_id,
-                service.name()
-            );
+            let name = actor.name();
+            return Err((
+                actor,
+                anyhow::anyhow!(
+                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                    name,
+                    self.scope_id,
+                    service.name()
+                ),
+            )
+                .into());
         }
         let supervisor_handle = supervisor_handle.into();
 
@@ -379,7 +384,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new actor with no supervisor
-    pub async fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> anyhow::Result<Act<A>>
+    pub async fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
     {
@@ -387,7 +392,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<A, Sup, I>(&mut self, actor: A, state: A::State, supervisor_handle: I) -> anyhow::Result<Act<A>>
+    pub async fn spawn_system<A, Sup, I>(&mut self, actor: A, state: A::State, supervisor_handle: I) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -397,12 +402,17 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
-            anyhow::bail!(
-                "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                actor.name(),
-                self.scope_id,
-                service.name()
-            );
+            let name = actor.name();
+            return Err((
+                actor,
+                anyhow::anyhow!(
+                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                    name,
+                    self.scope_id,
+                    service.name()
+                ),
+            )
+                .into());
         }
         let supervisor_handle = supervisor_handle.into();
         self.add_data(Res(state)).await;
@@ -416,7 +426,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with no supervisor
-    pub async fn spawn_system_unsupervised<A>(&mut self, actor: A, state: A::State) -> anyhow::Result<Act<A>>
+    pub async fn spawn_system_unsupervised<A>(&mut self, actor: A, state: A::State) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync,
     {
@@ -429,7 +439,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         supervisor_handle: Option<Act<Sup>>,
         sender_in_parent: bool,
         cleanup_fn: F,
-    ) -> anyhow::Result<Act<A>>
+    ) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -441,9 +451,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         log::debug!("Spawning {}", actor.name());
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let mut actor_rt = self
+        let mut actor_rt = match self
             .child_actor(&actor, actor.name(), abort_handle.clone(), supervisor_handle.clone())
-            .await?;
+            .await
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
         let handle = actor_rt.handle();
         if sender_in_parent {
             self.add_data(handle.clone()).await;
@@ -451,7 +467,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
             actor_rt.add_data(handle.clone()).await;
         }
         let res = AssertUnwindSafe(actor.init(&mut actor_rt)).catch_unwind().await;
-        let mut actor = Self::handle_init_res(res, &mut actor_rt, actor).await?;
+        if let Err(e) = Self::handle_init_res(res, &mut actor_rt).await {
+            return Err((actor, e).into());
+        }
         let child_task = tokio::spawn(async move {
             let res = Abortable::new(
                 AssertUnwindSafe(async {
@@ -477,8 +495,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     pub(crate) async fn handle_init_res<A, Sup>(
         res: std::thread::Result<Result<(), ActorError>>,
         child_scope: &mut ActorScopedRuntime<A, Reg, Sup>,
-        state: A,
-    ) -> anyhow::Result<A>
+    ) -> anyhow::Result<()>
     where
         Sup: EventDriven,
         Sup::Event: SupervisorEvent,
@@ -486,7 +503,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     {
         match res {
             Ok(res) => match res {
-                Ok(_) => Ok(state),
+                Ok(_) => Ok(()),
                 Err(e) => {
                     child_scope.abort().await;
                     child_scope.join().await;
@@ -596,7 +613,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn an actor into a pool
-    pub async fn spawn_into_pool<Sup, I, P: ActorPool>(&mut self, supervisor_handle: I, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    pub async fn spawn_into_pool<Sup, I, P: ActorPool>(
+        &mut self,
+        supervisor_handle: I,
+        actor: P::Actor,
+    ) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         Sup: 'static + EventDriven,
         Sup::Event: SupervisorEvent,
@@ -615,7 +636,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         supervisor_handle: I,
         key: P::Key,
         actor: P::Actor,
-    ) -> anyhow::Result<Act<P::Actor>>
+    ) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         Sup: 'static + EventDriven,
         Sup::Event: SupervisorEvent,
@@ -679,7 +700,7 @@ where
     }
 
     /// Spawn a new actor with a supervisor handle
-    pub async fn spawn_actor<OtherA>(&mut self, actor: OtherA) -> anyhow::Result<Act<OtherA>>
+    pub async fn spawn_actor<OtherA>(&mut self, actor: OtherA) -> Result<Act<OtherA>, InitError<OtherA>>
     where
         OtherA: 'static + Actor + Send + Sync + Into<<<A as EventDriven>::Event as SupervisorEvent>::ChildStates>,
         A: 'static + EventDriven,
@@ -691,7 +712,7 @@ where
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<OtherA>(&mut self, actor: OtherA, state: OtherA::State) -> anyhow::Result<Act<OtherA>>
+    pub async fn spawn_system<OtherA>(&mut self, actor: OtherA, state: OtherA::State) -> Result<Act<OtherA>, InitError<OtherA>>
     where
         OtherA: 'static + System + Send + Sync + Into<<<A as EventDriven>::Event as SupervisorEvent>::ChildStates>,
         A: 'static + EventDriven,
@@ -728,7 +749,7 @@ where
     }
 
     /// Spawn an actor into a pool
-    pub async fn spawn_into_pool<P: ActorPool>(&mut self, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    pub async fn spawn_into_pool<P: ActorPool>(&mut self, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         A: 'static + EventDriven,
         <A as EventDriven>::Event: SupervisorEvent,
@@ -741,7 +762,7 @@ where
     }
 
     /// Spawn an actor into a keyed pool
-    pub async fn spawn_into_pool_keyed<P: ActorPool>(&mut self, key: P::Key, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    pub async fn spawn_into_pool_keyed<P: ActorPool>(&mut self, key: P::Key, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         A: 'static + EventDriven,
         <A as EventDriven>::Event: SupervisorEvent,
@@ -856,7 +877,7 @@ where
     P: BasicActorPool,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn(&mut self, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    pub async fn spawn(&mut self, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         P::Actor: 'static + Send + Sync,
     {
@@ -880,18 +901,22 @@ where
     P: KeyedActorPool,
 {
     /// Spawn a new actor into this pool
-    pub async fn spawn_keyed(&mut self, key: P::Key, actor: P::Actor) -> anyhow::Result<Act<P::Actor>>
+    pub async fn spawn_keyed(&mut self, key: P::Key, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         P::Actor: 'static + Send + Sync,
     {
         if self.pool.get(&key).await.is_some() {
             let service = self.scope.service().await;
-            anyhow::bail!(
-                "Attempted to add a duplicate metric to pool {} in scope {} ({})",
-                std::any::type_name::<Pool<P>>(),
-                self.scope.scope_id,
-                service.name()
-            );
+            return Err((
+                actor,
+                anyhow::anyhow!(
+                    "Attempted to add a duplicate metric to pool {} in scope {} ({})",
+                    std::any::type_name::<Pool<P>>(),
+                    self.scope.scope_id,
+                    service.name()
+                ),
+            )
+                .into());
         }
         let supervisor_handle = self.supervisor_handle.clone();
         let handle = self
