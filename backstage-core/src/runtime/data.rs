@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use super::ScopeId;
+
 /// Wrapper for data types
 pub trait DataWrapper<T> {
     /// Get the wrapper value, consuming the wrapper
@@ -54,12 +56,27 @@ impl<S: System> Clone for Sys<S> {
 
 /// An actor handle, used to send events
 pub struct Act<A: EventDriven> {
+    pub(crate) scope_id: ScopeId,
     pub(crate) sender: <A::Channel as Channel<A, A::Event>>::Sender,
     pub(crate) shutdown_handle: ShutdownHandle,
     pub(crate) abort_handle: AbortHandle,
 }
 
 impl<A: EventDriven> Act<A> {
+    pub(crate) fn new(
+        scope_id: ScopeId,
+        sender: <A::Channel as Channel<A, A::Event>>::Sender,
+        shutdown_handle: ShutdownHandle,
+        abort_handle: AbortHandle,
+    ) -> Self {
+        Self {
+            scope_id,
+            sender,
+            shutdown_handle,
+            abort_handle,
+        }
+    }
+
     /// Shut down the actor with this handle. Use with care!
     pub fn shutdown(&self) {
         self.shutdown_handle.shutdown();
@@ -68,6 +85,11 @@ impl<A: EventDriven> Act<A> {
     /// Abort the actor with this handle. Use with care!
     pub fn abort(&self) {
         self.abort_handle.abort();
+    }
+
+    /// Get the scope id of the actor this handle represents
+    pub fn scope_id(&self) -> &ScopeId {
+        &self.scope_id
     }
 }
 
@@ -91,6 +113,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
+            scope_id: self.scope_id,
             sender: self.sender.clone(),
             shutdown_handle: self.shutdown_handle.clone(),
             abort_handle: self.abort_handle.clone(),

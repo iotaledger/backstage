@@ -191,11 +191,17 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         }
     }
 
-    pub(crate) async fn service(&mut self) -> Service {
+    /// Get this scope's service
+    pub async fn service(&mut self) -> Service {
         self.registry
             .get_service(&self.scope_id)
             .await
             .expect(&format!("Scope {} is missing...", self.scope_id))
+    }
+
+    /// Get a scope's service, if it exists
+    pub async fn service_for_scope(&mut self, scope_id: &ScopeId) -> anyhow::Result<Service> {
+        self.registry.get_service(&scope_id).await
     }
 
     /// Update this scope's service status
@@ -236,7 +242,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Get the service tree beginning with a given scope
-    pub async fn service_tree_at_scope(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
+    pub async fn service_tree_for_scope(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
         self.registry.service_tree(scope_id).await
     }
 
@@ -754,11 +760,12 @@ where
 
     /// Get this actors's handle
     pub fn handle(&self) -> Act<A> {
-        Act {
-            sender: self.handle.clone(),
-            shutdown_handle: self.shutdown_handle.clone(),
-            abort_handle: self.abort_handle.clone(),
-        }
+        Act::new(
+            self.scope.scope_id,
+            self.handle.clone(),
+            self.shutdown_handle.clone(),
+            self.abort_handle.clone(),
+        )
     }
 
     /// Get this actors's shutdown handle

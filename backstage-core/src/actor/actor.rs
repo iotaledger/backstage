@@ -66,11 +66,12 @@ where
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let mut scope = Reg::instantiate(self.name(), Some(shutdown_handle.clone()), Some(abort_handle.clone())).await;
         scope
-            .add_data(Act::<Self> {
-                sender: sender.clone(),
-                shutdown_handle: shutdown_handle.clone(),
-                abort_handle: abort_handle.clone(),
-            })
+            .add_data(Act::<Self>::new(
+                scope.scope_id,
+                sender.clone(),
+                shutdown_handle.clone(),
+                abort_handle.clone(),
+            ))
             .await;
         let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
             scope,

@@ -5,6 +5,5 @@ pub mod prefabs;
 pub mod runtime;
 
 pub mod prelude {
-    pub use crate::actor::*;
-    pub use crate::runtime::*;
+    pub use crate::{actor::*, runtime::*};
 }
