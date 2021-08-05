@@ -510,10 +510,10 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                     anyhow::bail!(e)
                 }
             },
-            Err(_) => {
+            Err(e) => {
                 child_scope.abort().await;
                 child_scope.join().await;
-                anyhow::bail!("Panicked!")
+                std::panic::resume_unwind(e);
             }
         }
     }
@@ -543,13 +543,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                             supervisor.send(Sup::Event::report_err(ErrorReport::new(actor.into(), service, e)))
                         }
                     },
-                    Err(_) => {
-                        log::error!("{} panicked!", actor.name());
-                        supervisor.send(Sup::Event::report_err(ErrorReport::new(
-                            actor.into(),
-                            service,
-                            ActorError::RuntimeError(ActorRequest::Restart),
-                        )))
+                    Err(e) => {
+                        supervisor
+                            .send(Sup::Event::report_err(ErrorReport::new(
+                                actor.into(),
+                                service,
+                                ActorError::RuntimeError(ActorRequest::Restart),
+                            )))
+                            .ok();
+                        std::panic::resume_unwind(e);
                     }
                 },
                 Err(_) => supervisor.send(Sup::Event::report_ok(SuccessReport::new(actor.into(), service))),
@@ -564,9 +566,8 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                             anyhow::bail!(e)
                         }
                     },
-                    Err(_) => {
-                        log::error!("{} panicked!", actor.name());
-                        anyhow::bail!("Panicked!")
+                    Err(e) => {
+                        std::panic::resume_unwind(e);
                     }
                 },
                 Err(_) => {
