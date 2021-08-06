@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{Actor, ActorPool, System};
 use crate::{
     prelude::{Pool, RegistryAccess},
@@ -45,7 +48,9 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
         })
     }
 
-    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
+    async fn instantiate<Reg: 'static + RegistryAccess + Send + Sync>(
+        scope: &mut RuntimeScope<Reg>,
+    ) -> anyhow::Result<Self> {
         scope
             .system()
             .await
@@ -72,7 +77,9 @@ impl<P: 'static + ActorPool + Send + Sync> Dependencies for Pool<P> {
         scope.get_data().await.get().await
     }
 
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(
+        scope: &mut RuntimeScope<R>,
+    ) -> anyhow::Result<Self> {
         scope
             .pool()
             .await
@@ -90,7 +97,9 @@ impl<D: 'static + Dependencies + Clone + Send + Sync> Dependencies for Option<D>
         Ok(scope.get_data::<D>().await.get_opt())
     }
 
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(
+        scope: &mut RuntimeScope<R>,
+    ) -> anyhow::Result<Self> {
         Ok(D::instantiate(scope).await.ok())
     }
 
@@ -105,7 +114,9 @@ impl Dependencies for () {
         Ok(())
     }
 
-    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
+    async fn instantiate<R: 'static + RegistryAccess + Send + Sync>(
+        _scope: &mut RuntimeScope<R>,
+    ) -> anyhow::Result<Self> {
         Ok(())
     }
 

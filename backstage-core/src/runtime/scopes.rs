@@ -1,7 +1,11 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use crate::actor::{
-    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven, InitError, KeyedActorPool,
-    Service, ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange, SuccessReport, SupervisorEvent,
+    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven,
+    InitError, KeyedActorPool, Service, ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange,
+    SuccessReport, SupervisorEvent,
 };
 use futures::{future::Aborted, FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
@@ -75,7 +79,14 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> Self {
-        Self::new(self.registry.clone(), self.scope_id, name, shutdown_handle, abort_handle).await
+        Self::new(
+            self.registry.clone(),
+            self.scope_id,
+            name,
+            shutdown_handle,
+            abort_handle,
+        )
+        .await
     }
 
     pub(crate) async fn child_actor<A, Sup, S, O>(
@@ -92,7 +103,15 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         S: Into<String>,
         O: Into<Option<S>>,
     {
-        ActorScopedRuntime::new(self.registry.clone(), actor, self.scope_id, name, abort_handle, supervisor_handle).await
+        ActorScopedRuntime::new(
+            self.registry.clone(),
+            actor,
+            self.scope_id,
+            name,
+            abort_handle,
+            supervisor_handle,
+        )
+        .await
     }
 
     pub(crate) async fn child_name_with<F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
@@ -132,7 +151,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&mut self, data: T) {
-        log::debug!("Adding {} to scope {:x}", std::any::type_name::<T>(), self.scope_id.as_fields().0);
+        log::debug!(
+            "Adding {} to scope {:x}",
+            std::any::type_name::<T>(),
+            self.scope_id.as_fields().0
+        );
         self.registry
             .add_data(&self.scope_id, data)
             .await
@@ -184,7 +207,11 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     pub(crate) async fn remove_data_from_parent<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
         if let Some(parent_id) = self.parent_id.as_ref() {
-            log::debug!("Removing {} from scope {:x}", std::any::type_name::<T>(), parent_id.as_fields().0);
+            log::debug!(
+                "Removing {} from scope {:x}",
+                std::any::type_name::<T>(),
+                parent_id.as_fields().0
+            );
             self.registry.remove_data(parent_id).await.ok().flatten()
         } else {
             None
@@ -206,7 +233,9 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
 
     /// Update this scope's service status
     pub async fn update_status<S: Status>(&mut self, status: S) -> anyhow::Result<()> {
-        self.registry.update_status(&self.scope_id, CustomStatus(status).into()).await
+        self.registry
+            .update_status(&self.scope_id, CustomStatus(status).into())
+            .await
     }
 
     /// Await the tasks in this runtime's scope
@@ -392,7 +421,12 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<A, Sup, I>(&mut self, actor: A, state: A::State, supervisor_handle: I) -> Result<Act<A>, InitError<A>>
+    pub async fn spawn_system<A, Sup, I>(
+        &mut self,
+        actor: A,
+        state: A::State,
+        supervisor_handle: I,
+    ) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync + Into<<Sup::Event as SupervisorEvent>::ChildStates>,
         Sup: 'static + EventDriven,
@@ -713,7 +747,11 @@ where
     }
 
     /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<OtherA>(&mut self, actor: OtherA, state: OtherA::State) -> Result<Act<OtherA>, InitError<OtherA>>
+    pub async fn spawn_system<OtherA>(
+        &mut self,
+        actor: OtherA,
+        state: OtherA::State,
+    ) -> Result<Act<OtherA>, InitError<OtherA>>
     where
         OtherA: 'static + System + Send + Sync + Into<<<A as EventDriven>::Event as SupervisorEvent>::ChildStates>,
         A: 'static + EventDriven,
@@ -763,7 +801,11 @@ where
     }
 
     /// Spawn an actor into a keyed pool
-    pub async fn spawn_into_pool_keyed<P: ActorPool>(&mut self, key: P::Key, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
+    pub async fn spawn_into_pool_keyed<P: ActorPool>(
+        &mut self,
+        key: P::Key,
+        actor: P::Actor,
+    ) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         A: 'static + EventDriven,
         <A as EventDriven>::Event: SupervisorEvent,

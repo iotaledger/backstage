@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use num_traits::{CheckedAdd, FromPrimitive, NumAssignOps, WrappingAdd};
 use serde::{Deserialize, Serialize};
 

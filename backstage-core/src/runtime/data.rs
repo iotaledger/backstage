@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::ScopeId;
 use crate::actor::{ActorPool, Channel, EventDriven, Sender, ShutdownHandle, System};
 use futures::future::AbortHandle;

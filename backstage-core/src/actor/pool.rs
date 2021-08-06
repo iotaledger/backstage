@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::prelude::*;
 use async_trait::async_trait;
 use lru::LruCache;
@@ -80,7 +83,13 @@ impl<A: Actor> ActorPool for RandomPool<A> {
     }
 
     async fn handles(&self) -> Vec<Act<A>> {
-        self.handles.read().await.iter().filter(|h| !h.is_closed()).cloned().collect()
+        self.handles
+            .read()
+            .await
+            .iter()
+            .filter(|h| !h.is_closed())
+            .cloned()
+            .collect()
     }
 
     async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
@@ -242,7 +251,9 @@ impl<A: Actor> BasicActorPool for LruPool<A> {
 
 impl<A: Actor> Default for LruPool<A> {
     fn default() -> Self {
-        Self { inner: Default::default() }
+        Self {
+            inner: Default::default(),
+        }
     }
 }
 
@@ -263,7 +274,9 @@ pub struct MapPool<A: Actor, M: Hash + Clone> {
 
 impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
     fn default() -> Self {
-        Self { map: Default::default() }
+        Self {
+            map: Default::default(),
+        }
     }
 }
 
@@ -278,7 +291,13 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M> {
     }
 
     async fn handles(&self) -> Vec<Act<A>> {
-        self.map.read().await.values().filter(|h| !h.is_closed()).cloned().collect()
+        self.map
+            .read()
+            .await
+            .values()
+            .filter(|h| !h.is_closed())
+            .cloned()
+            .collect()
     }
 
     async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>

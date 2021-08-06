@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use async_trait::async_trait;
 use backstage::prelude::*;
 use backstage_macros::supervise;
@@ -169,7 +172,12 @@ impl Actor for Launcher {
                     }
                 },
                 LauncherEvents::StatusChange(s) => {
-                    info!("{} status changed ({} -> {})!", s.service.name(), s.prev_status, s.service.status());
+                    info!(
+                        "{} status changed ({} -> {})!",
+                        s.service.name(),
+                        s.prev_status,
+                        s.service.status()
+                    );
                     debug!("\n{}", rt.root_service_tree().await.unwrap());
                 }
             }

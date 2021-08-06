@@ -1,7 +1,11 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use crate::{
     actor::{
-        build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender,
+        build, Actor, ActorError, Builder, EventDriven, Sender, ServiceStatus, SupervisorEvent, UnboundedTokioChannel,
+        UnboundedTokioSender,
     },
     prelude::{Act, ActorScopedRuntime, DataWrapper, RegistryAccess},
 };
@@ -113,13 +117,16 @@ where
                                                 break;
                                             }
                                             msg => {
-                                                rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Received(peer, msg))
-                                                    .await?;
+                                                rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Received(
+                                                    peer, msg,
+                                                ))
+                                                .await?;
                                             }
                                         }
                                     }
                                     responder_handle.shutdown();
-                                    rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer)).await?;
+                                    rt.send_actor_event::<Websocket<Sup>>(WebsocketChildren::Close(peer))
+                                        .await?;
                                     rt.update_status(ServiceStatus::Stopped).await.ok();
                                     Ok(())
                                 }
@@ -214,7 +221,10 @@ impl Actor for Responder {
     {
         rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(msg) = rt.next_event().await {
-            self.sender.send(msg).await.map_err(|e| ActorError::from(anyhow::anyhow!(e)))?;
+            self.sender
+                .send(msg)
+                .await
+                .map_err(|e| ActorError::from(anyhow::anyhow!(e)))?;
         }
         Ok(())
     }

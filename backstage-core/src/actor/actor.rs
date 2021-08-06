@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{ActorError, Channel, Dependencies, SupervisorEvent};
 use crate::{
     actor::ShutdownStream,
@@ -87,7 +90,11 @@ where
             .unwrap();
         let res = AssertUnwindSafe(self.init(&mut actor_rt)).catch_unwind().await;
         RuntimeScope::handle_init_res::<_, ()>(res, &mut actor_rt).await?;
-        let res = Abortable::new(AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
+        let res = Abortable::new(
+            AssertUnwindSafe(self.run(&mut actor_rt, deps)).catch_unwind(),
+            abort_registration,
+        )
+        .await;
         RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, self).await
     }
 }

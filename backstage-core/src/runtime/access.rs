@@ -1,5 +1,10 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
-use crate::actor::{CustomStatus, EventDriven, Service, ShutdownStream, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender};
+use crate::actor::{
+    CustomStatus, EventDriven, Service, ShutdownStream, SupervisorEvent, UnboundedTokioChannel, UnboundedTokioSender,
+};
 use anymap::any::CloneAny;
 use std::any::TypeId;
 
@@ -197,11 +202,17 @@ where
                     name_fn,
                     shutdown_handle,
                     abort_handle,
-                } => ResponseType::NewScope(self.registry.new_scope(parent, name_fn, shutdown_handle, abort_handle).await),
+                } => ResponseType::NewScope(
+                    self.registry
+                        .new_scope(parent, name_fn, shutdown_handle, abort_handle)
+                        .await,
+                ),
                 RequestType::DropScope(scope_id) => ResponseType::DropScope(self.registry.drop_scope(&scope_id).await),
-                RequestType::AddData { scope_id, data_type, data } => {
-                    ResponseType::AddData(self.registry.add_data_raw(&scope_id, data_type, data).await)
-                }
+                RequestType::AddData {
+                    scope_id,
+                    data_type,
+                    data,
+                } => ResponseType::AddData(self.registry.add_data_raw(&scope_id, data_type, data).await),
                 RequestType::DependOn { scope_id, data_type } => {
                     ResponseType::DependOn(self.registry.depend_on_raw(&scope_id, data_type).await)
                 }
@@ -211,12 +222,16 @@ where
                 RequestType::GetData { scope_id, data_type } => {
                     ResponseType::GetData(self.registry.get_data_raw(&scope_id, data_type).await)
                 }
-                RequestType::GetService(scope_id) => ResponseType::GetService(self.registry.get_service(&scope_id).await),
+                RequestType::GetService(scope_id) => {
+                    ResponseType::GetService(self.registry.get_service(&scope_id).await)
+                }
                 RequestType::UpdateStatus { scope_id, status } => {
                     ResponseType::UpdateStatus(self.registry.update_status(&scope_id, status).await)
                 }
                 RequestType::Abort(scope_id) => ResponseType::Abort(self.registry.abort(&scope_id).await),
-                RequestType::ServiceTree(scope_id) => ResponseType::ServiceTree(self.registry.service_tree(&scope_id).await),
+                RequestType::ServiceTree(scope_id) => {
+                    ResponseType::ServiceTree(self.registry.service_tree(&scope_id).await)
+                }
             };
             e.responder.send(res).ok();
         }

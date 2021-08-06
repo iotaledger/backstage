@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use async_trait::async_trait;
 use backstage::{prefabs::websocket::*, prelude::*};
 use backstage_macros::supervise;
@@ -162,7 +165,9 @@ impl Actor for Howdy {
         Sup::Event: SupervisorEvent,
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
     {
-        let (counter, hello_world) = rt.link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>().await?;
+        let (counter, hello_world) = rt
+            .link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>()
+            .await?;
         rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {
@@ -170,7 +175,9 @@ impl Actor for Howdy {
                     info!("Howdy printing: {}", s);
                     counter.write().await.counter += 1;
                     info!("Printed {} times", counter.read().await.counter);
-                    hello_world.send(HelloWorldEvent::Print(s)).expect("Failed to pass along message!");
+                    hello_world
+                        .send(HelloWorldEvent::Print(s))
+                        .expect("Failed to pass along message!");
                 }
             }
         }
@@ -250,7 +257,8 @@ impl Actor for Launcher {
             rt.spawn_actor(howdy).await?;
         }
         rt.spawn_actor(hello_world_builder.build()).await?;
-        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 }))).await;
+        rt.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })))
+            .await;
         rt.spawn_actor(
             WebsocketBuilder::new()
                 .listen_address(([127, 0, 0, 1], 8000).into())
@@ -345,7 +353,9 @@ async fn startup() -> anyhow::Result<()> {
                                 .send(LauncherEvents::Howdy(HowdyEvent::Print("echo".to_owned())))
                                 .unwrap();
                         }
-                        let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap()).await.unwrap();
+                        let (mut stream, _) = connect_async(url::Url::parse("ws://127.0.0.1:8000/").unwrap())
+                            .await
+                            .unwrap();
                         stream.send(Message::text("Hello there")).await.unwrap();
                         if let Some(Ok(msg)) = stream.next().await {
                             info!("Response from websocket: {}", msg);

@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::actor::{Actor, Channel, Sender, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
 use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_recursion::async_recursion;
@@ -257,7 +260,13 @@ impl Registry {
             if let Some(parent_lock) = parent.and_then(|ref p| self.scopes.get(p)) {
                 let mut parent_scope = parent_lock.write().await;
                 parent_scope.children.insert(scope_id);
-                Scope::new(scope_id, Some(&*parent_scope), name_fn(scope_id), shutdown_handle, abort_handle)
+                Scope::new(
+                    scope_id,
+                    Some(&*parent_scope),
+                    name_fn(scope_id),
+                    shutdown_handle,
+                    abort_handle,
+                )
             } else {
                 Scope::new(scope_id, None, name_fn(scope_id), shutdown_handle, abort_handle)
             }
@@ -290,8 +299,13 @@ impl Registry {
         Ok(())
     }
 
-    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
-        self.depend_on_raw(scope_id, TypeId::of::<T>()).await.map(|s| s.with_type())
+    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(
+        &self,
+        scope_id: &ScopeId,
+    ) -> anyhow::Result<DepStatus<T>> {
+        self.depend_on_raw(scope_id, TypeId::of::<T>())
+            .await
+            .map(|s| s.with_type())
     }
 
     pub(crate) async fn depend_on_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
@@ -318,7 +332,11 @@ impl Registry {
     }
 
     /// Add some arbitrary data to a scope and its children recursively
-    pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()> {
+    pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(
+        &self,
+        scope_id: &ScopeId,
+        data: T,
+    ) -> anyhow::Result<()> {
         self.add_data_raw(scope_id, TypeId::of::<T>(), Box::new(data)).await
     }
 
@@ -343,7 +361,10 @@ impl Registry {
     }
 
     /// Remove some data from this scope and its children.
-    pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>> {
+    pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(
+        &self,
+        scope_id: &ScopeId,
+    ) -> anyhow::Result<Option<T>> {
         self.remove_data_raw(scope_id, TypeId::of::<T>())
             .await
             .map(|o| o.map(|data| *unsafe { data.downcast_unchecked::<T>() }))
@@ -361,7 +382,8 @@ impl Registry {
             .write()
             .await;
         if let Some(arc_data) = scope.created_data.remove(&data_type) {
-            self.propagate_data_raw(scope.deref_mut(), data_type, Propagation::Remove).await;
+            self.propagate_data_raw(scope.deref_mut(), data_type, Propagation::Remove)
+                .await;
             let data = Arc::try_unwrap(arc_data).ok();
             Ok(data)
         } else {
@@ -391,13 +413,18 @@ impl Registry {
                 for child in scope.children.iter() {
                     if let Some(child_lock) = self.scopes.get(child) {
                         let mut child_scope = child_lock.write().await;
-                        self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone()).await;
+                        self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone())
+                            .await;
                     }
                 }
             }
             Propagation::Remove => {
                 scope.visible_data.remove(&data_type);
-                if let Some(Dependency::Linked(_)) = scope.dependencies.remove(&data_type).map(|d| *unsafe { d.downcast_unchecked() }) {
+                if let Some(Dependency::Linked(_)) = scope
+                    .dependencies
+                    .remove(&data_type)
+                    .map(|d| *unsafe { d.downcast_unchecked() })
+                {
                     log::debug!(
                         "Aborting scope {} ({}) due to a removed critical dependency!",
                         scope.id,
@@ -408,7 +435,8 @@ impl Registry {
                     for child in scope.children.iter() {
                         if let Some(child_lock) = self.scopes.get(child) {
                             let mut child_scope = child_lock.write().await;
-                            self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone()).await;
+                            self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone())
+                                .await;
                         }
                     }
                 }
@@ -417,8 +445,13 @@ impl Registry {
     }
 
     /// Get a reference to some arbitrary data from the given scope
-    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>> {
-        self.get_data_raw(scope_id, TypeId::of::<T>()).await.map(|s| s.with_type::<T>())
+    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(
+        &self,
+        scope_id: &ScopeId,
+    ) -> anyhow::Result<DepStatus<T>> {
+        self.get_data_raw(scope_id, TypeId::of::<T>())
+            .await
+            .map(|s| s.with_type::<T>())
     }
 
     pub(crate) async fn get_data_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
@@ -427,22 +460,28 @@ impl Registry {
             .get(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
         let scope = lock.read().await;
-        Ok(match scope.visible_data.get(&data_type).map(|arc_data| arc_data.as_ref().clone()) {
-            Some(d) => RawDepStatus::Ready(d),
-            None => {
-                // Drop the current lock because we're going to aquire a write lock here
-                drop(scope);
-                let flag = match lock.write().await.dependencies.entry(data_type) {
-                    Entry::Occupied(o) => *unsafe { o.get().clone().downcast_unchecked() },
-                    Entry::Vacant(v) => {
-                        let flag = DepSignal::default();
-                        v.insert(Box::new(Dependency::Once(flag.clone())));
-                        flag
-                    }
-                };
-                RawDepStatus::Waiting(flag)
-            }
-        })
+        Ok(
+            match scope
+                .visible_data
+                .get(&data_type)
+                .map(|arc_data| arc_data.as_ref().clone())
+            {
+                Some(d) => RawDepStatus::Ready(d),
+                None => {
+                    // Drop the current lock because we're going to aquire a write lock here
+                    drop(scope);
+                    let flag = match lock.write().await.dependencies.entry(data_type) {
+                        Entry::Occupied(o) => *unsafe { o.get().clone().downcast_unchecked() },
+                        Entry::Vacant(v) => {
+                            let flag = DepSignal::default();
+                            v.insert(Box::new(Dependency::Once(flag.clone())));
+                            flag
+                        }
+                    };
+                    RawDepStatus::Waiting(flag)
+                }
+            },
+        )
     }
 
     pub(crate) async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service> {
@@ -454,7 +493,11 @@ impl Registry {
         Ok(scope.service.clone())
     }
 
-    pub(crate) async fn update_status<S: Into<Cow<'static, str>>>(&self, scope_id: &ScopeId, status: S) -> anyhow::Result<()> {
+    pub(crate) async fn update_status<S: Into<Cow<'static, str>>>(
+        &self,
+        scope_id: &ScopeId,
+        status: S,
+    ) -> anyhow::Result<()> {
         let scope = self
             .scopes
             .get(scope_id)
