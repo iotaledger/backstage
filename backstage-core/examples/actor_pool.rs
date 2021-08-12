@@ -120,11 +120,27 @@ impl Actor for Launcher {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         let my_handle = rt.handle();
-        for i in 0..10 {
-            rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i as i32, builder.clone().num(i).build())
-                .await?;
+        // Start by initializing all the actors in the pool
+        let mut initialized = Vec::new();
+        for i in 0..5 {
+            initialized.push(
+                rt.init_into_pool_keyed::<MapPool<HelloWorld, i32>>(i as i32, builder.clone().num(i).build())
+                    .await?,
+            );
         }
-
+        // Next, spawn them all at once
+        for init in initialized {
+            init.spawn(rt).await;
+        }
+        // An alternate way to do the same thing
+        // Spawn the pool
+        let mut pool = rt.spawn_pool::<MapPool<HelloWorld, i32>>().await;
+        // Init all the actors into it
+        for i in 5..10 {
+            pool.init_keyed(i as i32, builder.clone().num(i).build()).await?;
+        }
+        // Finalize the pool
+        pool.spawn_all().await;
         tokio::task::spawn(ctrl_c(my_handle.into_inner()));
         Ok(())
     }

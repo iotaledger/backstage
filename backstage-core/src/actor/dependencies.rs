@@ -3,7 +3,7 @@
 
 use super::{Actor, ActorPool, System};
 use crate::{
-    prelude::{Pool, RegistryAccess},
+    prelude::{Pool, RegistryAccess, SpawnType},
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
@@ -37,6 +37,21 @@ pub trait Dependencies {
     {
         scope.depend_on().await.get().await
     }
+
+    /// Cleanup dependencies based on the original spawn type
+    async fn cleanup<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>, spawn_type: SpawnType)
+    where
+        Self: 'static + Clone + Send + Sync,
+    {
+        match spawn_type {
+            SpawnType::Actor | SpawnType::System => {
+                scope.remove_data_from_parent::<Self>().await;
+            }
+            SpawnType::Pool => {
+                scope.remove_data::<Self>().await;
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -62,6 +77,11 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
             actor: Act::link(scope).await?,
             state: Res::link(scope).await?,
         })
+    }
+
+    async fn cleanup<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>, spawn_type: SpawnType) {
+        Res::<S::State>::cleanup(scope, spawn_type).await;
+        Act::<S>::cleanup(scope, spawn_type).await;
     }
 }
 
@@ -106,6 +126,10 @@ impl<D: 'static + Dependencies + Clone + Send + Sync> Dependencies for Option<D>
     async fn link<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         Ok(scope.get_data::<D>().await.get_opt())
     }
+
+    async fn cleanup<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>, spawn_type: SpawnType) {
+        D::cleanup(scope, spawn_type).await;
+    }
 }
 
 #[async_trait]
@@ -123,6 +147,8 @@ impl Dependencies for () {
     async fn link<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>) -> anyhow::Result<Self> {
         Ok(())
     }
+
+    async fn cleanup<R: 'static + RegistryAccess + Send + Sync>(_scope: &mut RuntimeScope<R>, _spawn_type: SpawnType) {}
 }
 
 macro_rules! impl_dependencies {
@@ -143,6 +169,11 @@ macro_rules! impl_dependencies {
 
             async fn link<Reg: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<Reg>) -> anyhow::Result<Self> {
                 Ok(($($gen::link(scope).await?),+,))
+            }
+
+            async fn cleanup<R: 'static + RegistryAccess + Send + Sync>(scope: &mut RuntimeScope<R>, spawn_type: SpawnType)
+            {
+                $($gen::cleanup(scope, spawn_type).await;)+
             }
         }
     };
