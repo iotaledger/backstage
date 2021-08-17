@@ -1,20 +1,14 @@
 pub use actor::*;
 pub use backstage_macros::{build, supervise};
-pub use builder::*;
 pub use channel::*;
-pub use dependencies::*;
-pub use events::*;
+pub use futures::stream::StreamExt;
+pub use registry::*;
 pub use result::*;
+pub use rt::*;
 pub use service::*;
-pub use shutdown_stream::*;
-pub use system::*;
-
 mod actor;
-mod builder;
 mod channel;
-mod dependencies;
-mod events;
+mod registry;
 mod result;
+mod rt;
 mod service;
-mod shutdown_stream;
-mod system;

@@ -1,104 +1,85 @@
-use super::{ActorError, Channel, Dependencies, SupervisorEvent};
-use crate::{
-    actor::ShutdownStream,
-    prelude::Act,
-    runtime::{ActorScopedRuntime, RegistryAccess, RuntimeScope},
-};
+use super::{rt::Rt, ActorResult, Channel, Supervise};
 use async_trait::async_trait;
-use futures::{
-    future::{AbortHandle, Abortable},
-    FutureExt,
-};
-use std::{borrow::Cow, marker::PhantomData, panic::AssertUnwindSafe};
+use std::borrow::Cow;
+
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor
-where
-    Self: Sized + Send + Sync,
-{
+pub trait Actor: Sized + Send + Sync + 'static {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Dependencies: Dependencies + Clone + Send + Sync;
-    /// The type of event this actor will receive
-    type Event: 'static + Send + Sync;
+    type Deps: Clone + Send + Sync + 'static = ();
+    type Context<S: super::Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
     /// The type of channel this actor will use to receive events
-    type Channel: Channel<Self, Self::Event> + Send;
-
-    /// Used to initialize the actor. Any children spawned here will be initialized
-    /// before this actor's run method is called so they are guaranteed to be
-    /// ready to use depending on their requirements. Dependencies are not
-    /// handled until after this method is called, so they are not guaranteed
-    /// to exist yet. If a dependency must exist to complete initialization,
-    /// it can be linked with the runtime, but BEWARE that any dependencies which are
-    /// spawned by the parents of this actor will not be available if they are
-    /// spawned after this actor and linking them will therefore deadlock the thread.
-    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
-        &mut self,
-        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-    ) -> Result<(), ActorError>
+    type Channel: Channel;
+    /// Used to initialize the actor.
+    async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, super::Reason>
     where
-        Self: Sized,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
-
+        S: super::Supervise<Self>;
     /// The main function for the actor
-    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
-        &mut self,
-        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-        deps: Self::Dependencies,
-    ) -> Result<(), ActorError>
+    async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Deps) -> ActorResult
     where
-        Self: Sized,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>;
-
+        S: super::Supervise<Self>;
     /// Get this actor's name
-    fn name(&self) -> Cow<'static, str> {
+    fn type_name() -> Cow<'static, str> {
         std::any::type_name::<Self>().into()
     }
+}
 
-    /// Start with this actor as the root scope
-    async fn start_as_root<Reg: 'static + RegistryAccess + Send + Sync>(mut self) -> anyhow::Result<()>
+/// Shutdown contract , should be implemented on the handle
+#[async_trait::async_trait]
+pub trait Shutdown: Send + 'static + Sync {
+    async fn shutdown(&self);
+    fn scope_id(&self) -> super::ScopeId;
+}
+
+pub trait ShutdownEvent: Send {
+    fn shutdown_event() -> Self;
+}
+
+// Null supervisor
+pub struct NullSupervisor;
+#[async_trait::async_trait]
+impl<T: Send> super::Supervise<T> for NullSupervisor {
+    // End of life for Actor of type T, invoked on shutdown.
+    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, r: super::ActorResult) -> Option<()>
     where
-        Self: 'static + Sized,
+        T: super::Actor,
     {
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let (sender, receiver) = <Self::Channel as Channel<Self, Self::Event>>::new(&self).await?;
-        let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
-        let mut scope = Reg::instantiate(self.name(), Some(shutdown_handle.clone()), Some(abort_handle)).await;
-        scope.add_data(Act::<Self>(sender.clone())).await;
-        let mut actor_rt = ActorScopedRuntime::<_, _, ()> {
-            scope,
-            handle: sender,
-            receiver,
-            shutdown_handle,
-            supervisor_handle: None,
-        };
-        let deps = Self::Dependencies::instantiate(&mut actor_rt.scope)
-            .await
-            .map_err(|e| anyhow::anyhow!("Cannot spawn actor {}: {}", std::any::type_name::<Self>(), e))
-            .unwrap();
-        let res = AssertUnwindSafe(self.init(&mut actor_rt)).catch_unwind().await;
-        let mut actor = RuntimeScope::handle_init_res::<_, ()>(res, &mut actor_rt, self).await?;
-        let res = Abortable::new(AssertUnwindSafe(actor.run(&mut actor_rt, deps)).catch_unwind(), abort_registration).await;
-        RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, actor).await
+        Some(())
     }
 }
 
-/// Anything that is event driven
-pub trait EventDriven
-where
-    Self: Sized,
-{
-    /// The type of event this implementor will receive
-    type Event: 'static + Send + Sync;
-    /// The type of channel this implementor will use to receive events
-    type Channel: Channel<Self, Self::Event> + Send;
+#[async_trait::async_trait]
+impl<T: Send> super::Report<T, super::Service> for NullSupervisor {
+    /// Report any status & service changes
+    async fn report(&self, scope_id: super::ScopeId, _service: super::Service) -> Option<()> {
+        Some(())
+    }
 }
 
-impl<T> EventDriven for T
-where
-    T: Actor,
-{
-    type Event = T::Event;
-    type Channel = T::Channel;
+// test
+#[cfg(test)]
+mod tests {
+    use crate::core::{Actor, ActorResult, IntervalChannel, Reason};
+    use futures::stream::StreamExt;
+
+    struct PrintHelloEveryFewMs;
+    #[async_trait::async_trait]
+    impl Actor for PrintHelloEveryFewMs {
+        type Channel = IntervalChannel<100>;
+        async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason>
+        where
+            S: super::Supervise<Self>,
+        {
+            Ok(())
+        }
+        async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Deps) -> ActorResult
+        where
+            S: super::Supervise<Self>,
+        {
+            while let Some(_) = rt.inbox_mut().next().await {
+                println!("HelloWorld")
+            }
+            Ok(())
+        }
+    }
 }
