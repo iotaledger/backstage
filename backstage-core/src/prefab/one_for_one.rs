@@ -45,13 +45,7 @@ where
 {
     async fn handle_eol(self: Box<Self>, state: &mut OneForOne<S>, rt: &mut Rt<OneForOne<S>, S>);
 }
-#[async_trait::async_trait]
-trait DynOneForOneEvent<S>: Send + Sync
-where
-    S: Supervise<OneForOne<S>> + Send + Sync,
-{
-    async fn process(self: Box<Self>, rt: &mut Rt<OneForOne<S>, S>);
-}
+
 #[derive(Clone)]
 pub struct AddChild<S, T: Actor + Clone>
 where
@@ -112,7 +106,7 @@ where
         let service = self.1;
         let name = service.name.clone();
         let r = self.2;
-        rt.handle_microservice(scope_id, service, Some(r.clone())).await;
+        // rt.handle_microservice(scope_id, service, Some(r.clone())).await;
         // handle strategy
         if let Err(reason) = r {
             match reason {
@@ -150,16 +144,16 @@ impl<Sup: 'static + Supervise<Self>> Actor for OneForOne<Sup> {
                 OneForOneEvent::Shutdown => {
                     // stop service
                     rt.stop().await;
-                    if rt.microservices_stopped().await {
+                    if rt.microservices_stopped() {
                         break;
                     }
                 }
                 OneForOneEvent::Report(scope_id, service) => {
-                    rt.handle_microservice(scope_id, service, None).await;
+                    // rt.handle_microservice(scope_id, service, None).await;
                 }
                 OneForOneEvent::Eol(eol) => {
                     eol.handle_eol(self, rt).await;
-                    if rt.microservices_stopped().await {
+                    if rt.microservices_stopped() {
                         break;
                     }
                 }

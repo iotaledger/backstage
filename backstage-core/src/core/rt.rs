@@ -1,22 +1,23 @@
 use super::{
-    AbortRegistration, Abortable, Actor, ActorResult, Channel, Cleanup, CleanupData, Data, Reason, Resource, Route, Scope, ScopeId,
-    Service, ServiceStatus, ServiceTree, Shutdown, Subscriber, Supervise, SCOPES,
+    AbortRegistration, Abortable, Actor, ActorResult, Channel, Cleanup, CleanupData, Data, Reason, Resource, Route, Scope, ScopeId, Scoped,
+    Service, ServiceStatus, Shutdown, Subscriber, Supervise, BACKSTAGE_PARTITIONS, SCOPES,
 };
+
 use prometheus::core::Collector;
 use std::collections::HashMap;
 pub struct Rt<A: Actor, S: super::Supervise<A>>
 where
     Self: Send,
 {
-    pub(crate) name: String,
+    pub(crate) service: Service,
     pub(crate) scopes_index: usize,
-    pub(crate) scope_id: usize,
-    pub(crate) parent_scope_id: usize,
+    pub(crate) scope_id: ScopeId,
+    pub(crate) parent_scope_id: Option<ScopeId>,
     pub(crate) supervisor: S,
     pub(crate) handle: <A::Channel as Channel>::Handle,
     pub(crate) inbox: <A::Channel as Channel>::Inbox,
-    pub(crate) children_handles: std::collections::HashMap<usize, Box<dyn Shutdown>>,
-    pub(crate) children_joins: std::collections::HashMap<usize, tokio::task::JoinHandle<()>>,
+    pub(crate) children_handles: std::collections::HashMap<ScopeId, Box<dyn Shutdown>>,
+    pub(crate) children_joins: std::collections::HashMap<ScopeId, tokio::task::JoinHandle<()>>,
     pub(crate) abort_registration: AbortRegistration,
     pub(crate) registered_metrics: Vec<Box<dyn prometheus::core::Collector>>,
 }
@@ -30,6 +31,9 @@ impl InitializedRx {
 }
 
 impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
+    pub fn abort_registration(&self) -> AbortRegistration {
+        self.abort_registration.clone()
+    }
     pub async fn spawn<N: Into<String>, Child>(
         &mut self,
         name: N,
@@ -57,7 +61,7 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
             // generate unique scope_id
             child_scope_id = rand::random::<ScopeId>();
             // check which scopes partition owns the scope_id
-            scopes_index = child_scope_id % num_cpus::get();
+            scopes_index = child_scope_id % *BACKSTAGE_PARTITIONS;
             // access the scope
             let mut lock = SCOPES[scopes_index].write().await;
             if lock.contains_key(&child_scope_id) {
@@ -65,23 +69,35 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
                 continue;
             }
             // finialize the channel
-            let r = channel.channel::<Child>(child_scope_id);
+            let mut r = channel.channel::<Child>(child_scope_id);
             handle = r.0;
             inbox = r.1;
             abort_registration = r.2;
             metric = r.3;
             service.update_status(ServiceStatus::Initializing);
-            let scope = Scope::new(parent_id, service.clone(), Box::new(handle.clone()));
+            let mut scope = Scope::new(Some(parent_id), Box::new(handle.clone()));
+            // add route (if any)
+            if let Some(route) = r.4.take() {
+                scope.router.insert(route);
+            }
+            let data = Data::with_resource(service.clone());
+            scope.data_and_subscribers.insert(data);
             lock.insert(child_scope_id, scope);
             drop(lock);
             break;
         }
-        // update microservices with the new child
+        self.service.microservices.insert(child_scope_id, service.clone());
         let mut lock = SCOPES[self.scopes_index].write().await;
-        let my_scope = lock.get_mut(&self.scope_id).expect("Expected self scope to exist");
-        my_scope.microservices.insert(child_scope_id, service);
-        if !my_scope.scope_id_by_ms_name.contains_key(&name) {
-            my_scope.scope_id_by_ms_name.insert(name.clone(), child_scope_id);
+        let my_scope = lock.get_mut(&self.scope_id).expect("Self scope to exist");
+        // check if the microservice scope_id is wanted
+        if let Some(scoped) = my_scope.active_scopes.get_mut(&name) {
+            scoped.scope_id.replace(child_scope_id);
+            for pending in scoped.pendings.drain(..) {
+                pending.send(child_scope_id).ok();
+            }
+        } else {
+            let scoped = Scoped::with_scope_id(child_scope_id);
+            my_scope.active_scopes.insert(name, scoped);
         }
         drop(lock);
         // add the child handle to
@@ -89,10 +105,10 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
         let sup = self.handle.clone();
         // create child context
         let mut child_context = Rt::<Child, <A::Channel as Channel>::Handle>::new(
-            name,
+            service,
             scopes_index,
             child_scope_id,
-            parent_id,
+            Some(parent_id),
             sup,
             handle.clone(),
             inbox,
@@ -117,14 +133,9 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
                     f.await;
                 }
                 Ok(deps) => {
-                    // update the status change in the scope and inform supervisor afterward
-                    let mut lock = SCOPES[scopes_index].write().await;
-                    let child_scope = lock.get_mut(&child_scope_id).expect("Child scope to exist");
-                    // the child might set its service to be degraded, therefore we don't overwrite
-                    if child_scope.service.is_initializing() {
-                        child_scope.service.update_status(ServiceStatus::Running);
+                    if rt.service().is_initializing() {
+                        rt.update_status(ServiceStatus::Running).await
                     }
-                    drop(lock);
                     // inform oneshot receiver
                     check_init.send(Ok(())).ok();
                     let f = child.run(&mut rt, deps);
@@ -138,6 +149,23 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
         self.children_joins.insert(child_scope_id, join_handle);
         Ok((handle, InitializedRx(rx_oneshot)))
     }
+    pub fn upsert_microservice(&mut self, scope_id: ScopeId, service: Service) {
+        self.service.microservices.insert(scope_id, service);
+    }
+    pub fn remove_microservice(&mut self, scope_id: ScopeId) {
+        self.service.microservices.remove(&scope_id);
+        self.children_joins.remove(&scope_id);
+        self.children_joins.remove(&scope_id);
+    }
+    // Update context service status
+    pub async fn update_status(&mut self, service_status: ServiceStatus) {
+        self.service.update_status(service_status);
+        let service = self.service.clone();
+        // report to supervisor
+        self.supervisor.report(self.scope_id, service.clone()).await;
+        // publish the service to subscribers
+        self.publish(service).await;
+    }
     pub fn inbox_mut(&mut self) -> &mut <A::Channel as Channel>::Inbox {
         &mut self.inbox
     }
@@ -150,47 +178,37 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
     pub fn supervisor_handle_mut(&mut self) -> &mut S {
         &mut self.supervisor
     }
-    pub async fn microservices_stopped(&self) -> bool {
-        let lock = SCOPES[self.scopes_index].read().await;
-        let my_scope = lock.get(&self.scope_id).expect("expected self scope to exist");
-        let r = my_scope.microservices.iter().all(|(_, s)| s.is_stopped());
-        drop(lock);
-        r
+    pub fn supervisor_handle(&self) -> &S {
+        &self.supervisor
+    }
+    /// Get the service
+    pub fn service(&self) -> &Service {
+        &self.service
+    }
+    pub async fn shutdown_scope(&self, scope_id: ScopeId) -> anyhow::Result<()> {
+        let scopes_index = scope_id % *BACKSTAGE_PARTITIONS;
+        let lock = SCOPES[scopes_index].read().await;
+        if let Some(scope) = lock.get(&self.scope_id) {
+            // we clone the handle to prevent very rare deadlock (which might only happen if channel is bounded)
+            let shutdown_handle = scope.shutdown_handle.clone();
+            drop(lock);
+            shutdown_handle.shutdown().await;
+        } else {
+            anyhow::bail!("scope doesn't exist");
+        };
+        Ok(())
+    }
+    pub fn microservices_stopped(&self) -> bool {
+        self.service.microservices.iter().all(|(_, s)| s.is_stopped())
     }
     pub async fn stop(&mut self) {
-        let mut lock = SCOPES[self.scopes_index].write().await;
-        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
-        my_scope.service.update_status(ServiceStatus::Stopping);
-        drop(lock);
         self.shutdown_children().await;
+        self.update_status(ServiceStatus::Stopping).await;
     }
     pub async fn shutdown_children(&mut self) {
         for (_, c) in self.children_handles.drain() {
             c.shutdown().await;
         }
-    }
-    pub async fn handle_microservice(&self, scope_id: ScopeId, service: Service, r: Option<ActorResult>) {
-        let mut lock = SCOPES[self.scopes_index].write().await;
-        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
-        if let Some(Ok(_)) = r {
-            my_scope.microservices.remove(&scope_id);
-            my_scope.scope_id_by_ms_name.remove(service.name().as_ref());
-        } else {
-            my_scope.microservices.insert(scope_id, service);
-        }
-        // recompute the status change only if self service not stopping
-        if !my_scope.service.is_stopping() {
-            if my_scope.microservices.iter().all(|(_, s)| s.is_running()) {
-                my_scope.service.update_status(ServiceStatus::Running);
-            } else {
-                if !my_scope.service.is_maintenance() {
-                    my_scope.service.update_status(ServiceStatus::Degraded);
-                }
-            };
-        }
-        let updated_service = my_scope.service.clone();
-        drop(lock);
-        self.supervisor.report(self.scope_id, updated_service).await;
     }
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
     async fn breakdown(mut self, actor: A, r: super::ActorResult)
@@ -198,21 +216,32 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
         Self: Send,
     {
         // shutdown children handles (if any)
-        for (_, c) in self.children_handles.drain() {
-            c.shutdown().await;
-        }
+        self.shutdown_children().await;
         // await on children_joins just to force the contract
         for (_, c) in self.children_joins.drain() {
             let _ = c.await;
         }
         // unregister registered_metrics
         self.unregister_metrics().expect("To unregister metrics");
-        // update service to be stopped
+        // update service to be Stopped
+        self.service.update_status(ServiceStatus::Stopped);
+        // clone service
+        let service = self.service.clone();
+        // delete the active scope from the supervisor (if any)
+        if let Some(parent_id) = self.parent_scope_id.take() {
+            let parent_scopes_index = parent_id % *BACKSTAGE_PARTITIONS;
+            let mut lock = SCOPES[parent_scopes_index].write().await;
+            if let Some(parent_scope) = lock.get_mut(&parent_id) {
+                parent_scope.active_scopes.remove(self.name().as_ref());
+            }
+            drop(lock);
+        }
+        // publish the service before cleaning up any data
+        self.publish(service.clone()).await;
+        // drop scope
         let mut lock = SCOPES[self.scopes_index].write().await;
-        let mut my_scope = lock.remove(&self.scope_id).expect("expected self scope to exist");
+        let mut my_scope = lock.remove(&self.scope_id).expect("Self scope to exist on drop");
         drop(lock);
-        let mut my_service = my_scope.service;
-        my_service.update_status(crate::core::ServiceStatus::Stopped);
         for (_type_id, cleanup_self) in my_scope.cleanup_data.drain() {
             cleanup_self.cleanup_self(&mut my_scope.data_and_subscribers).await;
         }
@@ -220,7 +249,7 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
             cleanup_from_other.cleanup_from_other(scope_id).await;
         }
         // aknshutdown to supervisor
-        self.supervisor.eol(self.scope_id, my_service, actor, r).await;
+        self.supervisor.eol(self.scope_id, service, actor, r).await;
     }
     pub async fn add_route<T: Send + 'static>(&self) -> anyhow::Result<()>
     where
@@ -239,7 +268,7 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
         Ok(())
     }
     pub async fn send<T: Send + 'static>(&self, scope_id: ScopeId, message: T) -> anyhow::Result<()> {
-        let scopes_index = scope_id % num_cpus::get();
+        let scopes_index = scope_id % *BACKSTAGE_PARTITIONS;
         let lock = SCOPES[scopes_index].read().await;
         if let Some(scope) = lock.get(&scope_id) {
             if let Some(route) = scope.router.get::<Box<dyn Route<T>>>() {
@@ -263,17 +292,17 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
 impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
     /// Create backstage context
     pub fn new(
-        name: String,
+        service: Service,
         scopes_index: usize,
-        scope_id: usize,
-        parent_scope_id: usize,
+        scope_id: ScopeId,
+        parent_scope_id: Option<ScopeId>,
         supervisor: S,
         handle: <A::Channel as Channel>::Handle,
         inbox: <A::Channel as Channel>::Inbox,
         abort_registration: AbortRegistration,
     ) -> Self {
         Self {
-            name,
+            service,
             scopes_index,
             scope_id,
             parent_scope_id,
@@ -302,7 +331,7 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
         Ok(())
     }
     pub fn name(&self) -> std::borrow::Cow<'static, str> {
-        self.name.clone().into()
+        self.service.name()
     }
 }
 
@@ -350,7 +379,7 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
             }
             // publish the resource to other scopes
             for sub_id in should_get_resource.pop() {
-                let sub_scopes_index = sub_id % num_cpus::get();
+                let sub_scopes_index = sub_id % *BACKSTAGE_PARTITIONS;
                 let lock = SCOPES[sub_scopes_index].read().await;
                 if let Some(sub_scope) = lock.get(&sub_id) {
                     if let Some(route) = sub_scope.router.get::<Box<dyn Route<T>>>() {
@@ -389,9 +418,22 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
             drop(lock);
         };
     }
+    pub async fn lookup<T: Resource>(&self, resource_scope_id: ScopeId) -> Option<T> {
+        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
+        let mut lock = SCOPES[resource_scopes_index].write().await;
+        if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
+            if let Some(data) = resource_scope.data_and_subscribers.get::<Data<T>>() {
+                data.resource.clone()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
     pub async fn depends_on<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
         let my_scope_id = self.scope_id;
-        let resource_scopes_index = resource_scope_id % num_cpus::get();
+        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
         if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
             // get the resource if it's available
@@ -433,7 +475,7 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
     }
     pub async fn link<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
         let my_scope_id = self.scope_id;
-        let resource_scopes_index = resource_scope_id % num_cpus::get();
+        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
         if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
             // get the resource if it's available
@@ -499,7 +541,7 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
         let route: Box<dyn Route<T>> = Box::new(self.handle.clone());
         my_scope.router.insert(route);
         drop(lock);
-        let resource_scopes_index = resource_scope_id % num_cpus::get();
+        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
         if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
             // get the resource if it's available
@@ -541,6 +583,8 @@ pub struct Runtime<A: Actor> {
     join_handle: tokio::task::JoinHandle<()>,
     handle: <A::Channel as Channel>::Handle,
     initialized_rx: Option<InitializedRx>,
+    websocket_server: Option<Box<dyn Shutdown>>,
+    websocket_join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<A: Actor> Runtime<A> {
@@ -551,6 +595,7 @@ impl<A: Actor> Runtime<A> {
     {
         Self::with_supervisor(name, child, super::NullSupervisor).await
     }
+
     /// Create new runtime
     pub async fn with_supervisor<T, S>(name: T, mut child: A, supervisor: S) -> Result<Self, Reason>
     where
@@ -559,9 +604,8 @@ impl<A: Actor> Runtime<A> {
         S: super::Supervise<A>,
     {
         // try to create the actor's channel
-        let (handle, inbox, abort_registration, mut metric) = child.build_channel().await?.channel::<A>(0);
+        let (handle, inbox, abort_registration, mut metric, mut route) = child.build_channel().await?.channel::<A>(0);
         // this is the root runtime, so we are going to use 0 as the parent_id
-        let parent_id = 0;
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = 0;
         let child_scope_id = 0;
@@ -570,15 +614,20 @@ impl<A: Actor> Runtime<A> {
         let mut service = Service::new(name.clone());
         let mut lock = SCOPES[0].write().await;
         service.update_status(ServiceStatus::Initializing);
-        let scope = Scope::new(parent_id, service.clone(), shutdown_handle.clone());
+        let mut scope = Scope::new(None, shutdown_handle.clone());
+        if let Some(route) = route.take() {
+            scope.router.insert(route);
+        }
+        let data = Data::with_resource(service.clone());
+        scope.data_and_subscribers.insert(data);
         lock.insert(child_scope_id, scope);
         drop(lock);
         // create child context
         let mut child_context = Rt::<A, S>::new(
-            name,
+            service,
             scopes_index,
             child_scope_id,
-            parent_id,
+            None,
             supervisor,
             handle.clone(),
             inbox,
@@ -603,14 +652,9 @@ impl<A: Actor> Runtime<A> {
                     f.await;
                 }
                 Ok(deps) => {
-                    // update the status change in the scope and inform supervisor afterward
-                    let mut lock = SCOPES[scopes_index].write().await;
-                    let child_scope = lock.get_mut(&child_scope_id).expect("Child scope to exist");
-                    // the child might set its service to be degraded, therefore we don't overwrite
-                    if !child_scope.service.is_degraded() {
-                        child_scope.service.update_status(ServiceStatus::Running);
+                    if rt.service().is_initializing() {
+                        rt.update_status(ServiceStatus::Running).await
                     }
-                    drop(lock);
                     // inform oneshot receiver
                     check_init.send(Ok(())).ok();
                     let f = child.run(&mut rt, deps);
@@ -626,6 +670,8 @@ impl<A: Actor> Runtime<A> {
             handle,
             join_handle,
             initialized_rx: Some(InitializedRx(rx_oneshot)),
+            websocket_server: None,
+            websocket_join_handle: None,
         })
     }
     pub fn handle(&self) -> &<A::Channel as Channel>::Handle {
@@ -634,22 +680,92 @@ impl<A: Actor> Runtime<A> {
     pub fn handle_mut(&mut self) -> &<A::Channel as Channel>::Handle {
         &mut self.handle
     }
+    pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason> {
+        use crate::{
+            core::{channel::ChannelBuilder, NullSupervisor},
+            prefab::websocket::Websocket,
+        };
+        let websocket_scope_id = 1;
+        let mut websocket = Websocket::new(addr.clone()).link_to(Box::new(self.handle.clone()));
+        if let Some(ttl) = ttl.take() {
+            websocket = websocket.set_ttl(ttl);
+        }
+        let (handle, inbox, abort_registration, mut metric, mut route) =
+            websocket.build_channel().await?.channel::<Websocket>(websocket_scope_id);
+        let shutdown_handle = Box::new(handle.clone());
+        let scopes_index = websocket_scope_id % *BACKSTAGE_PARTITIONS;
+        // create the service
+        let name: String = addr.to_string().into();
+        let mut service = Service::new(name.clone());
+        let mut lock = SCOPES[scopes_index].write().await;
+        service.update_status(ServiceStatus::Initializing);
+        let mut scope = Scope::new(None, shutdown_handle.clone());
+        if let Some(route) = route.take() {
+            scope.router.insert(route);
+        }
+        lock.insert(websocket_scope_id, scope);
+        drop(lock);
+        // create child context
+        let mut child_context = Rt::<Websocket, NullSupervisor>::new(
+            service,
+            scopes_index,
+            1,
+            None,
+            NullSupervisor,
+            handle.clone(),
+            inbox,
+            abort_registration,
+        );
+        if let Some(metric) = metric.take() {
+            child_context.register(metric).expect("Metric to be registered");
+        }
+        let wrapped_fut = async move {
+            let mut child = websocket;
+            let mut rt = child_context;
+            let f = child.init(&mut rt);
+            match f.await {
+                Err(reason) => {
+                    // breakdown the child
+                    let f = rt.breakdown(child, Err(reason));
+                    f.await;
+                }
+                Ok(deps) => {
+                    if rt.service().is_initializing() {
+                        rt.update_status(ServiceStatus::Running).await
+                    }
+                    let f = child.run(&mut rt, deps);
+                    let r = f.await;
+                    let f = rt.breakdown(child, r);
+                    f.await
+                }
+            }
+        };
+        let join_handle = tokio::spawn(wrapped_fut);
+        self.websocket_join_handle.replace(join_handle);
+        self.websocket_server.replace(Box::new(handle.clone()));
+        Ok(self)
+    }
+
     pub fn take_initialized_rx(&mut self) -> Option<InitializedRx> {
         self.initialized_rx.take()
     }
-    pub async fn block_on(self) -> Result<(), tokio::task::JoinError> {
-        self.join_handle.await
+    pub async fn block_on(mut self) -> Result<(), tokio::task::JoinError> {
+        let r = self.join_handle.await;
+        if let Some(ws_server_handle) = self.websocket_server.take() {
+            ws_server_handle.shutdown().await;
+            self.websocket_join_handle.expect("websocket join handle").await;
+        }
+        r
     }
 }
 
 /// Useful function to exit program using ctrl_c signal
 async fn ctrl_c<H: Shutdown>(handle: H) {
-    let boxed = Box::new(handle);
     // await on ctrl_c
     if let Err(e) = tokio::signal::ctrl_c().await {
         log::error!("Tokio ctrl_c signal error: {}", e)
     };
-    boxed.shutdown().await;
+    handle.shutdown().await;
 }
 
 #[cfg(test)]

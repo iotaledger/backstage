@@ -4,15 +4,24 @@ use async_trait::async_trait;
 use core::pin::Pin;
 use futures::{
     future::Aborted,
+    stream::{SplitSink, SplitStream, StreamExt},
     task::{AtomicWaker, Context, Poll},
 };
 use pin_project_lite::pin_project;
 use prometheus::core::Collector;
 use std::sync::atomic::{AtomicBool, Ordering};
 pub use tokio::net::TcpListener;
-use tokio::sync::mpsc::{error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::{
+    net::TcpStream,
+    sync::mpsc::{error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+};
 use tokio_stream::wrappers::IntervalStream;
 pub use tokio_stream::wrappers::TcpListenerStream;
+pub use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+pub type WsTx = SplitSink<WebSocketStream<TcpStream>, Message>;
+pub type WsRx = SplitStream<WebSocketStream<TcpStream>>;
+
 // Inner type storing the waker to awaken and a bool indicating that it
 // should be cancelled.
 #[derive(Debug)]
@@ -78,12 +87,10 @@ impl<T> Abortable<T> {
         if self.is_aborted() {
             return Poll::Ready(Err(Aborted));
         }
-
         // attempt to complete the task
         if let Poll::Ready(x) = poll(self.as_mut().project().task, cx) {
             return Poll::Ready(Ok(x));
         }
-
         // Register to receive a wakeup if the task is aborted in the future
         self.inner.waker.register(cx.waker());
 
@@ -94,7 +101,6 @@ impl<T> Abortable<T> {
         if self.is_aborted() {
             return Poll::Ready(Err(Aborted));
         }
-
         Poll::Pending
     }
 }
@@ -134,7 +140,16 @@ pub trait Channel: Send + Sized {
     /// Metric Collector
     type Metric: Collector + Clone = prometheus::IntGauge;
     /// Create a sender and receiver of the appropriate types
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<Self::Metric>);
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<Self::Metric>,
+        Option<Box<dyn Route<Self::Event>>>,
+    );
     /// Get this channel's name
     fn type_name() -> std::borrow::Cow<'static, str> {
         std::any::type_name::<Self>().into()
@@ -147,10 +162,9 @@ pub trait ChannelBuilder<C: Channel> {
     where
         Self: Actor<Channel = C>;
 }
-use dyn_clone::DynClone;
 
 #[async_trait::async_trait]
-pub trait Route<M>: Send + Sync + DynClone {
+pub trait Route<M>: Send + Sync + dyn_clone::DynClone {
     async fn try_send_msg(&self, message: M) -> anyhow::Result<Option<M>>;
     /// if the Route<M> is behind lock, drop the lock before invoking this method.
     async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()>;
@@ -284,7 +298,16 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
     type Event = E;
     type Handle = UnboundedHandle<E>;
     type Inbox = UnboundedInbox<E>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<Self::Metric>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<Self::Metric>,
+        Option<Box<dyn Route<Self::Event>>>,
+    ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
         let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
@@ -294,7 +317,8 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
         let abort_registration = self.abort_registration;
         let unbounded_handle = UnboundedHandle::new(sender, gauge.clone(), abort_handle, scope_id);
         let unbounded_inbox = UnboundedInbox::new(recv, gauge.clone());
-        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge))
+        let route = Box::new(unbounded_handle.clone());
+        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge), Some(route))
     }
 }
 
@@ -376,6 +400,16 @@ impl<T> AbortableUnboundedInbox<T> {
     }
 }
 
+impl<T> tokio_stream::Stream for AbortableUnboundedInbox<T>
+where
+    Abortable<UnboundedInbox<T>>: tokio_stream::Stream,
+{
+    type Item = <Abortable<UnboundedInbox<T>> as tokio_stream::Stream>::Item;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.poll_next_unpin(cx)
+    }
+}
+
 #[derive(Debug)]
 pub struct AbortableUnboundedHandle<T> {
     inner: UnboundedHandle<T>,
@@ -409,7 +443,16 @@ impl<E: Send + 'static> Channel for AbortableUnboundedChannel<E> {
     type Event = E;
     type Handle = AbortableUnboundedHandle<E>;
     type Inbox = AbortableUnboundedInbox<E>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<prometheus::IntGauge>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<E>>>,
+    ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
         let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
@@ -421,11 +464,13 @@ impl<E: Send + 'static> Channel for AbortableUnboundedChannel<E> {
         let unbounded_inbox = UnboundedInbox::new(recv, gauge.clone());
         let abortable_unbounded_handle = AbortableUnboundedHandle::new(unbounded_handle);
         let abortable_unbounded_inbox = AbortableUnboundedInbox::new(unbounded_inbox, abort_registration.clone());
+        let route = Box::new(abortable_unbounded_handle.clone());
         (
             abortable_unbounded_handle,
             abortable_unbounded_inbox,
             abort_registration,
             Some(gauge),
+            Some(route),
         )
     }
 }
@@ -592,7 +637,16 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
     type Event = E;
     type Handle = BoundedHandle<E>;
     type Inbox = BoundedInbox<E>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<Self::Metric>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<Self::Metric>,
+        Option<Box<dyn Route<E>>>,
+    ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
         let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
@@ -602,7 +656,8 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
         let abort_registration = self.abort_registration;
         let unbounded_handle = BoundedHandle::new(sender, gauge.clone(), abort_handle, scope_id);
         let unbounded_inbox = BoundedInbox::new(recv, gauge.clone());
-        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge))
+        let route = Box::new(unbounded_handle.clone());
+        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge), Some(route))
     }
 }
 
@@ -743,7 +798,16 @@ impl<E: Send + 'static, const C: usize> Channel for AbortableBoundedChannel<E, C
     type Event = E;
     type Handle = AbortableBoundedHandle<E>;
     type Inbox = AbortableBoundedInbox<E>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<prometheus::IntGauge>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<E>>>,
+    ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
         let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
@@ -755,11 +819,13 @@ impl<E: Send + 'static, const C: usize> Channel for AbortableBoundedChannel<E, C
         let unbounded_inbox = BoundedInbox::new(recv, gauge.clone());
         let abortable_unbounded_handle = AbortableBoundedHandle::new(unbounded_handle);
         let abortable_unbounded_inbox = AbortableBoundedInbox::new(unbounded_inbox, abort_registration.clone());
+        let route = Box::new(abortable_unbounded_handle.clone());
         (
             abortable_unbounded_handle,
             abortable_unbounded_inbox,
             abort_registration,
             Some(gauge),
+            Some(route),
         )
     }
 }
@@ -808,11 +874,55 @@ impl Channel for TcpListenerStream {
     type Event = ();
     type Handle = TcpListenerHandle;
     type Inbox = Abortable<TcpListenerStream>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<prometheus::IntGauge>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<()>>>,
+    ) {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let abortable_inbox = Abortable::new(self, abort_registration.clone());
         let abortable_handle = TcpListenerHandle(abort_handle, scope_id);
-        (abortable_handle, abortable_inbox, abort_registration, None)
+        (abortable_handle, abortable_inbox, abort_registration, None, None)
+    }
+}
+
+pub struct WsRxChannel(pub WsRx);
+
+#[derive(Clone)]
+pub struct WsRxHandle(AbortHandle, ScopeId);
+#[async_trait::async_trait]
+impl super::Shutdown for WsRxHandle {
+    async fn shutdown(&self) {
+        self.0.abort();
+    }
+    fn scope_id(&self) -> ScopeId {
+        self.1
+    }
+}
+
+impl Channel for WsRxChannel {
+    type Event = ();
+    type Handle = WsRxHandle;
+    type Inbox = Abortable<WsRx>;
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<()>>>,
+    ) {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
+        let abortable_handle = WsRxHandle(abort_handle, scope_id);
+        (abortable_handle, abortable_inbox, abort_registration, None, None)
     }
 }
 
@@ -832,6 +942,7 @@ impl IntervalHandle {
         Self { scope_id, abort_handle }
     }
 }
+
 #[async_trait::async_trait]
 impl<T, const I: u64> ChannelBuilder<IntervalChannel<I>> for T
 where
@@ -846,12 +957,21 @@ impl<const I: u64> Channel for IntervalChannel<I> {
     type Event = std::time::Instant;
     type Handle = IntervalHandle;
     type Inbox = Abortable<IntervalStream>;
-    fn channel<T: Actor>(self, scope_id: ScopeId) -> (Self::Handle, Self::Inbox, AbortRegistration, Option<prometheus::IntGauge>) {
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<Self::Event>>>,
+    ) {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let interval = tokio::time::interval(std::time::Duration::from_millis(I));
         let interval_handle = IntervalHandle::new(abort_handle, scope_id);
         let abortable_inbox = Abortable::new(IntervalStream::new(interval), abort_registration.clone());
-        (interval_handle, abortable_inbox, abort_registration, None)
+        (interval_handle, abortable_inbox, abort_registration, None, None)
     }
 }
 

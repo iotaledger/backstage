@@ -1,7 +1,4 @@
-use anyhow::anyhow;
 use std::time::Duration;
-use thiserror::Error;
-
 /// The returned result by the actor
 pub type ActorResult = std::result::Result<(), Reason>;
 
@@ -12,5 +9,5 @@ pub enum Reason {
     // example maybe the disk is full or a bind address is in-use
     Exit,
     /// The actor is asking for restart, if possible.
-    Restart(Option<std::time::Duration>),
+    Restart(Option<Duration>),
 }

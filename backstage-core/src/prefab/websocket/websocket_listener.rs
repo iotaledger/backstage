@@ -1,22 +1,20 @@
+use super::WebsocketEvent;
 use crate::core::*;
 
-pub struct WebsocketServer {
+pub struct WebsocketListener {
     addr: std::net::SocketAddr,
     ttl: Option<u32>,
 }
 
-impl WebsocketServer {
-    pub fn new(addr: std::net::SocketAddr) -> Self {
-        Self { addr, ttl: None }
-    }
-    pub fn set_ttl(mut self, ttl: u32) -> Self {
-        self.ttl.replace(ttl);
-        self
+impl WebsocketListener {
+    /// Create new WebsocketListener struct
+    pub(crate) fn new(addr: std::net::SocketAddr, ttl: Option<u32>) -> Self {
+        Self { addr, ttl }
     }
 }
 
 #[async_trait::async_trait]
-impl ChannelBuilder<TcpListenerStream> for WebsocketServer {
+impl ChannelBuilder<TcpListenerStream> for WebsocketListener {
     async fn build_channel(&mut self) -> Result<TcpListenerStream, Reason>
     where
         Self: Actor<Channel = TcpListenerStream>,
@@ -29,28 +27,27 @@ impl ChannelBuilder<TcpListenerStream> for WebsocketServer {
             listener.set_ttl(*ttl).map_err(|e| {
                 log::error!("{}", e);
                 Reason::Exit
-            })?
+            })?;
         }
         Ok(TcpListenerStream::new(listener))
     }
 }
 
 #[async_trait::async_trait]
-impl Actor for WebsocketServer {
+impl Actor for WebsocketListener {
+    type Context<S: Supervise<Self>> = Rt<Self, UnboundedHandle<WebsocketEvent>>;
     type Channel = TcpListenerStream;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason> {
+    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason> {
         Ok(())
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Deps) -> ActorResult {
         while let Some(r) = rt.inbox_mut().next().await {
             if let Ok(stream) = r {
-                if let Ok(peer) = stream.peer_addr() {
-                    if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
-                        // todo spawn generic websocket actor ..
-                    }
-                }
+                rt.supervisor_handle().send(WebsocketEvent::TcpStream(stream)).ok();
             }
         }
+        // this will link the supervisor to the listener
+        rt.supervisor_handle().shutdown().await;
         Ok(())
     }
 }

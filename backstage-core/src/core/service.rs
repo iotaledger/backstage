@@ -1,10 +1,10 @@
+use super::ScopeId;
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
 use std::{
     ops::{Deref, DerefMut},
     time::SystemTime,
 };
-
 /// The possible statuses a service (application) can be
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -53,8 +53,6 @@ impl Default for ServiceStatus {
 /// An actor's service metrics
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
-    /// version of the service, which should be icermented after every mutation
-    pub version: u32,
     /// The status of the actor
     pub status: ServiceStatus,
     /// The name of the actor
@@ -63,15 +61,21 @@ pub struct Service {
     pub up_since: SystemTime,
     /// Accumulated downtime
     pub downtime_ms: u64,
+    /// Microservices
+    pub microservices: std::collections::HashMap<ScopeId, Self>,
 }
 
 impl Service {
     /// Create a new Service
     pub fn new<S: Into<String>>(name: S) -> Self {
-        Self {
+        let s = Self {
             name: name.into(),
-            ..Default::default()
-        }
+            status: ServiceStatus::Starting,
+            up_since: SystemTime::now(),
+            downtime_ms: 0,
+            microservices: std::collections::HashMap::new(),
+        };
+        s
     }
     /// Set the service status
     pub fn with_status(mut self, service_status: ServiceStatus) -> Self {
@@ -123,77 +127,47 @@ impl Service {
     pub fn service_status(&self) -> &ServiceStatus {
         &self.status
     }
+    pub fn microservices(&self) -> &std::collections::HashMap<ScopeId, Service> {
+        &self.microservices
+    }
+    pub fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
+        &mut self.microservices
+    }
 }
 
 impl Default for Service {
     fn default() -> Self {
         Self {
-            version: 0,
-            status: Default::default(),
-            name: Default::default(),
             up_since: SystemTime::now(),
-            downtime_ms: Default::default(),
-        }
-    }
-}
-
-/// A tree of services
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct ServiceTree {
-    /// The service at this level
-    pub service: Service,
-    /// The children of this level
-    pub children: std::collections::HashMap<usize, ServiceTree>,
-}
-
-impl ServiceTree {
-    /// Create new service tree
-    pub fn new<T: Into<String>>(name: T) -> Self {
-        ServiceTree {
-            service: Service::new(name),
             ..Default::default()
         }
     }
 }
 
-impl Deref for ServiceTree {
-    type Target = Service;
-
-    fn deref(&self) -> &Self::Target {
-        &self.service
-    }
-}
-
-impl DerefMut for ServiceTree {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.service
-    }
-}
-
-impl TreeItem for ServiceTree {
-    type Child = ServiceTree;
+impl TreeItem for Service {
+    type Child = Service;
 
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
         write!(
             f,
             "{}: {}, uptime: {}",
-            self.service.name,
-            self.service.status,
-            self.service.up_since.elapsed().expect("Expected elapsed to unwrap").as_millis()
+            self.name,
+            self.status,
+            self.up_since.elapsed().expect("Expected elapsed to unwrap").as_millis()
         )
     }
 
     fn children(&self) -> std::borrow::Cow<[Self::Child]> {
-        self.children
+        self.microservices
             .clone()
             .into_iter()
             .map(|(_, c)| c)
-            .collect::<Vec<ServiceTree>>()
+            .collect::<Vec<Self::Child>>()
             .into()
     }
 }
 
-impl std::fmt::Display for ServiceTree {
+impl std::fmt::Display for Service {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut buf = std::io::Cursor::new(Vec::<u8>::new());
         ptree::write_tree(self, &mut buf).ok();

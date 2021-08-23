@@ -6,7 +6,7 @@ use std::borrow::Cow;
 #[async_trait]
 pub trait Actor: Sized + Send + Sync + 'static {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Deps: Clone + Send + Sync + 'static = ();
+    type Deps: Send + Sync + 'static = ();
     type Context<S: super::Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
@@ -26,10 +26,12 @@ pub trait Actor: Sized + Send + Sync + 'static {
 
 /// Shutdown contract , should be implemented on the handle
 #[async_trait::async_trait]
-pub trait Shutdown: Send + 'static + Sync {
+pub trait Shutdown: Send + 'static + Sync + dyn_clone::DynClone {
     async fn shutdown(&self);
     fn scope_id(&self) -> super::ScopeId;
 }
+
+dyn_clone::clone_trait_object!(Shutdown);
 
 pub trait ShutdownEvent: Send {
     fn shutdown_event() -> Self;
@@ -59,8 +61,7 @@ impl<T: Send> super::Report<T, super::Service> for NullSupervisor {
 // test
 #[cfg(test)]
 mod tests {
-    use crate::core::{Actor, ActorResult, IntervalChannel, Reason};
-    use futures::stream::StreamExt;
+    use crate::core::{Actor, ActorResult, IntervalChannel, Reason, StreamExt};
 
     struct PrintHelloEveryFewMs;
     #[async_trait::async_trait]

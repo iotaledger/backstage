@@ -1,4 +1,4 @@
-use super::{Channel, Route, Service, Shutdown};
+use super::{Channel, Message, Route, Service, Shutdown};
 use std::{any::TypeId, collections::HashMap};
 use tokio::sync::RwLock;
 
@@ -9,19 +9,25 @@ lazy_static::lazy_static! {
     pub static ref PROMETHEUS_REGISTRY: prometheus::Registry = {
         prometheus::Registry::new_custom(Some("Backstage".into()), None).expect("PROMETHEUS_REGISTRY to be created")
     };
+    pub static ref BACKSTAGE_PARTITIONS: usize = {
+        if let Ok(p) = std::env::var("BACKSTAGE_PARTITIONS") {
+            p.parse().expect("Invalid BACKSTAGE_PARTITIONS env")
+        } else {
+            num_cpus::get()
+        }
+    };
     pub static ref SCOPES: Vec<PartitionedScopes> = {
-        let partition_count = num_cpus::get();
-        let mut scopes = Vec::with_capacity(partition_count);
-        for _ in 0..partition_count {
+        let mut scopes = Vec::with_capacity(*BACKSTAGE_PARTITIONS);
+        for _ in 0..*BACKSTAGE_PARTITIONS {
             scopes.push(RwLock::default());
         }
         scopes
     };
 }
 
-pub struct Scoped {
-    scope_id: Option<ScopeId>,
-    pendings: Vec<tokio::sync::oneshot::Sender<ScopeId>>,
+pub(crate) struct Scoped {
+    pub(crate) scope_id: Option<ScopeId>,
+    pub(crate) pendings: Vec<tokio::sync::oneshot::Sender<ScopeId>>,
 }
 
 impl Scoped {
@@ -140,61 +146,36 @@ impl<T: Resource> CleanupSelf for CleanupData<T> {
         if let Some(mut data) = data_and_subscribers.remove::<Data<T>>() {
             for subscriber in data.subscribers.drain() {
                 match subscriber {
-                    // Subscriber::
+                    // Subscriber:: todo
                     _ => {}
                 }
-                todo!()
+                todo!("finish cleanup")
             }
         }
     }
 }
+
 pub struct Scope {
-    pub(crate) parent_id: ScopeId,
-    pub(crate) shutdown_handle: Option<Box<dyn Shutdown>>,
+    pub(crate) parent_id: Option<ScopeId>,
+    pub(crate) shutdown_handle: Box<dyn Shutdown>,
     pub(crate) cleanup: HashMap<ScopeId, Box<dyn CleanupFromOther>>,
     pub(crate) cleanup_data: HashMap<TypeId, Box<dyn CleanupSelf>>,
     pub(crate) data_and_subscribers: anymap::Map<dyn anymap::any::Any + Send + Sync>,
-    pub(crate) service: Service,
-    pub(crate) microservices: HashMap<ScopeId, Service>,
-    pub(crate) scope_id_by_ms_name: HashMap<String, ScopeId>,
-    // Enable to route events to the actor interface
+    pub(crate) active_scopes: HashMap<String, Scoped>,
     pub(crate) router: anymap::Map<dyn anymap::any::Any + Send + Sync>,
 }
 
 impl Scope {
     /// Create new scope
-    pub fn new(parent_id: ScopeId, service: Service, shutdown_handle: Box<dyn Shutdown>) -> Self {
+    pub fn new(parent_id: Option<ScopeId>, shutdown_handle: Box<dyn Shutdown>) -> Self {
         Self {
             parent_id,
-            shutdown_handle: Some(shutdown_handle),
+            shutdown_handle,
             cleanup: HashMap::new(),
             cleanup_data: HashMap::new(),
             data_and_subscribers: anymap::Map::new(),
-            service,
-            microservices: HashMap::new(),
-            scope_id_by_ms_name: HashMap::new(),
+            active_scopes: HashMap::new(),
             router: anymap::Map::new(),
         }
     }
-}
-
-// work in progree
-enum Pid {
-    ScopeId(ScopeId),
-    Name(String),
-}
-
-// Deserializable event
-enum Event<T> {
-    /// shutdown the actor
-    Shutdown,
-    /// Cast event T using the pid's router, without responder.
-    Cast(T),
-    /// Send event T using the pid's router, which ,
-    Call(T),
-}
-
-struct Interface<T> {
-    pid: Pid,
-    event: Event<T>,
 }
