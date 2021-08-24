@@ -221,9 +221,7 @@ pub trait RegistryAccess: Clone {
 }
 
 /// The central registry that stores all data for the application.
-/// Data is accessable via scopes which track its location within
-/// the global dyn vector. Two id pools manage the reusable indexes
-/// for this data.
+/// Data is accessable via scopes organized as a tree structure.
 pub struct Registry {
     scopes: HashMap<ScopeId, RwLock<Scope>>,
 }
