@@ -37,10 +37,10 @@ impl ChannelBuilder<TcpListenerStream> for WebsocketListener {
 impl Actor for WebsocketListener {
     type Context<S: Supervise<Self>> = Rt<Self, UnboundedHandle<WebsocketEvent>>;
     type Channel = TcpListenerStream;
-    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason> {
+    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Deps) -> ActorResult {
+    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
         while let Some(r) = rt.inbox_mut().next().await {
             if let Ok(stream) = r {
                 rt.supervisor_handle().send(WebsocketEvent::TcpStream(stream)).ok();

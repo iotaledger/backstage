@@ -2,6 +2,7 @@ use super::{Channel, Message, Route, Service, Shutdown};
 use std::{any::TypeId, collections::HashMap};
 use tokio::sync::RwLock;
 
+pub type Depth = usize;
 pub type ScopeId = usize;
 pub type PartitionedScopes = RwLock<HashMap<ScopeId, Scope>>;
 
@@ -23,31 +24,36 @@ lazy_static::lazy_static! {
         }
         scopes
     };
+    pub static ref VISIBLE_DATA: RwLock<HashMap<TypeId, Vec<(Depth,ScopeId)>>> = {
+        let data_map = HashMap::new();
+        RwLock::new(data_map)
+    };
 }
 
-pub(crate) struct Scoped {
-    pub(crate) scope_id: Option<ScopeId>,
-    pub(crate) pendings: Vec<tokio::sync::oneshot::Sender<ScopeId>>,
+#[derive(serde::Deserialize, serde::Serialize, Default, Clone)] // todo impl the correct ser/de
+pub struct ActorPath {
+    root: ScopeId,
+    path: Vec<String>,
 }
 
-impl Scoped {
-    pub fn with_scope_id(scope_id: ScopeId) -> Self {
-        Self {
-            scope_id: Some(scope_id),
-            pendings: Vec::new(),
+impl ActorPath {
+    pub async fn destination(mut self) -> Option<super::ScopeId> {
+        let mut current_scope_id = self.root;
+        // traverse the scopes in seq order to reach the destination
+        while let Some(dir_name) = self.path.pop() {
+            let scopes_index = current_scope_id % *BACKSTAGE_PARTITIONS;
+            let lock = SCOPES[scopes_index].read().await;
+            if let Some(scope) = lock.get(&current_scope_id) {
+                if let Some(new_current_scope_id) = scope.active_directories.get(&dir_name) {
+                    current_scope_id = *new_current_scope_id;
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
         }
-    }
-    pub fn new() -> Self {
-        Self {
-            scope_id: None,
-            pendings: Vec::new(),
-        }
-    }
-    pub fn add_pending(&mut self, oneshot: tokio::sync::oneshot::Sender<ScopeId>) {
-        self.pendings.push(oneshot)
-    }
-    pub fn scope_id(&self) -> &Option<ScopeId> {
-        &self.scope_id
+        Some(current_scope_id)
     }
 }
 pub trait Resource: Clone + Send + Sync + 'static {}
@@ -80,7 +86,9 @@ pub enum Subscriber<T: Resource> {
     /// LinkedOneCopy subscriber will receive one copy of the resource once it's available,
     /// subscriber will get shutdown if the resource is replaced or dropped.
     LinkedOneCopy(Option<tokio::sync::oneshot::Sender<anyhow::Result<T>>>, Box<dyn Shutdown>),
-    DynCopy,
+    /// Subscriber will receive dynamic copies, pushed by the publisher,
+    /// and None will be pushed if the resource got dropped by the publisher.
+    DynCopy(Box<dyn Route<Option<T>>>),
     /* LinkedDynCopy
      * LinkedDynCopy(Box<dyn Shutdown>), */
 }
@@ -92,8 +100,8 @@ impl<T: Resource> Subscriber<T> {
     pub fn linked_one_copy(one_shot: tokio::sync::oneshot::Sender<anyhow::Result<T>>, shutdown_handle: Box<dyn Shutdown>) -> Self {
         Self::LinkedOneCopy(Some(one_shot), shutdown_handle)
     }
-    pub fn dyn_copy() -> Self {
-        Self::DynCopy
+    pub fn dyn_copy(boxed_route: Box<dyn Route<Option<T>>>) -> Self {
+        Self::DynCopy(boxed_route)
     }
 }
 pub struct Cleanup<T: Resource> {
@@ -144,24 +152,37 @@ impl<T: Resource> CleanupData<T> {
 impl<T: Resource> CleanupSelf for CleanupData<T> {
     async fn cleanup_self(self: Box<Self>, data_and_subscribers: &mut anymap::Map<dyn anymap::any::Any + Send + Sync>) {
         if let Some(mut data) = data_and_subscribers.remove::<Data<T>>() {
-            for subscriber in data.subscribers.drain() {
+            for (sub_scope_id, subscriber) in data.subscribers.drain() {
                 match subscriber {
-                    // Subscriber:: todo
-                    _ => {}
+                    Subscriber::OneCopy(one_sender) => {
+                        one_sender.send(Err(anyhow::Error::msg("Cleanup"))).ok();
+                    }
+                    Subscriber::LinkedOneCopy(mut one_sender_opt, shutdown_handle) => {
+                        if let Some(one_sender) = one_sender_opt.take() {
+                            one_sender.send(Err(anyhow::Error::msg("Cleanup"))).ok();
+                        }
+                        shutdown_handle.shutdown().await;
+                    }
+                    Subscriber::DynCopy(boxed_route) => {
+                        boxed_route.send_msg(None).await.ok();
+                    }
                 }
-                todo!("finish cleanup")
             }
         }
     }
 }
 
 pub struct Scope {
+    // the parent_id might be useful to traverse backward
     pub(crate) parent_id: Option<ScopeId>,
     pub(crate) shutdown_handle: Box<dyn Shutdown>,
-    pub(crate) cleanup: HashMap<ScopeId, Box<dyn CleanupFromOther>>,
+    // to cleanup any self dyn subscribers from other scopes for a given type_id,
+    // the scopeId here is the resource scope_id, this modified by the owner of the scope only.
+    pub(crate) cleanup: HashMap<(TypeId, ScopeId), Box<dyn CleanupFromOther>>,
+    // to cleanup self created data from the data_and_subscribers anymap
     pub(crate) cleanup_data: HashMap<TypeId, Box<dyn CleanupSelf>>,
     pub(crate) data_and_subscribers: anymap::Map<dyn anymap::any::Any + Send + Sync>,
-    pub(crate) active_scopes: HashMap<String, Scoped>,
+    pub(crate) active_directories: HashMap<String, ScopeId>,
     pub(crate) router: anymap::Map<dyn anymap::any::Any + Send + Sync>,
 }
 
@@ -174,7 +195,7 @@ impl Scope {
             cleanup: HashMap::new(),
             cleanup_data: HashMap::new(),
             data_and_subscribers: anymap::Map::new(),
-            active_scopes: HashMap::new(),
+            active_directories: HashMap::new(),
             router: anymap::Map::new(),
         }
     }

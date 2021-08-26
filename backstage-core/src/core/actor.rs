@@ -6,21 +6,21 @@ use std::borrow::Cow;
 #[async_trait]
 pub trait Actor: Sized + Send + Sync + 'static {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Deps: Send + Sync + 'static = ();
+    type Data: Send + Sync + 'static = ();
     type Context<S: super::Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
     /// Used to initialize the actor.
-    async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, super::Reason>
+    async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, super::Reason>
     where
         S: super::Supervise<Self>;
     /// The main function for the actor
-    async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Deps) -> ActorResult
+    async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Data) -> ActorResult
     where
         S: super::Supervise<Self>;
-    /// Get this actor's name
-    fn type_name() -> Cow<'static, str> {
-        std::any::type_name::<Self>().into()
+    /// Get this actor's type name
+    fn type_name() -> &'static str {
+        std::any::type_name::<Self>()
     }
 }
 
@@ -67,13 +67,13 @@ mod tests {
     #[async_trait::async_trait]
     impl Actor for PrintHelloEveryFewMs {
         type Channel = IntervalChannel<100>;
-        async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason>
+        async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason>
         where
             S: super::Supervise<Self>,
         {
             Ok(())
         }
-        async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Deps) -> ActorResult
+        async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Data) -> ActorResult
         where
             S: super::Supervise<Self>,
         {

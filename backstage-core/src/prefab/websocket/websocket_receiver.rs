@@ -36,49 +36,65 @@ impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
 #[async_trait::async_trait]
 impl Actor for WebsocketReceiver {
     type Channel = WsRxChannel;
-    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason> {
+    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Deps) -> ActorResult {
+    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
         while let Some(Ok(message)) = rt.inbox_mut().next().await {
             // Deserialize message::text
             match message {
                 Message::Text(text) => {
                     if let Ok(interface) = serde_json::from_str::<Interface>(&text) {
-                        let targeted_scope_id = interface.scope_id.unwrap_or(0);
+                        let mut targeted_scope_id_opt = interface.actor_path.clone().destination().await;
                         match interface.event {
                             Event::Shutdown => {
-                                if let Err(err) = rt.shutdown_scope(targeted_scope_id).await {
-                                    let err_string = err.to_string();
-                                    let r = Error::Shutdown(targeted_scope_id, err_string);
-                                    self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                if let Some(scope_id) = targeted_scope_id_opt.take() {
+                                    if let Err(err) = rt.shutdown_scope(scope_id).await {
+                                        let err_string = err.to_string();
+                                        let r = Error::Shutdown(interface.actor_path, err_string);
+                                        self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                    } else {
+                                        let r = Response::Shutdown(interface.actor_path);
+                                        self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
+                                    };
                                 } else {
-                                    let r = Response::Shutdown(targeted_scope_id);
-                                    self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
-                                };
+                                    let err_string = "Unreachable ActorPath".to_string();
+                                    let r = Error::Shutdown(interface.actor_path, err_string);
+                                    self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                }
                             }
                             Event::RequestServiceTree => {
-                                if let Some(service) = rt.lookup::<Service>(targeted_scope_id).await {
-                                    let r = Response::ServiceTree(service);
-                                    self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
+                                if let Some(scope_id) = targeted_scope_id_opt.take() {
+                                    if let Some(service) = rt.lookup::<Service>(scope_id).await {
+                                        let r = Response::ServiceTree(service);
+                                        self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
+                                    } else {
+                                        let r = Error::ServiceTree("Service not available".into());
+                                        self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                    };
                                 } else {
-                                    let r = Error::ServiceTree("Service not available".into());
+                                    let r = Error::ServiceTree("Unreachable ActorPath".into());
                                     self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
-                                };
+                                }
                             }
                             Event::Cast(message_to_route) => {
-                                let route_message = message_to_route.clone();
-                                match rt.send(targeted_scope_id, message_to_route).await {
-                                    Ok(()) => {
-                                        let r = Response::Sent(route_message);
-                                        self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
-                                    }
-                                    Err(e) => {
-                                        let err = format!("{}", e);
-                                        let r = Error::Cast(targeted_scope_id, route_message, err);
-                                        self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
-                                    }
-                                };
+                                if let Some(scope_id) = targeted_scope_id_opt.take() {
+                                    let route_message = message_to_route.clone();
+                                    match rt.send(scope_id, message_to_route).await {
+                                        Ok(()) => {
+                                            let r = Response::Sent(route_message);
+                                            self.sender_handle.send(WebsocketSenderEvent::Result(Ok(r))).ok();
+                                        }
+                                        Err(e) => {
+                                            let err = format!("{}", e);
+                                            let r = Error::Cast(interface.actor_path, route_message, err);
+                                            self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                        }
+                                    };
+                                } else {
+                                    let r = Error::Cast(interface.actor_path, message_to_route, "Unreachable ActorPath".into());
+                                    self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                }
                             }
                             Event::Call(message_to_route_with_responder) => {
                                 // todo

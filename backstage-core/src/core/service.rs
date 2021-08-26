@@ -1,4 +1,4 @@
-use super::ScopeId;
+use super::{Actor, ScopeId};
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -53,10 +53,11 @@ impl Default for ServiceStatus {
 /// An actor's service metrics
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
+    pub actor_type_name: &'static str,
     /// The status of the actor
     pub status: ServiceStatus,
-    /// The name of the actor
-    pub name: String,
+    /// The directory name of the actor, must be unique within the same spawned level
+    pub directory: Option<String>,
     /// The start timestamp, used to calculate uptime
     pub up_since: SystemTime,
     /// Accumulated downtime
@@ -67,15 +68,19 @@ pub struct Service {
 
 impl Service {
     /// Create a new Service
-    pub fn new<S: Into<String>>(name: S) -> Self {
-        let s = Self {
-            name: name.into(),
+    pub fn new<A: Actor>(directory: Option<String>) -> Self {
+        Self {
+            actor_type_name: A::type_name(),
+            directory: directory.into(),
             status: ServiceStatus::Starting,
             up_since: SystemTime::now(),
             downtime_ms: 0,
             microservices: std::collections::HashMap::new(),
-        };
-        s
+        }
+    }
+    /// Return actor type name
+    pub fn actor_type_name(&self) -> &'static str {
+        self.actor_type_name
     }
     /// Set the service status
     pub fn with_status(mut self, service_status: ServiceStatus) -> Self {
@@ -87,8 +92,8 @@ impl Service {
         // todo update the uptime/downtime if needed
         self.status = service_status;
     }
-    pub fn name(&self) -> std::borrow::Cow<'static, str> {
-        self.name.clone().into()
+    pub fn directory(&self) -> &Option<String> {
+        &self.directory
     }
     /// Set the service downtime in milliseconds
     pub fn with_downtime_ms(mut self, downtime_ms: u64) -> Self {
@@ -150,8 +155,9 @@ impl TreeItem for Service {
     fn write_self<W: std::io::Write>(&self, f: &mut W, _style: &ptree::Style) -> std::io::Result<()> {
         write!(
             f,
-            "{}: {}, uptime: {}",
-            self.name,
+            "actor: {}, dir: {:?}, status: {}, uptime: {}",
+            self.actor_type_name,
+            self.directory,
             self.status,
             self.up_since.elapsed().expect("Expected elapsed to unwrap").as_millis()
         )

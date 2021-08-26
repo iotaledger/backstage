@@ -28,7 +28,7 @@ pub enum Event {
 #[derive(serde::Serialize)]
 pub enum Response {
     /// Success shutdown signal
-    Shutdown(ScopeId),
+    Shutdown(ActorPath),
     /// Successful cast
     Sent(RouteMessage),
     /// Successful Response from a call
@@ -39,9 +39,9 @@ pub enum Response {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Error {
-    Shutdown(ScopeId, String),
-    Cast(ScopeId, RouteMessage, String),
-    Call(ScopeId, RouteMessage, String),
+    Shutdown(ActorPath, String),
+    Cast(ActorPath, RouteMessage, String),
+    Call(ActorPath, RouteMessage, String),
     ServiceTree(String),
 }
 
@@ -49,7 +49,7 @@ pub type ResponseResult = Result<Response, Error>;
 
 #[derive(serde::Deserialize)]
 pub struct Interface {
-    pub(crate) scope_id: Option<ScopeId>,
+    pub(crate) actor_path: ActorPath,
     pub(crate) event: Event,
 }
 
@@ -111,12 +111,12 @@ impl ShutdownEvent for WebsocketEvent {
 #[async_trait::async_trait]
 impl Actor for Websocket {
     type Channel = UnboundedChannel<WebsocketEvent>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Deps, Reason> {
+    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
         let listener = WebsocketListener::new(self.addr, self.ttl);
-        rt.spawn("Listener", listener).await?;
+        rt.spawn(None, listener).await?;
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Deps) -> ActorResult {
+    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 WebsocketEvent::Shutdown => {
