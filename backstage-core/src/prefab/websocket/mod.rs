@@ -10,9 +10,14 @@ use websocket_receiver::WebsocketReceiver;
 use websocket_sender::{WebsocketSender, WebsocketSenderEvent};
 
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
-pub struct RouteMessage(String);
+pub struct RouteMessage(pub String);
+impl From<RouteMessage> for String {
+    fn from(v: RouteMessage) -> Self {
+        v.0
+    }
+}
 // Deserializable event
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub enum Event {
     /// shutdown the actor
     Shutdown,
@@ -24,6 +29,17 @@ pub enum Event {
     RequestServiceTree,
 }
 
+impl Event {
+    pub fn shutdown() -> Self {
+        Self::Shutdown
+    }
+    pub fn cast(message: String) -> Self {
+        Self::Cast(RouteMessage(message))
+    }
+    pub fn service() -> Self {
+        Self::RequestServiceTree
+    }
+}
 // Serializable response
 #[derive(serde::Serialize)]
 pub enum Response {
@@ -47,10 +63,61 @@ pub enum Error {
 
 pub type ResponseResult = Result<Response, Error>;
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize, Default, Clone)] // todo impl better ser/de
+pub struct ActorPath {
+    root: ScopeId,
+    path: Vec<String>,
+}
+impl ActorPath {
+    /// Create new actor path, with root = 0 as the default scope_id
+    pub fn new() -> Self {
+        Self { root: 0, path: Vec::new() }
+    }
+    pub fn with_scope_id(scope_id: ScopeId) -> Self {
+        Self {
+            root: scope_id,
+            path: Vec::new(),
+        }
+    }
+    pub fn push(mut self, dir_name: String) -> Self {
+        self.path.push(dir_name);
+        self
+    }
+    pub async fn destination(&self) -> Option<ScopeId> {
+        let mut current_scope_id = self.root;
+        // traverse the scopes in seq order to reach the destination
+        while let Some(dir_name) = self.path.iter().next() {
+            let scopes_index = current_scope_id % *BACKSTAGE_PARTITIONS;
+            let lock = SCOPES[scopes_index].read().await;
+            if let Some(scope) = lock.get(&current_scope_id) {
+                if let Some(new_current_scope_id) = scope.active_directories.get(dir_name) {
+                    current_scope_id = *new_current_scope_id;
+                    drop(lock)
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            };
+        }
+        Some(current_scope_id)
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct Interface {
-    pub(crate) actor_path: ActorPath,
-    pub(crate) event: Event,
+    pub actor_path: ActorPath,
+    pub event: Event,
+}
+
+impl Interface {
+    pub fn new(actor_path: ActorPath, event: Event) -> Self {
+        Self { actor_path, event }
+    }
+    pub fn to_message(self) -> tokio_tungstenite::tungstenite::Message {
+        let json = serde_json::to_string(&self).expect("Serializeable json");
+        Message::Text(json)
+    }
 }
 
 use crate::core::*;

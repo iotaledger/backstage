@@ -41,6 +41,14 @@ where
     pub fn abort_registration(&self) -> AbortRegistration {
         self.abort_registration.clone()
     }
+    /// Create abortable future which will be aborted if the actor got shutdown signal.
+    pub fn abortable<F>(&self, fut: F) -> Abortable<F>
+    where
+        F: std::future::Future + Send + Sync,
+    {
+        let abort_registration = self.abort_registration();
+        Abortable::new(fut, abort_registration)
+    }
     pub async fn spawn<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
@@ -208,7 +216,7 @@ where
     {
         let scopes_index = scope_id % *BACKSTAGE_PARTITIONS;
         let lock = SCOPES[scopes_index].read().await;
-        if let Some(scope) = lock.get(&self.scope_id) {
+        if let Some(scope) = lock.get(&scope_id) {
             // we clone the handle to prevent very rare deadlock (which might only happen if channel is bounded)
             let shutdown_handle = scope.shutdown_handle.clone();
             drop(lock);
@@ -220,6 +228,12 @@ where
     }
     pub fn microservices_stopped(&self) -> bool {
         self.service.microservices.iter().all(|(_, s)| s.is_stopped())
+    }
+    pub fn microservices_all(&self, is: fn(&Service) -> bool) -> bool {
+        self.service.microservices.iter().all(|(_, s)| is(s))
+    }
+    pub fn microservices_any(&self, is: fn(&Service) -> bool) -> bool {
+        self.service.microservices.iter().any(|(_, s)| is(s))
     }
     pub async fn stop(&mut self) {
         self.shutdown_children().await;
@@ -450,7 +464,6 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
         }
         None
     }
-
     /// Publish resource
     pub async fn publish<T: Resource>(&self, resource: T) {
         let scope_id = self.scope_id;
@@ -926,7 +939,7 @@ impl<A: Actor> Runtime<A> {
         let r = self.join_handle.await;
         if let Some(ws_server_handle) = self.websocket_server.take() {
             ws_server_handle.shutdown().await;
-            self.websocket_join_handle.expect("websocket join handle").await;
+            self.websocket_join_handle.expect("websocket join handle").await.ok();
         }
         r
     }

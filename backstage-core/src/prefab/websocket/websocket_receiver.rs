@@ -96,10 +96,13 @@ impl Actor for WebsocketReceiver {
                                     self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
                                 }
                             }
-                            Event::Call(message_to_route_with_responder) => {
+                            Event::Call(_message_to_route_with_responder) => {
                                 // todo
+                                todo!()
                             }
                         }
+                    } else {
+                        break;
                     };
                 }
                 Message::Close(_) => {

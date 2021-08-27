@@ -30,32 +30,6 @@ lazy_static::lazy_static! {
     };
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Default, Clone)] // todo impl the correct ser/de
-pub struct ActorPath {
-    root: ScopeId,
-    path: Vec<String>,
-}
-
-impl ActorPath {
-    pub async fn destination(mut self) -> Option<super::ScopeId> {
-        let mut current_scope_id = self.root;
-        // traverse the scopes in seq order to reach the destination
-        while let Some(dir_name) = self.path.pop() {
-            let scopes_index = current_scope_id % *BACKSTAGE_PARTITIONS;
-            let lock = SCOPES[scopes_index].read().await;
-            if let Some(scope) = lock.get(&current_scope_id) {
-                if let Some(new_current_scope_id) = scope.active_directories.get(&dir_name) {
-                    current_scope_id = *new_current_scope_id;
-                } else {
-                    return None;
-                }
-            } else {
-                return None;
-            };
-        }
-        Some(current_scope_id)
-    }
-}
 pub trait Resource: Clone + Send + Sync + 'static {}
 impl<T> Resource for T where T: Clone + Send + Sync + 'static {}
 
@@ -89,8 +63,6 @@ pub enum Subscriber<T: Resource> {
     /// Subscriber will receive dynamic copies, pushed by the publisher,
     /// and None will be pushed if the resource got dropped by the publisher.
     DynCopy(Box<dyn Route<Option<T>>>),
-    /* LinkedDynCopy
-     * LinkedDynCopy(Box<dyn Shutdown>), */
 }
 
 impl<T: Resource> Subscriber<T> {

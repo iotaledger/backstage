@@ -71,11 +71,11 @@ impl Actor for Decrementer {
 
 // The root custome actor, equivalent to a launcher;
 struct Backstage;
-#[derive(Debug)]
 enum BackstageEvent {
     Shutdown,
     Microservice(ScopeId, Service),
 }
+
 ///// Alll of these should be implemented using proc_macro or some macro. start //////
 impl ShutdownEvent for BackstageEvent {
     fn shutdown_event() -> Self {
@@ -92,7 +92,7 @@ impl<T: Actor> EolEvent<T> for BackstageEvent {
         Self::Microservice(scope_id, service)
     }
 }
-///// Alll of these should be implemented using proc_macro or some macro end ///////
+///// All of these should be implemented using proc_macro or some macro end ///////
 
 #[async_trait::async_trait]
 impl Actor for Backstage {
