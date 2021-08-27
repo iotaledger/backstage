@@ -46,9 +46,9 @@ async fn ws_client() {
     let actor_path = ActorPath::new();
     let request = Interface::new(actor_path.clone(), Event::cast("Print this".into()));
     stream.send(request.to_message()).await.unwrap();
-    if let Some(Ok(msg)) = stream.next().await {
+    while let Some(Ok(msg)) = stream.next().await {
         log::info!("Response from websocket: {}", msg);
-        let request = Interface::new(actor_path.clone(), Event::Shutdown);
+        let request = Interface::new(ActorPath::new(), Event::shutdown());
         stream.send(request.to_message()).await.ok();
     }
 }

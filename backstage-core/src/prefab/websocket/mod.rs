@@ -180,7 +180,7 @@ impl Actor for Websocket {
     type Channel = UnboundedChannel<WebsocketEvent>;
     async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
         let listener = WebsocketListener::new(self.addr, self.ttl);
-        rt.spawn(None, listener).await?;
+        rt.start(None, listener).await?;
         Ok(())
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {

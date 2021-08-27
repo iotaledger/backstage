@@ -26,11 +26,12 @@ where
     pub(crate) visible_data: std::collections::HashSet<std::any::TypeId>,
 }
 
-pub struct InitializedRx(tokio::sync::oneshot::Receiver<Result<(), super::Reason>>);
+pub struct InitializedRx(ScopeId, tokio::sync::oneshot::Receiver<Result<Service, super::Reason>>);
 
 impl InitializedRx {
-    pub async fn initialized(self) -> Result<(), super::Reason> {
-        self.0.await.expect("Expected functional CheckInit oneshot")
+    pub async fn initialized(self) -> Result<(ScopeId, Service), super::Reason> {
+        let service = self.1.await.expect("Expected functional CheckInit oneshot")?;
+        Ok((self.0, service))
     }
 }
 
@@ -48,6 +49,25 @@ where
     {
         let abort_registration = self.abort_registration();
         Abortable::new(fut, abort_registration)
+    }
+    pub async fn start<Dir: Into<Option<String>>, Child>(
+        &mut self,
+        directory: Dir,
+        child: Child,
+    ) -> Result<<Child::Channel as Channel>::Handle, Reason>
+    where
+        Child: Actor<Context<<A::Channel as Channel>::Handle> = Rt<Child, <A::Channel as Channel>::Handle>>
+            + super::ChannelBuilder<Child::Channel>,
+        <A::Channel as Channel>::Handle: super::Supervise<Child>,
+        Self: Send,
+    {
+        let (h, init_signal) = self.spawn(directory, child).await?;
+        if let Ok(Ok((scope_id, service))) = self.abortable(init_signal.initialized()).await {
+            self.upsert_microservice(scope_id, service);
+            Ok(h)
+        } else {
+            Err(Reason::Aborted)
+        }
     }
     pub async fn spawn<Dir: Into<Option<String>>, Child>(
         &mut self,
@@ -134,7 +154,7 @@ where
         if let Some(metric) = metric.take() {
             child_context.register(metric).expect("Metric to be registered");
         }
-        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<(), Reason>>();
+        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
         // create child future;
         let wrapped_fut = async move {
             let mut child = child;
@@ -153,8 +173,9 @@ where
                     if rt.service().is_initializing() {
                         rt.update_status(ServiceStatus::Running).await
                     }
+                    let service = rt.service().clone();
                     // inform oneshot receiver
-                    check_init.send(Ok(())).ok();
+                    check_init.send(Ok(service)).ok();
                     let f = child.run(&mut rt, deps);
                     let r = f.await;
                     let f = rt.breakdown(child, r);
@@ -164,7 +185,7 @@ where
         };
         let join_handle = tokio::spawn(wrapped_fut);
         self.children_joins.insert(child_scope_id, join_handle);
-        Ok((handle, InitializedRx(rx_oneshot)))
+        Ok((handle, InitializedRx(child_scope_id, rx_oneshot)))
     }
     pub fn upsert_microservice(&mut self, scope_id: ScopeId, service: Service) {
         if service.is_stopped() {
@@ -818,7 +839,7 @@ impl<A: Actor> Runtime<A> {
         if let Some(metric) = metric.take() {
             child_context.register(metric).expect("Metric to be registered");
         }
-        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<(), Reason>>();
+        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
         // create child future;
         let wrapped_fut = async move {
             let mut child = child;
@@ -838,7 +859,7 @@ impl<A: Actor> Runtime<A> {
                         rt.update_status(ServiceStatus::Running).await
                     }
                     // inform oneshot receiver
-                    check_init.send(Ok(())).ok();
+                    check_init.send(Ok(rt.service().clone())).ok();
                     let f = child.run(&mut rt, deps);
                     let r = f.await;
                     let f = rt.breakdown(child, r);
@@ -851,7 +872,7 @@ impl<A: Actor> Runtime<A> {
         Ok(Self {
             handle,
             join_handle,
-            initialized_rx: Some(InitializedRx(rx_oneshot)),
+            initialized_rx: Some(InitializedRx(child_scope_id, rx_oneshot)),
             websocket_server: None,
             websocket_join_handle: None,
         })
