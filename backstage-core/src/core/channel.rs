@@ -369,6 +369,26 @@ pub struct AbortableUnboundedChannel<E> {
 }
 
 #[async_trait::async_trait]
+impl<A, T: EolEvent<A> + ReportEvent<A, Service>> Supervise<A> for AbortableUnboundedHandle<T>
+where
+    A: Actor,
+{
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
+        self.send(T::eol_event(scope_id, service, actor, r)).ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl<A, T: ReportEvent<A, D>, D: Send + 'static> Report<A, D> for AbortableUnboundedHandle<T>
+where
+    A: Actor,
+{
+    async fn report(&self, scope_id: ScopeId, data: D) -> Option<()> {
+        self.send(T::report_event(scope_id, data)).ok()
+    }
+}
+
+#[async_trait::async_trait]
 impl<E: Send + 'static, T> ChannelBuilder<AbortableUnboundedChannel<E>> for T
 where
     T: Actor<Channel = AbortableUnboundedChannel<E>>,
@@ -614,6 +634,26 @@ impl<T> BoundedHandle<T> {
         self.inner.same_channel(&other.inner)
     }
     // todo support permits
+}
+
+#[async_trait::async_trait]
+impl<A, T: EolEvent<A> + ReportEvent<A, Service>> Supervise<A> for AbortableBoundedHandle<T>
+where
+    A: Actor,
+{
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
+        self.send(T::eol_event(scope_id, service, actor, r)).await.ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl<A, T: ReportEvent<A, D>, D: Send + 'static> Report<A, D> for AbortableBoundedHandle<T>
+where
+    A: Actor,
+{
+    async fn report(&self, scope_id: ScopeId, data: D) -> Option<()> {
+        self.send(T::report_event(scope_id, data)).await.ok()
+    }
 }
 
 #[async_trait::async_trait]
