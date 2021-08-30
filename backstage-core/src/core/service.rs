@@ -53,6 +53,8 @@ impl Default for ServiceStatus {
 /// An actor's service metrics
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Service {
+    // pub actor_type_id: std::any::TypeId,
+    /// The actor type name, only for debuging or to provide context
     pub actor_type_name: &'static str,
     /// The status of the actor
     pub status: ServiceStatus,
@@ -70,6 +72,7 @@ impl Service {
     /// Create a new Service
     pub fn new<A: Actor>(directory: Option<String>) -> Self {
         Self {
+        //    actor_type_id: std::any::TypeId::of::<A>(),
             actor_type_name: A::type_name(),
             directory: directory.into(),
             status: ServiceStatus::Starting,
@@ -78,7 +81,7 @@ impl Service {
             microservices: std::collections::HashMap::new(),
         }
     }
-    /// Return actor type name
+    /// Return actor type name, note: only for debuging
     pub fn actor_type_name(&self) -> &'static str {
         self.actor_type_name
     }

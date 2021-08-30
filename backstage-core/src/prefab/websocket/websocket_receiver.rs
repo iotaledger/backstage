@@ -45,7 +45,7 @@ impl Actor for WebsocketReceiver {
             match message {
                 Message::Text(text) => {
                     if let Ok(interface) = serde_json::from_str::<Interface>(&text) {
-                        let mut targeted_scope_id_opt = interface.actor_path.clone().destination().await;
+                        let mut targeted_scope_id_opt = interface.actor_path.destination().await;
                         match interface.event {
                             Event::Shutdown => {
                                 if let Some(scope_id) = targeted_scope_id_opt.take() {

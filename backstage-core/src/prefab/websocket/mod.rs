@@ -85,8 +85,9 @@ impl ActorPath {
     }
     pub async fn destination(&self) -> Option<ScopeId> {
         let mut current_scope_id = self.root;
+        let mut iter = self.path.iter();
         // traverse the scopes in seq order to reach the destination
-        while let Some(dir_name) = self.path.iter().next() {
+        while let Some(dir_name) = iter.next() {
             let scopes_index = current_scope_id % *BACKSTAGE_PARTITIONS;
             let lock = SCOPES[scopes_index].read().await;
             if let Some(scope) = lock.get(&current_scope_id) {
