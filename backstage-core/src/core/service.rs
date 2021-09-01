@@ -2,7 +2,6 @@ use super::{Actor, ScopeId};
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
 use std::{
-    ops::{Deref, DerefMut},
     time::SystemTime,
 };
 /// The possible statuses a service (application) can be
@@ -51,9 +50,10 @@ impl Default for ServiceStatus {
 }
 
 /// An actor's service metrics
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Service {
-    // pub actor_type_id: std::any::TypeId,
+    #[serde(skip_serializing)]
+    pub actor_type_id: std::any::TypeId,
     /// The actor type name, only for debuging or to provide context
     pub actor_type_name: &'static str,
     /// The status of the actor
@@ -68,11 +68,37 @@ pub struct Service {
     pub microservices: std::collections::HashMap<ScopeId, Self>,
 }
 
+pub struct ServiceScopesIterator<'a> {
+    actor_type_id: std::any::TypeId,
+    inner: std::collections::hash_map::Iter<'a, ScopeId, Service>,
+}
+impl<'a> ServiceScopesIterator<'a> {
+    fn new<T: Actor>(iter: std::collections::hash_map::Iter<'a, ScopeId, Service>) -> Self {
+        Self {
+            actor_type_id: std::any::TypeId::of::<T>(),
+            inner: iter,
+        }
+    }
+}
+impl<'a> Iterator for ServiceScopesIterator<'a> {
+    type Item = ScopeId;
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((scope_id, service)) = self.inner.next() {
+            if service.actor_type_id() == self.actor_type_id {
+                return Some(*scope_id);
+            } else {
+                continue;
+            }
+        }
+        None
+    }
+}
+
 impl Service {
     /// Create a new Service
     pub fn new<A: Actor>(directory: Option<String>) -> Self {
         Self {
-        //    actor_type_id: std::any::TypeId::of::<A>(),
+            actor_type_id: std::any::TypeId::of::<A>(),
             actor_type_name: A::type_name(),
             directory: directory.into(),
             status: ServiceStatus::Starting,
@@ -80,6 +106,14 @@ impl Service {
             downtime_ms: 0,
             microservices: std::collections::HashMap::new(),
         }
+    }
+    /// Create scopes iterator for a the provided Child type
+    pub fn scopes_iter<'a, Child: Actor>(&'a self) -> ServiceScopesIterator<'a> {
+        ServiceScopesIterator::new::<Child>(self.microservices.iter())
+    }
+    /// Return the actor type id
+    pub fn actor_type_id(&self) -> std::any::TypeId {
+        self.actor_type_id
     }
     /// Return actor type name, note: only for debuging
     pub fn actor_type_name(&self) -> &'static str {
@@ -102,6 +136,10 @@ impl Service {
     pub fn with_downtime_ms(mut self, downtime_ms: u64) -> Self {
         self.downtime_ms = downtime_ms;
         self
+    }
+    pub fn is_type<T: Actor>(&self) -> bool {
+        let is_type_id = std::any::TypeId::of::<T>();
+        self.actor_type_id == is_type_id
     }
     /// Check if the service is stopping
     pub fn is_stopping(&self) -> bool {
@@ -132,7 +170,7 @@ impl Service {
         self.status == ServiceStatus::Degraded
     }
     /// Get the service status
-    pub fn service_status(&self) -> &ServiceStatus {
+    pub fn status(&self) -> &ServiceStatus {
         &self.status
     }
     pub fn microservices(&self) -> &std::collections::HashMap<ScopeId, Service> {
@@ -140,15 +178,6 @@ impl Service {
     }
     pub fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
         &mut self.microservices
-    }
-}
-
-impl Default for Service {
-    fn default() -> Self {
-        Self {
-            up_since: SystemTime::now(),
-            ..Default::default()
-        }
     }
 }
 
