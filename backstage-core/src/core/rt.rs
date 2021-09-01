@@ -136,7 +136,7 @@ where
         let sup = self.handle.clone();
         // created visible data
         let visible_data = std::collections::HashSet::new();
-        // the child depth, relative to the supervision tree high
+        // the child depth, relative to the supervision tree height
         let child_depth = self.depth + 1;
         // create child context
         let mut child_context = Rt::<Child, <A::Channel as Channel>::Handle>::new(
@@ -260,13 +260,24 @@ where
         self.shutdown_children().await;
         self.update_status(ServiceStatus::Stopping).await;
     }
+    /// Shutdown all the children within this actor context
     pub async fn shutdown_children(&mut self) {
         for (_, c) in self.children_handles.drain() {
             c.shutdown().await;
         }
     }
+    /// Shutdown all the children of a given type within this actor context
+    pub async fn shutdown_children_type<T: Actor>(&mut self) {
+        // extract the scopes for a given type
+        let mut iter = self.service.scopes_iter::<T>();
+        while let Some(scope_id) = iter.next() {
+            if let Some(h) = self.children_handles.remove(&scope_id) {
+                h.shutdown().await;
+            };
+        }
+    }
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
-    async fn breakdown(mut self, actor: A, r: super::ActorResult)
+    async fn breakdown(mut self, actor: A, r: ActorResult)
     where
         Self: Send,
     {
