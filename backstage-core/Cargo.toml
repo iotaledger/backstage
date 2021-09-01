@@ -35,6 +35,7 @@ tokio-tungstenite = { version = "0.14", optional = true }
 tokio-stream = { version = "~0.1.7", features = ["sync", "net"] }
 prometheus = "0.12.0"
 dyn-clone = "1.0.4"
+hyper = { version = "0.14", features = ["full"] }
 
 [dev-dependencies]
 serde_json = "1.0"

@@ -64,6 +64,7 @@ pin_project! {
         inner: std::sync::Arc<AbortInner>,
     }
 }
+
 impl<T> std::convert::AsMut<T> for Abortable<T> {
     fn as_mut(&mut self) -> &mut T {
         &mut self.task
@@ -931,6 +932,96 @@ impl Channel for TcpListenerStream {
     }
 }
 
+pub struct HyperChannel<S> {
+    serve: S,
+    addr: std::net::SocketAddr,
+}
+
+impl<S: Send> HyperChannel<S> {
+    pub fn new(make_svc: S, addr: std::net::SocketAddr) -> Self {
+        Self { serve: make_svc, addr }
+    }
+}
+
+use hyper::{server::conn::AddrStream, Body, Request, Response};
+impl<S, E, R, F> Channel for HyperChannel<S>
+where
+    for<'a> S: hyper::service::Service<&'a AddrStream, Error = E, Response = R, Future = F> + Send,
+    E: std::error::Error + Send + Sync + 'static,
+    S: Send + 'static + Sync,
+    F: Send + std::future::Future<Output = Result<R, E>> + 'static,
+    R: Send + hyper::service::Service<Request<Body>, Response = Response<Body>> + 'static,
+    R::Error: std::error::Error + Send + Sync,
+    R::Future: Send,
+{
+    type Event = ();
+    type Handle = HyperHandle;
+    type Inbox = HyperInbox;
+    fn channel<T: Actor>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<()>>>,
+    ) {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let server = hyper::server::Server::bind(&self.addr).serve(self.serve);
+        let f = futures::future::pending::<()>();
+        let abortable = Abortable::new(f, abort_registration.clone());
+        let graceful = server.with_graceful_shutdown(async {
+            abortable.await.ok();
+        });
+        let hyper_handle = HyperHandle::new(abort_handle, scope_id);
+        let hyper_inbox = HyperInbox::new(Box::pin(graceful));
+        (hyper_handle, hyper_inbox, abort_registration, None, None)
+    }
+}
+
+#[derive(Clone)]
+pub struct HyperHandle {
+    abort_handle: AbortHandle,
+    scope_id: ScopeId,
+}
+
+impl HyperHandle {
+    pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+        Self { abort_handle, scope_id }
+    }
+}
+
+#[async_trait::async_trait]
+impl Shutdown for HyperHandle {
+    async fn shutdown(&self) {
+        self.abort_handle.abort();
+    }
+    fn scope_id(&self) -> ScopeId {
+        self.scope_id
+    }
+}
+
+pub struct HyperInbox {
+    pined_graceful: Option<Pin<Box<dyn futures::Future<Output = Result<(), hyper::Error>> + std::marker::Send + Sync + 'static>>>,
+}
+impl HyperInbox {
+    pub async fn ignite(&mut self) -> Result<(), hyper::Error> {
+        if let Some(server) = self.pined_graceful.take() {
+            server.await?
+        }
+        Ok(())
+    }
+}
+impl HyperInbox {
+    pub fn new(
+        pined_graceful: Pin<Box<dyn futures::Future<Output = Result<(), hyper::Error>> + std::marker::Send + Sync + 'static>>,
+    ) -> Self {
+        Self {
+            pined_graceful: Some(pined_graceful),
+        }
+    }
+}
 pub struct WsRxChannel(pub WsRx);
 
 #[derive(Clone)]
@@ -965,8 +1056,6 @@ impl Channel for WsRxChannel {
         (abortable_handle, abortable_inbox, abort_registration, None, None)
     }
 }
-
-/////////////////////
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;
