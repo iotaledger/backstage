@@ -6,18 +6,17 @@ struct HelloWorld;
 impl Actor for HelloWorld {
     type Channel = AbortableUnboundedChannel<String>;
     async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
-        // Add route to websocket routed message
         rt.add_route::<RouteMessage>().await.ok();
-        log::info!("HelloWorld: {}", rt.service().service_status());
+        log::info!("HelloWorld: {}", rt.service().status());
         Ok(())
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
-        log::info!("HelloWorld: {}", rt.service().service_status());
+        log::info!("HelloWorld: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("HelloWorld: Received {}", event);
         }
         rt.stop().await;
-        log::info!("HelloWorld: {}", rt.service().service_status());
+        log::info!("HelloWorld: {}", rt.service().status());
         Ok(())
     }
 }

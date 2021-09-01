@@ -1,13 +1,12 @@
 use super::{rt::Rt, ActorResult, Channel, Supervise};
 use async_trait::async_trait;
-use std::borrow::Cow;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor: Sized + Send + Sync + 'static {
     /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
     type Data: Send + Sync + 'static = ();
-    type Context<S: super::Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
+    type Context<S: Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
     /// Used to initialize the actor.

@@ -220,6 +220,9 @@ impl Actor for Websocket {
                 }
             }
         }
+        if let Some(root_handle) = self.link_to.take() {
+            root_handle.shutdown().await
+        }
         Ok(())
     }
 }

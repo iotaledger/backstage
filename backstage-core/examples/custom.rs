@@ -17,7 +17,7 @@ impl Actor for Incrementer {
             "scope_id: {}, {} is {}",
             rt.scope_id(),
             rt.service().actor_type_name(),
-            rt.service().service_status()
+            rt.service().status(),
         );
         // create atomic resource, and publish it
         let counter = Arc::new(AtomicIsize::new(0));
@@ -46,7 +46,7 @@ impl Actor for Decrementer {
             "scope_id: {}, {} is {}",
             rt.scope_id(),
             rt.service().actor_type_name(),
-            rt.service().service_status()
+            rt.service().status()
         );
         // link to the atomic resource under the following scope_id
         if let Some(resource_scope_id) = rt.highest_scope_id::<Self::Data>().await {
@@ -98,7 +98,7 @@ impl<T: Actor> EolEvent<T> for BackstageEvent {
 impl Actor for Backstage {
     type Channel = UnboundedChannel<BackstageEvent>;
     async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
-        log::info!("Backstage: {}", rt.service().service_status());
+        log::info!("Backstage: {}", rt.service().status());
         // build and spawn your apps actors using the rt
         // - build Incrementer
         let incrementer = Incrementer;
@@ -120,7 +120,7 @@ impl Actor for Backstage {
         Ok(())
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
-        log::info!("Backstage: {}", rt.service().service_status());
+        log::info!("Backstage: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 BackstageEvent::Shutdown => {
@@ -135,7 +135,7 @@ impl Actor for Backstage {
                         "Microservice: {}, dir: {:?}, status: {}",
                         service.actor_type_name(),
                         service.directory(),
-                        service.service_status()
+                        service.status()
                     );
                     rt.upsert_microservice(scope_id, service);
                     if rt.microservices_stopped() {
