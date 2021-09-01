@@ -933,13 +933,12 @@ impl Channel for TcpListenerStream {
 }
 
 pub struct HyperChannel<S> {
-    serve: S,
-    addr: std::net::SocketAddr,
+    server: hyper::Server<hyper::server::conn::AddrIncoming, S>,
 }
 
 impl<S: Send> HyperChannel<S> {
-    pub fn new(make_svc: S, addr: std::net::SocketAddr) -> Self {
-        Self { serve: make_svc, addr }
+    pub fn new(server: hyper::Server<hyper::server::conn::AddrIncoming, S>) -> Self {
+        Self { server }
     }
 }
 
@@ -968,10 +967,9 @@ where
         Option<Box<dyn Route<()>>>,
     ) {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let server = hyper::server::Server::bind(&self.addr).serve(self.serve);
         let f = futures::future::pending::<()>();
         let abortable = Abortable::new(f, abort_registration.clone());
-        let graceful = server.with_graceful_shutdown(async {
+        let graceful = self.server.with_graceful_shutdown(async {
             abortable.await.ok();
         });
         let hyper_handle = HyperHandle::new(abort_handle, scope_id);

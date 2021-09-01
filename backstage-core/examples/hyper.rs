@@ -82,7 +82,13 @@ impl Hyper {
 impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
     async fn build_channel(&mut self) -> Result<HyperChannel<MakeSvc>, Reason> {
         let make_svc = MakeSvc { counter: 81818 };
-        Ok(HyperChannel::new(make_svc, self.addr))
+        let server = hyper::Server::try_bind(&self.addr)
+            .map_err(|e| {
+                log::error!("{}", e);
+                Reason::Exit
+            })?
+            .serve(make_svc);
+        Ok(HyperChannel::new(server))
     }
 }
 #[async_trait::async_trait]
