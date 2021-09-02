@@ -1,9 +1,7 @@
 use super::{Actor, ScopeId};
 use ptree::TreeItem;
 use serde::{Deserialize, Serialize};
-use std::{
-    time::SystemTime,
-};
+use std::time::SystemTime;
 /// The possible statuses a service (application) can be
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
