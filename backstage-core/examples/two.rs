@@ -6,14 +6,17 @@ struct First;
 
 #[async_trait::async_trait]
 impl Actor for First {
-    type Channel = AbortableUnboundedChannel<(ScopeId, String)>;
+    type Channel = AbortableUnboundedChannel<String>;
     async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
         Ok(())
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
         while let Some(event) = rt.inbox_mut().next().await {
-            log::info!("First received from: ScopeId: {}, message: {}", event.0, event.1);
-            rt.send(event.0, "Hey Second".to_string()).await.ok();
+            log::info!("First received: {}", event);
+
+            if let Some(second_scope_id) = rt.sibling("second").scope_id().await {
+                rt.send(second_scope_id, "Hey second".to_string()).await.ok();
+            }
         }
         Ok(())
     }
@@ -33,8 +36,7 @@ impl Actor for Second {
         Err(Reason::Exit)
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, first_scope_id: Self::Data) -> ActorResult {
-        let my_scope_id = rt.scope_id();
-        rt.send(first_scope_id, (my_scope_id, "Hey first".to_string())).await.ok();
+        rt.send(first_scope_id, "Hey first".to_string()).await.ok();
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("Second received: {}", event);
         }
