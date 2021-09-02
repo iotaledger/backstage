@@ -231,6 +231,21 @@ where
     pub fn scope_id(&self) -> ScopeId {
         self.scope_id
     }
+    /// Return the actor parent's scope id
+    pub fn parent_id(&self) -> Option<ScopeId> {
+        self.parent_scope_id
+    }
+    pub async fn get_directory_scope_id(&self, parent_scope_id: ScopeId, dir_name: &String) -> Option<ScopeId> {
+        let scopes_index = parent_scope_id % *BACKSTAGE_PARTITIONS;
+        let lock = SCOPES[scopes_index].read().await;
+        if let Some(scope) = lock.get(&parent_scope_id) {
+            let dir_name = scope.active_directories.get(dir_name).and_then(|s| Some(s.to_owned()));
+            drop(lock);
+            dir_name
+        } else {
+            None
+        }
+    }
     pub async fn shutdown_scope(&self, scope_id: ScopeId) -> anyhow::Result<()>
     where
         Self: Send,

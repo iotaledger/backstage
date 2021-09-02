@@ -63,6 +63,7 @@ where
         log::info!("Hyper: {}", rt.service().status());
         if let Err(err) = rt.inbox_mut().ignite().await {
             log::error!("Hyper: {}", err);
+            return Err(Reason::Aborted);
         }
         Ok(())
     }
