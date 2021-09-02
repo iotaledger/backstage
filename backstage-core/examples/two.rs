@@ -27,11 +27,9 @@ impl Actor for Second {
     type Data = ScopeId;
     type Channel = AbortableUnboundedChannel<String>;
     async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
-        if let Some(parent_scope_id) = rt.parent_id() {
-            if let Some(first_scope_id) = rt.get_directory_scope_id(parent_scope_id, &"first".to_string()).await {
-                return Ok(first_scope_id);
-            }
-        }
+        if let Some(first_scope_id) = rt.sibling("first").scope_id().await {
+            return Ok(first_scope_id);
+        };
         Err(Reason::Exit)
     }
     async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, first_scope_id: Self::Data) -> ActorResult {
@@ -76,7 +74,7 @@ impl Actor for Backstage {
         // build and spawn your apps actors using the rt
         // - build First
         let first = First;
-        // start incrementer
+        // start first
         rt.start(Some("first".into()), first).await?;
         //
         // - build Second

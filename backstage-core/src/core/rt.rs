@@ -34,11 +34,107 @@ impl InitializedRx {
         Ok((self.0, service))
     }
 }
+enum Direction {
+    Child(String),
+    Parent,
+}
+pub struct LocateScopeId {
+    start: Option<ScopeId>,
+    directory_path: std::collections::VecDeque<Direction>,
+}
+
+impl LocateScopeId {
+    pub fn new() -> Self {
+        Self {
+            start: None,
+            directory_path: std::collections::VecDeque::new(),
+        }
+    }
+    pub fn with_scope_id(start: ScopeId) -> Self {
+        Self {
+            start: Some(start),
+            directory_path: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub fn child<D: Into<String>>(mut self, dir_name: D) -> Self {
+        self.directory_path.push_back(Direction::Child(dir_name.into()));
+        self
+    }
+    pub fn parent(mut self) -> Self {
+        self.directory_path.push_back(Direction::Parent);
+        self
+    }
+    pub fn grandparent(self) -> Self {
+        self.parent().parent()
+    }
+    /// Get the most recent scope_id
+    pub async fn scope_id(&self) -> Option<ScopeId> {
+        if let Some(start) = self.start.as_ref() {
+            let mut recent = *start;
+            let mut iter = self.directory_path.iter();
+            while let Some(dir_name) = iter.next() {
+                let scopes_index = recent % *BACKSTAGE_PARTITIONS;
+                match dir_name {
+                    Direction::Child(dir_name) => {
+                        let lock = SCOPES[scopes_index].read().await;
+                        if let Some(scope) = lock.get(&recent) {
+                            if let Some(scope_id) = scope.active_directories.get(dir_name) {
+                                recent = *scope_id;
+                                drop(lock);
+                                continue;
+                            } else {
+                                drop(lock);
+                                return None;
+                            }
+                        }
+                    }
+                    Direction::Parent => {
+                        let lock = SCOPES[scopes_index].read().await;
+                        if let Some(scope) = lock.get(&recent) {
+                            if let Some(scope_id) = scope.parent_id.as_ref() {
+                                recent = *scope_id;
+                                drop(lock);
+                                continue;
+                            } else {
+                                drop(lock);
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(recent)
+        } else {
+            None
+        }
+    }
+}
 
 impl<A: Actor, S: super::Supervise<A>> Rt<A, S>
 where
     Self: Send + Sync,
 {
+    pub fn child<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
+        let locate = LocateScopeId::with_scope_id(self.scope_id());
+        locate.child(dir_name)
+    }
+    pub fn parent(&self) -> LocateScopeId {
+        if let Some(parent_id) = self.parent_scope_id {
+            LocateScopeId::with_scope_id(parent_id)
+        } else {
+            LocateScopeId::new()
+        }
+    }
+    pub fn sibling<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
+        self.parent().child(dir_name)
+    }
+    pub fn grandparent(&self) -> LocateScopeId {
+        self.parent().parent()
+    }
+    pub fn uncle<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
+        self.parent().child(dir_name)
+    }
     pub fn abort_registration(&self) -> AbortRegistration {
         self.abort_registration.clone()
     }
