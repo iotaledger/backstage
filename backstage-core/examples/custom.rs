@@ -105,7 +105,7 @@ impl<S> Actor<S> for Backstage
 where
     S: Sup<Self>,
 {
-        type Data = ();
+    type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!("Backstage: {}", rt.service().status());
