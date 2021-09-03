@@ -80,7 +80,7 @@ impl Hyper {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
-    async fn build_channel(&mut self) -> Result<HyperChannel<MakeSvc>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<HyperChannel<MakeSvc>, Reason> {
         let make_svc = MakeSvc { counter: 81818 };
         let server = hyper::Server::try_bind(&self.addr)
             .map_err(|e| {
@@ -92,13 +92,21 @@ impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
     }
 }
 #[async_trait::async_trait]
-impl Actor for Hyper {
+impl<S> Actor<S> for Hyper
+where
+    S: Sup<Self>,
+{
+        type Data = ();
     type Channel = HyperChannel<MakeSvc>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason>
+
+    {
         log::info!("Hyper: {}", rt.service().status());
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult
+
+    {
         log::info!("Hyper: {}", rt.service().status());
         if let Err(err) = rt.inbox_mut().ignite().await {
             log::error!("Hyper: {}", err);

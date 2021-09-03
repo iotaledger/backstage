@@ -15,10 +15,7 @@ impl WebsocketListener {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<TcpListenerStream> for WebsocketListener {
-    async fn build_channel(&mut self) -> Result<TcpListenerStream, Reason>
-    where
-        Self: Actor<Channel = TcpListenerStream>,
-    {
+    async fn build_channel<S>(&mut self) -> Result<TcpListenerStream, Reason> {
         let listener = TcpListener::bind(self.addr).await.map_err(|e| {
             log::error!("{}", e);
             Reason::Exit
@@ -34,13 +31,13 @@ impl ChannelBuilder<TcpListenerStream> for WebsocketListener {
 }
 
 #[async_trait::async_trait]
-impl Actor for WebsocketListener {
-    type Context<S: Supervise<Self>> = Rt<Self, UnboundedHandle<WebsocketEvent>>;
+impl Actor<UnboundedHandle<WebsocketEvent>> for WebsocketListener {
+    type Data = ();
     type Channel = TcpListenerStream;
-    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, _rt: &mut Rt<Self, UnboundedHandle<WebsocketEvent>>) -> Result<Self::Data, Reason> {
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, UnboundedHandle<WebsocketEvent>>, _data: Self::Data) -> ActorResult {
         while let Some(r) = rt.inbox_mut().next().await {
             if let Ok(stream) = r {
                 rt.supervisor_handle().send(WebsocketEvent::TcpStream(stream)).ok();

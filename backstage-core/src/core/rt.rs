@@ -1,11 +1,13 @@
 use super::{
-    AbortRegistration, Abortable, Actor, ActorResult, Channel, Cleanup, CleanupData, Data, Reason, Resource, Route, Scope, ScopeId,
-    Service, ServiceStatus, Shutdown, Subscriber, Supervise, BACKSTAGE_PARTITIONS, SCOPES, VISIBLE_DATA,
+    AbortRegistration, Abortable, Actor, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data, NullSupervisor, Reason,
+    Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, Sup, BACKSTAGE_PARTITIONS, SCOPES, VISIBLE_DATA,
 };
+
+use crate::prefab::websocket::Websocket;
 
 use prometheus::core::Collector;
 use std::collections::HashMap;
-pub struct Rt<A: Actor, S: super::Supervise<A>>
+pub struct Rt<A: Actor<S>, S: Sup<A>>
 where
     Self: Send,
 {
@@ -111,7 +113,7 @@ impl LocateScopeId {
     }
 }
 
-impl<A: Actor, S: super::Supervise<A>> Rt<A, S>
+impl<A: Actor<S>, S: Sup<A>> Rt<A, S>
 where
     Self: Send + Sync,
 {
@@ -152,9 +154,8 @@ where
         child: Child,
     ) -> Result<<Child::Channel as Channel>::Handle, Reason>
     where
-        Child: Actor<Context<<A::Channel as Channel>::Handle> = Rt<Child, <A::Channel as Channel>::Handle>>
-            + super::ChannelBuilder<Child::Channel>,
-        <A::Channel as Channel>::Handle: super::Supervise<Child>,
+        Child: Actor<<A::Channel as Channel>::Handle> + super::ChannelBuilder<Child::Channel>,
+        <A::Channel as Channel>::Handle: Sup<Child>,
         Self: Send,
     {
         let (h, init_signal) = self.spawn(directory, child).await?;
@@ -171,13 +172,13 @@ where
         mut child: Child,
     ) -> Result<(<Child::Channel as Channel>::Handle, InitializedRx), Reason>
     where
-        Child: Actor<Context<<A::Channel as Channel>::Handle> = Rt<Child, <A::Channel as Channel>::Handle>>
-            + super::ChannelBuilder<Child::Channel>,
-        <A::Channel as Channel>::Handle: super::Supervise<Child>,
-        Self: Send,
+        <A::Channel as Channel>::Handle: Clone,
+        Child: super::ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel> + Actor<<A::Channel as Channel>::Handle>,
+        Dir: Into<Option<String>>,
+        <A::Channel as Channel>::Handle: Sup<Child>,
     {
         // try to create the actor's channel
-        let channel = child.build_channel().await?;
+        let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
         let parent_id = self.scope_id;
         let mut scopes_index;
         let mut child_scope_id;
@@ -187,7 +188,7 @@ where
         let mut metric;
         // create the service
         let mut dir = directory.into();
-        let mut service = Service::new::<Child>(dir.clone());
+        let mut service = Service::new::<Child, <A::Channel as Channel>::Handle>(dir.clone());
         loop {
             // generate unique scope_id
             child_scope_id = rand::random::<ScopeId>();
@@ -378,7 +379,10 @@ where
         }
     }
     /// Shutdown all the children of a given type within this actor context
-    pub async fn shutdown_children_type<T: Actor>(&mut self) {
+    pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(&mut self)
+    where
+        <A::Channel as Channel>::Handle: Sup<T>,
+    {
         // extract the scopes for a given type
         let mut iter = self.service.scopes_iter::<T>();
         while let Some(scope_id) = iter.next() {
@@ -487,7 +491,7 @@ where
     }
 }
 
-impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
+impl<A: Actor<S>, S: Sup<A>> Rt<A, S> {
     /// Create backstage context
     pub fn new(
         depth: usize,
@@ -534,7 +538,7 @@ impl<A: Actor, S: super::Supervise<A>> Rt<A, S> {
     }
 }
 
-impl<A: Actor, S: Supervise<A>> Rt<A, S> {
+impl<A: Actor<S>, S: Sup<A>> Rt<A, S> {
     /// Add exposed resource
     pub async fn add_resource<T: Resource>(&mut self, resource: T) {
         // publish the resource in the local scope data_store
@@ -898,39 +902,46 @@ impl<A: Actor, S: Supervise<A>> Rt<A, S> {
     }
 }
 
-pub struct Runtime<A: Actor> {
+pub struct Runtime<H> {
     join_handle: tokio::task::JoinHandle<()>,
-    handle: <A::Channel as Channel>::Handle,
+    handle: H,
     initialized_rx: Option<InitializedRx>,
     websocket_server: Option<Box<dyn Shutdown>>,
     websocket_join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl<A: Actor> Runtime<A> {
-    pub async fn new<T>(root_dir: T, child: A) -> Result<Self, Reason>
+impl<H> Runtime<H>
+where
+    H: Clone + Shutdown,
+{
+    pub async fn new<T, A>(root_dir: T, child: A) -> Result<Self, Reason>
     where
-        A: super::ChannelBuilder<A::Channel> + Actor<Context<super::NullSupervisor> = Rt<A, super::NullSupervisor>>,
+        A: super::ChannelBuilder<<A as Actor<super::NullSupervisor>>::Channel> + Actor<super::NullSupervisor>,
         T: Into<Option<String>>,
+        <A as Actor<super::NullSupervisor>>::Channel: Channel<Handle = H>,
+        H: Shutdown + Clone,
     {
         Self::with_supervisor(root_dir, child, super::NullSupervisor).await
     }
 
     /// Create new runtime
-    pub async fn with_supervisor<T, S>(dir: T, mut child: A, supervisor: S) -> Result<Self, Reason>
+    pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> Result<Self, Reason>
     where
-        A: super::ChannelBuilder<A::Channel> + Actor<Context<S> = Rt<A, S>>,
+        A: super::ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
-        S: super::Supervise<A>,
+        <A as Actor<S>>::Channel: Channel<Handle = H>,
+        S: Sup<A>,
+        H: Shutdown + Clone,
     {
         // try to create the actor's channel
-        let (handle, inbox, abort_registration, mut metric, mut route) = child.build_channel().await?.channel::<A>(0);
+        let (handle, inbox, abort_registration, mut metric, mut route) = child.build_channel::<S>().await?.channel::<A>(0);
         // this is the root runtime, so we are going to use 0 as the parent_id
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = 0;
         let child_scope_id = 0;
         // create the service
         let dir = dir.into();
-        let mut service = Service::new::<A>(dir.clone());
+        let mut service = Service::new::<A, S>(dir.clone());
         let mut lock = SCOPES[0].write().await;
         service.update_status(ServiceStatus::Initializing);
         let mut scope = Scope::new(None, shutdown_handle.clone());
@@ -999,29 +1010,30 @@ impl<A: Actor> Runtime<A> {
             websocket_join_handle: None,
         })
     }
-    pub fn handle(&self) -> &<A::Channel as Channel>::Handle {
+    pub fn handle(&self) -> &H {
         &self.handle
     }
-    pub fn handle_mut(&mut self) -> &<A::Channel as Channel>::Handle {
+    pub fn handle_mut(&mut self) -> &mut H {
         &mut self.handle
     }
-    pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason> {
-        use crate::{
-            core::{channel::ChannelBuilder, NullSupervisor},
-            prefab::websocket::Websocket,
-        };
+    pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason>
+    where
+        Websocket: Actor<NullSupervisor> + ChannelBuilder<<Websocket as Actor<NullSupervisor>>::Channel>,
+        <Websocket as Actor<NullSupervisor>>::Channel: Channel,
+    {
         let websocket_scope_id = 1;
         let mut websocket = Websocket::new(addr.clone()).link_to(Box::new(self.handle.clone()));
         if let Some(ttl) = ttl.take() {
             websocket = websocket.set_ttl(ttl);
         }
+        let built_channel = Websocket::build_channel::<NullSupervisor>(&mut websocket).await?;
         let (handle, inbox, abort_registration, mut metric, mut route) =
-            websocket.build_channel().await?.channel::<Websocket>(websocket_scope_id);
+            <Websocket as Actor<NullSupervisor>>::Channel::channel::<Websocket>(built_channel, websocket_scope_id);
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = websocket_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
         let dir_name: String = format!("ws@{}", addr);
-        let mut service = Service::new::<Websocket>(Some(dir_name));
+        let mut service = Service::new::<Websocket, NullSupervisor>(Some(dir_name));
         let mut lock = SCOPES[scopes_index].write().await;
         service.update_status(ServiceStatus::Initializing);
         let mut scope = Scope::new(None, shutdown_handle.clone());
@@ -1114,14 +1126,18 @@ mod tests {
         }
     }
     #[async_trait::async_trait]
-    impl Actor for Backstage {
+    impl<S> Actor<S> for Backstage
+    where
+        S: Sup<Self>,
+    {
+        type Data = ();
         type Channel = UnboundedChannel<BackstageEvent>;
-        async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+        async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
             // build and spawn your apps actors using the rt
             rt.handle().shutdown().await;
             Ok(())
         }
-        async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
+        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
             while let Some(event) = rt.inbox_mut().next().await {
                 match event {
                     BackstageEvent::Shutdown => {

@@ -133,15 +133,16 @@ where
 /// Defines a channel which becomes a sender and receiver half
 #[async_trait]
 pub trait Channel: Send + Sized {
+    /// The channel Event type
     type Event: Send;
     /// The sender half of the channel
     type Handle: Send + Clone + super::Shutdown;
     /// The receiver half of the channel
     type Inbox: Send + Sync;
     /// Metric Collector
-    type Metric: Collector + Clone = prometheus::IntGauge;
+    type Metric: Collector + Clone;
     /// Create a sender and receiver of the appropriate types
-    fn channel<T: Actor>(
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -159,9 +160,10 @@ pub trait Channel: Send + Sized {
 
 #[async_trait::async_trait]
 pub trait ChannelBuilder<C: Channel> {
-    async fn build_channel(&mut self) -> Result<C, Reason>
+    async fn build_channel<S>(&mut self) -> Result<C, Reason>
     where
-        Self: Actor<Channel = C>;
+        Self: Actor<S, Channel = C>,
+        S: Sup<Self>;
 }
 
 #[async_trait::async_trait]
@@ -259,21 +261,15 @@ impl<T> UnboundedHandle<T> {
 }
 
 #[async_trait::async_trait]
-impl<A, T: EolEvent<A> + ReportEvent<A, Service>> Supervise<A> for UnboundedHandle<T>
-where
-    A: Actor,
-{
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for UnboundedHandle<T> {
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
     }
 }
 
 #[async_trait::async_trait]
-impl<A, T: ReportEvent<A, D>, D: Send + 'static> Report<A, D> for UnboundedHandle<T>
-where
-    A: Actor,
-{
-    async fn report(&self, scope_id: ScopeId, data: D) -> Option<()> {
+impl<A: Send + 'static, T: ReportEvent<A>> Report<A> for UnboundedHandle<T> {
+    async fn report(&self, scope_id: ScopeId, data: Service) -> Option<()> {
         self.send(T::report_event(scope_id, data)).ok()
     }
 }
@@ -281,9 +277,9 @@ where
 #[async_trait::async_trait]
 impl<E: ShutdownEvent + 'static, T> ChannelBuilder<UnboundedChannel<E>> for T
 where
-    T: Actor<Channel = UnboundedChannel<E>>,
+    T: Send,
 {
-    async fn build_channel(&mut self) -> Result<UnboundedChannel<E>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<UnboundedChannel<E>, Reason> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(UnboundedChannel {
@@ -299,7 +295,8 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
     type Event = E;
     type Handle = UnboundedHandle<E>;
     type Inbox = UnboundedInbox<E>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -310,7 +307,12 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
         Option<Box<dyn Route<Self::Event>>>,
     ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
-        let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
+        let metric_helper_name = format!(
+            "ScopeId: {}, Actor: {}, Channel: {}",
+            scope_id,
+            std::any::type_name::<T>(),
+            Self::type_name()
+        );
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
@@ -370,9 +372,9 @@ pub struct AbortableUnboundedChannel<E> {
 }
 
 #[async_trait::async_trait]
-impl<A, T: EolEvent<A> + ReportEvent<A, Service>> Supervise<A> for AbortableUnboundedHandle<T>
+impl<A, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableUnboundedHandle<T>
 where
-    A: Actor,
+    A: Actor<Self>,
 {
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
@@ -380,21 +382,22 @@ where
 }
 
 #[async_trait::async_trait]
-impl<A, T: ReportEvent<A, D>, D: Send + 'static> Report<A, D> for AbortableUnboundedHandle<T>
+impl<A, T: ReportEvent<A>> Report<A> for AbortableUnboundedHandle<T>
 where
-    A: Actor,
+    A: Actor<Self>,
+    T: EolEvent<A>,
 {
-    async fn report(&self, scope_id: ScopeId, data: D) -> Option<()> {
-        self.send(T::report_event(scope_id, data)).ok()
+    async fn report(&self, scope_id: ScopeId, service: Service) -> Option<()> {
+        self.send(T::report_event(scope_id, service)).ok()
     }
 }
 
 #[async_trait::async_trait]
 impl<E: Send + 'static, T> ChannelBuilder<AbortableUnboundedChannel<E>> for T
 where
-    T: Actor<Channel = AbortableUnboundedChannel<E>>,
+    T: Send,
 {
-    async fn build_channel(&mut self) -> Result<AbortableUnboundedChannel<E>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<AbortableUnboundedChannel<E>, Reason> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableUnboundedChannel {
@@ -464,7 +467,8 @@ impl<E: Send + 'static> Channel for AbortableUnboundedChannel<E> {
     type Event = E;
     type Handle = AbortableUnboundedHandle<E>;
     type Inbox = AbortableUnboundedInbox<E>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -475,7 +479,12 @@ impl<E: Send + 'static> Channel for AbortableUnboundedChannel<E> {
         Option<Box<dyn Route<E>>>,
     ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
-        let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
+        let metric_helper_name = format!(
+            "ScopeId: {}, Actor: {}, Channel: {}",
+            scope_id,
+            std::any::type_name::<T>(),
+            Self::type_name()
+        );
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
@@ -638,9 +647,9 @@ impl<T> BoundedHandle<T> {
 }
 
 #[async_trait::async_trait]
-impl<A, T: EolEvent<A> + ReportEvent<A, Service>> Supervise<A> for AbortableBoundedHandle<T>
+impl<A, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableBoundedHandle<T>
 where
-    A: Actor,
+    A: Actor<Self>,
 {
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).await.ok()
@@ -648,21 +657,22 @@ where
 }
 
 #[async_trait::async_trait]
-impl<A, T: ReportEvent<A, D>, D: Send + 'static> Report<A, D> for AbortableBoundedHandle<T>
+impl<A, T: ReportEvent<A>> Report<A> for AbortableBoundedHandle<T>
 where
-    A: Actor,
+    A: Actor<Self>,
+    T: EolEvent<A>,
 {
-    async fn report(&self, scope_id: ScopeId, data: D) -> Option<()> {
-        self.send(T::report_event(scope_id, data)).await.ok()
+    async fn report(&self, scope_id: ScopeId, service: Service) -> Option<()> {
+        self.send(T::report_event(scope_id, service)).await.ok()
     }
 }
 
 #[async_trait::async_trait]
 impl<E: ShutdownEvent + 'static, T, const C: usize> ChannelBuilder<BoundedChannel<E, C>> for T
 where
-    T: Actor<Channel = UnboundedChannel<E>>,
+    T: Send,
 {
-    async fn build_channel(&mut self) -> Result<BoundedChannel<E, C>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<BoundedChannel<E, C>, Reason> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(BoundedChannel {
@@ -678,7 +688,8 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
     type Event = E;
     type Handle = BoundedHandle<E>;
     type Inbox = BoundedInbox<E>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -689,7 +700,12 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
         Option<Box<dyn Route<E>>>,
     ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
-        let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
+        let metric_helper_name = format!(
+            "ScopeId: {}, Actor: {}, Channel: {}",
+            scope_id,
+            std::any::type_name::<T>(),
+            Self::type_name()
+        );
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
@@ -767,9 +783,9 @@ pub struct AbortableBoundedInbox<T> {
 #[async_trait::async_trait]
 impl<E: Send + 'static, T, const C: usize> ChannelBuilder<AbortableBoundedChannel<E, C>> for T
 where
-    T: Actor<Channel = AbortableUnboundedChannel<E>>,
+    T: Send,
 {
-    async fn build_channel(&mut self) -> Result<AbortableBoundedChannel<E, C>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<AbortableBoundedChannel<E, C>, Reason> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableBoundedChannel {
@@ -839,7 +855,8 @@ impl<E: Send + 'static, const C: usize> Channel for AbortableBoundedChannel<E, C
     type Event = E;
     type Handle = AbortableBoundedHandle<E>;
     type Inbox = AbortableBoundedInbox<E>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -850,7 +867,12 @@ impl<E: Send + 'static, const C: usize> Channel for AbortableBoundedChannel<E, C
         Option<Box<dyn Route<E>>>,
     ) {
         let metric_fq_name = format!("ScopeId:{}", scope_id);
-        let metric_helper_name = format!("ScopeId: {}, Actor: {}, Channel: {}", scope_id, T::type_name(), Self::type_name());
+        let metric_helper_name = format!(
+            "ScopeId: {}, Actor: {}, Channel: {}",
+            scope_id,
+            std::any::type_name::<T>(),
+            Self::type_name()
+        );
         let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
@@ -915,7 +937,8 @@ impl Channel for TcpListenerStream {
     type Event = ();
     type Handle = TcpListenerHandle;
     type Inbox = Abortable<TcpListenerStream>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -956,7 +979,8 @@ where
     type Event = ();
     type Handle = HyperHandle;
     type Inbox = HyperInbox;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -1038,7 +1062,8 @@ impl Channel for WsRxChannel {
     type Event = ();
     type Handle = WsRxHandle;
     type Inbox = Abortable<WsRx>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -1073,9 +1098,9 @@ impl IntervalHandle {
 #[async_trait::async_trait]
 impl<T, const I: u64> ChannelBuilder<IntervalChannel<I>> for T
 where
-    T: Actor<Channel = IntervalChannel<I>>,
+    T: Send,
 {
-    async fn build_channel(&mut self) -> Result<IntervalChannel<I>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<IntervalChannel<I>, Reason> {
         Ok(IntervalChannel::<I>)
     }
 }
@@ -1084,7 +1109,8 @@ impl<const I: u64> Channel for IntervalChannel<I> {
     type Event = std::time::Instant;
     type Handle = IntervalHandle;
     type Inbox = Abortable<IntervalStream>;
-    fn channel<T: Actor>(
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
         self,
         scope_id: ScopeId,
     ) -> (
@@ -1104,6 +1130,62 @@ impl<const I: u64> Channel for IntervalChannel<I> {
 
 #[async_trait::async_trait]
 impl super::Shutdown for IntervalHandle {
+    async fn shutdown(&self) {
+        self.abort_handle.abort();
+    }
+    fn scope_id(&self) -> ScopeId {
+        self.scope_id
+    }
+}
+
+#[async_trait::async_trait]
+impl<T> ChannelBuilder<NullChannel> for T
+where
+    T: Send,
+{
+    async fn build_channel<S>(&mut self) -> Result<NullChannel, Reason> {
+        Ok(NullChannel)
+    }
+}
+
+pub struct NullChannel;
+pub struct NullInbox;
+
+#[derive(Clone)]
+pub struct NullHandle {
+    scope_id: ScopeId,
+    abort_handle: AbortHandle,
+}
+
+impl NullHandle {
+    pub fn new(scope_id: ScopeId, abort_handle: AbortHandle) -> Self {
+        Self { scope_id, abort_handle }
+    }
+}
+
+impl Channel for NullChannel {
+    type Event = ();
+    type Handle = NullHandle;
+    type Inbox = NullInbox;
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<Self::Event>>>,
+    ) {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let null_handle = NullHandle::new(scope_id, abort_handle);
+        (null_handle, NullInbox, abort_registration, None, None)
+    }
+}
+
+#[async_trait::async_trait]
+impl super::Shutdown for NullHandle {
     async fn shutdown(&self) {
         self.abort_handle.abort();
     }

@@ -3,14 +3,18 @@ use backstage::{core::*, prefab::websocket::RouteMessage};
 struct HelloWorld;
 
 #[async_trait::async_trait]
-impl Actor for HelloWorld {
+impl<S> Actor<S> for HelloWorld
+where
+    S: Sup<Self>,
+{
+    type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         rt.add_route::<RouteMessage>().await.ok();
         log::info!("HelloWorld: {}", rt.service().status());
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
         log::info!("HelloWorld: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("HelloWorld: Received {}", event);

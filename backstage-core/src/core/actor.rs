@@ -1,22 +1,17 @@
-use super::{rt::Rt, ActorResult, Channel, Supervise};
+use super::{rt::Rt, ActorResult, Channel, Sup};
 use async_trait::async_trait;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor: Sized + Send + Sync + 'static {
-    /// Allows specifying an actor's startup dependencies. Ex. (Act<OtherActor>, Res<MyResource>)
-    type Data: Send + Sync + 'static = ();
-    type Context<S: Supervise<Self>>: Send + 'static + Sync = Rt<Self, S>;
+pub trait Actor<S: Sup<Self>>: Sized + Send + Sync + 'static {
+    /// Allows specifying an actor's startup dependencies.
+    type Data: Send + Sync + 'static;
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
     /// Used to initialize the actor.
-    async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, super::Reason>
-    where
-        S: super::Supervise<Self>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, super::Reason>;
     /// The main function for the actor
-    async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Data) -> ActorResult
-    where
-        S: super::Supervise<Self>;
+    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult;
     /// Get this actor's type name
     fn type_name() -> &'static str {
         std::any::type_name::<Self>()
@@ -39,20 +34,17 @@ pub trait ShutdownEvent: Send {
 // Null supervisor
 pub struct NullSupervisor;
 #[async_trait::async_trait]
-impl<T: Send> super::Supervise<T> for NullSupervisor {
+impl<T: Send + 'static> Sup<T> for NullSupervisor {
     // End of life for Actor of type T, invoked on shutdown.
-    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, r: super::ActorResult) -> Option<()>
-    where
-        T: super::Actor,
-    {
+    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, r: super::ActorResult) -> Option<()> {
         Some(())
     }
 }
 
 #[async_trait::async_trait]
-impl<T: Send> super::Report<T, super::Service> for NullSupervisor {
+impl<T: Send> super::Report<T> for NullSupervisor {
     /// Report any status & service changes
-    async fn report(&self, scope_id: super::ScopeId, _service: super::Service) -> Option<()> {
+    async fn report(&self, _scope_id: super::ScopeId, _service: super::Service) -> Option<()> {
         Some(())
     }
 }
@@ -60,22 +52,20 @@ impl<T: Send> super::Report<T, super::Service> for NullSupervisor {
 // test
 #[cfg(test)]
 mod tests {
-    use crate::core::{Actor, ActorResult, IntervalChannel, Reason, StreamExt};
+    use crate::core::{Actor, ActorResult, IntervalChannel, Reason, Rt, StreamExt};
 
     struct PrintHelloEveryFewMs;
     #[async_trait::async_trait]
-    impl Actor for PrintHelloEveryFewMs {
+    impl<S> Actor<S> for PrintHelloEveryFewMs
+    where
+        S: super::Sup<Self>,
+    {
+        type Data = ();
         type Channel = IntervalChannel<100>;
-        async fn init<S>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason>
-        where
-            S: super::Supervise<Self>,
-        {
+        async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
             Ok(())
         }
-        async fn run<S>(&mut self, rt: &mut Self::Context<S>, deps: Self::Data) -> ActorResult
-        where
-            S: super::Supervise<Self>,
-        {
+        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
             while let Some(_) = rt.inbox_mut().next().await {
                 println!("HelloWorld")
             }

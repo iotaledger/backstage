@@ -9,10 +9,13 @@ use std::sync::{
 struct Incrementer;
 
 #[async_trait::async_trait]
-impl Actor for Incrementer {
+impl<S> Actor<S> for Incrementer
+where
+    S: Sup<Self>,
+{
     type Data = Arc<AtomicIsize>;
     type Channel = IntervalChannel<1000>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!(
             "scope_id: {}, {} is {}",
             rt.scope_id(),
@@ -24,7 +27,7 @@ impl Actor for Incrementer {
         rt.add_resource(counter.clone()).await;
         Ok(counter)
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, counter: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult {
         while let Some(_instant) = rt.inbox_mut().next().await {
             // increment the counter
             let old_counter = counter.fetch_add(1, Ordering::Relaxed);
@@ -38,10 +41,13 @@ impl Actor for Incrementer {
 struct Decrementer;
 
 #[async_trait::async_trait]
-impl Actor for Decrementer {
+impl<S> Actor<S> for Decrementer
+where
+    S: Sup<Self>,
+{
     type Data = Arc<AtomicIsize>;
     type Channel = IntervalChannel<1000>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!(
             "scope_id: {}, {} is {}",
             rt.scope_id(),
@@ -59,7 +65,7 @@ impl Actor for Decrementer {
             Err(Reason::Exit)
         }
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, counter: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult {
         while let Some(_instant) = rt.inbox_mut().next().await {
             // decrement the counter
             let old_counter = counter.fetch_sub(1, Ordering::Relaxed);
@@ -82,12 +88,12 @@ impl ShutdownEvent for BackstageEvent {
         Self::Shutdown
     }
 }
-impl<T: Actor> ReportEvent<T, Service> for BackstageEvent {
+impl<T> ReportEvent<T> for BackstageEvent {
     fn report_event(scope_id: ScopeId, service: Service) -> Self {
         Self::Microservice(scope_id, service)
     }
 }
-impl<T: Actor> EolEvent<T> for BackstageEvent {
+impl<T> EolEvent<T> for BackstageEvent {
     fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult) -> Self {
         Self::Microservice(scope_id, service)
     }
@@ -95,9 +101,13 @@ impl<T: Actor> EolEvent<T> for BackstageEvent {
 ///// All of these should be implemented using proc_macro or some macro end ///////
 
 #[async_trait::async_trait]
-impl Actor for Backstage {
+impl<S> Actor<S> for Backstage
+where
+    S: Sup<Self>,
+{
+        type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!("Backstage: {}", rt.service().status());
         // build and spawn your apps actors using the rt
         // - build Incrementer
@@ -119,7 +129,7 @@ impl Actor for Backstage {
         })?;
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult {
         log::info!("Backstage: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             match event {

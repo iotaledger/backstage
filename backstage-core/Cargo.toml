@@ -45,7 +45,5 @@ log = "0.4"
 url = "2.2"
 
 [features]
-default = ["launcher", "prefabs", "rand_pool"]
-launcher = ["log"]
+default = ["log", "prefabs", "rand"]
 prefabs = ["tokio/net", "futures-util", "tokio-tungstenite"]
-rand_pool = ["rand"]

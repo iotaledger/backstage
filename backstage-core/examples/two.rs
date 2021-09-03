@@ -5,15 +5,18 @@ use backstage::core::*;
 struct First;
 
 #[async_trait::async_trait]
-impl Actor for First {
+impl<S> Actor<S> for First
+where
+    S: Sup<Self>,
+{
+    type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("First received: {}", event);
-
             if let Some(second_scope_id) = rt.sibling("second").scope_id().await {
                 rt.send(second_scope_id, "Hey second".to_string()).await.ok();
             }
@@ -26,16 +29,19 @@ impl Actor for First {
 struct Second;
 
 #[async_trait::async_trait]
-impl Actor for Second {
+impl<S> Actor<S> for Second
+where
+    S: Sup<Self>,
+{
     type Data = ScopeId;
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         if let Some(first_scope_id) = rt.sibling("first").scope_id().await {
             return Ok(first_scope_id);
         };
         Err(Reason::Exit)
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, first_scope_id: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, first_scope_id: Self::Data) -> ActorResult {
         rt.send(first_scope_id, "Hey first".to_string()).await.ok();
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("Second received: {}", event);
@@ -56,12 +62,12 @@ impl ShutdownEvent for BackstageEvent {
         Self::Shutdown
     }
 }
-impl<T: Actor> ReportEvent<T, Service> for BackstageEvent {
+impl<T> ReportEvent<T> for BackstageEvent {
     fn report_event(scope_id: ScopeId, service: Service) -> Self {
         Self::Microservice(scope_id, service)
     }
 }
-impl<T: Actor> EolEvent<T> for BackstageEvent {
+impl<T> EolEvent<T> for BackstageEvent {
     fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult) -> Self {
         Self::Microservice(scope_id, service)
     }
@@ -69,9 +75,13 @@ impl<T: Actor> EolEvent<T> for BackstageEvent {
 ///// All of these should be implemented using proc_macro or some macro end ///////
 
 #[async_trait::async_trait]
-impl Actor for Backstage {
+impl<S> Actor<S> for Backstage
+where
+    S: Sup<Self>,
+{
+    type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!("Backstage: {}", rt.service().status());
         // build and spawn your apps actors using the rt
         // - build First
@@ -85,7 +95,7 @@ impl Actor for Backstage {
         rt.start(Some("second".into()), second).await?;
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult {
         log::info!("Backstage: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             match event {

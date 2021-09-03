@@ -71,7 +71,7 @@ pub struct ServiceScopesIterator<'a> {
     inner: std::collections::hash_map::Iter<'a, ScopeId, Service>,
 }
 impl<'a> ServiceScopesIterator<'a> {
-    fn new<T: Actor>(iter: std::collections::hash_map::Iter<'a, ScopeId, Service>) -> Self {
+    fn new<T: 'static>(iter: std::collections::hash_map::Iter<'a, ScopeId, Service>) -> Self {
         Self {
             actor_type_id: std::any::TypeId::of::<T>(),
             inner: iter,
@@ -94,7 +94,7 @@ impl<'a> Iterator for ServiceScopesIterator<'a> {
 
 impl Service {
     /// Create a new Service
-    pub fn new<A: Actor>(directory: Option<String>) -> Self {
+    pub fn new<A: Actor<S>, S: Sup<A>>(directory: Option<String>) -> Self {
         Self {
             actor_type_id: std::any::TypeId::of::<A>(),
             actor_type_name: A::type_name(),
@@ -106,7 +106,7 @@ impl Service {
         }
     }
     /// Create scopes iterator for a the provided Child type
-    pub fn scopes_iter<'a, Child: Actor>(&'a self) -> ServiceScopesIterator<'a> {
+    pub fn scopes_iter<'a, Child: 'static>(&'a self) -> ServiceScopesIterator<'a> {
         ServiceScopesIterator::new::<Child>(self.microservices.iter())
     }
     /// Return the actor type id
@@ -135,7 +135,7 @@ impl Service {
         self.downtime_ms = downtime_ms;
         self
     }
-    pub fn is_type<T: Actor>(&self) -> bool {
+    pub fn is_type<T: 'static>(&self) -> bool {
         let is_type_id = std::any::TypeId::of::<T>();
         self.actor_type_id == is_type_id
     }
@@ -212,24 +212,27 @@ impl std::fmt::Display for Service {
 }
 
 #[async_trait::async_trait]
-pub trait Supervise<T: Send>: Report<T, Service> + 'static + Send + Sized + Sync {
+pub trait Sup<T: Send>: Report<T> + 'static + Send + Sized + Sync {
     /// Report End of life for a T actor
     /// return Some(()) if the report success
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: T, r: super::ActorResult) -> Option<()>
     where
-        T: super::Actor;
+        T: Actor<Self>;
 }
 
 #[async_trait::async_trait]
-pub trait Report<T: Send, D: Send>: Send + Sized + 'static {
+pub trait Report<T: Send>: Send + Sized + 'static {
     /// Report any status & service changes
     /// return Some(()) if the report success
-    async fn report(&self, scope_id: super::ScopeId, data: D) -> Option<()>;
+    async fn report(&self, scope_id: super::ScopeId, service: Service) -> Option<()>
+    where
+        T: Actor<Self>,
+        Self: Sup<T>;
 }
 
 /// Ideally it should be implemented using proc_macro on the event type
-pub trait ReportEvent<T, D>: Send + 'static {
-    fn report_event(scope: super::ScopeId, data: D) -> Self;
+pub trait ReportEvent<T>: Send + 'static {
+    fn report_event(scope: super::ScopeId, service: Service) -> Self;
 }
 
 /// Ideally it should be implemented using proc_macro on the event type

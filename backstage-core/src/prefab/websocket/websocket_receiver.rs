@@ -21,10 +21,7 @@ impl WebsocketReceiver {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
-    async fn build_channel(&mut self) -> Result<WsRxChannel, Reason>
-    where
-        Self: Actor<Channel = WsRxChannel>,
-    {
+    async fn build_channel<S>(&mut self) -> Result<WsRxChannel, Reason> {
         if let Some(stream) = self.split_stream.take() {
             Ok(WsRxChannel(stream))
         } else {
@@ -34,12 +31,16 @@ impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
 }
 
 #[async_trait::async_trait]
-impl Actor for WebsocketReceiver {
+impl<S> Actor<S> for WebsocketReceiver
+where
+    S: Sup<Self>,
+{
+    type Data = ();
     type Channel = WsRxChannel;
-    async fn init<S: Supervise<Self>>(&mut self, _rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
         while let Some(Ok(message)) = rt.inbox_mut().next().await {
             // Deserialize message::text
             match message {

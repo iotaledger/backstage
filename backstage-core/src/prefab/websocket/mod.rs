@@ -158,13 +158,13 @@ pub enum WebsocketEvent {
     TcpStream(tokio::net::TcpStream),
 }
 
-impl<T: Actor> ReportEvent<T, Service> for WebsocketEvent {
+impl<T> ReportEvent<T> for WebsocketEvent {
     fn report_event(scope_id: ScopeId, service: Service) -> Self {
         Self::Microservice(scope_id, service, None)
     }
 }
 
-impl<T: Actor> EolEvent<T> for WebsocketEvent {
+impl<T> EolEvent<T> for WebsocketEvent {
     fn eol_event(scope_id: ScopeId, service: Service, _actor: T, r: ActorResult) -> Self {
         Self::Microservice(scope_id, service, Some(r))
     }
@@ -177,14 +177,21 @@ impl ShutdownEvent for WebsocketEvent {
 }
 
 #[async_trait::async_trait]
-impl Actor for Websocket {
+impl<S: Sup<Self>> Actor<S> for Websocket {
+    type Data = ();
     type Channel = UnboundedChannel<WebsocketEvent>;
-    async fn init<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason>
+    where
+        S: Sup<Self>,
+    {
         let listener = WebsocketListener::new(self.addr, self.ttl);
         rt.start(None, listener).await?;
         Ok(())
     }
-    async fn run<S: Supervise<Self>>(&mut self, rt: &mut Self::Context<S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult
+    where
+        S: Sup<Self>,
+    {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 WebsocketEvent::Shutdown => {
