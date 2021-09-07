@@ -49,7 +49,7 @@ where
         Ok(())
     }
 }
-// The root custome actor, equivalent to a launcher;
+// The root custom actor, equivalent to a launcher;
 struct Backstage;
 enum BackstageEvent {
     Shutdown,

@@ -213,6 +213,7 @@ impl std::fmt::Display for Service {
 
 #[async_trait::async_trait]
 pub trait Sup<T: Send>: Report<T> + 'static + Send + Sized + Sync {
+    type Event;
     /// Report End of life for a T actor
     /// return Some(()) if the report success
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: T, r: super::ActorResult) -> Option<()>

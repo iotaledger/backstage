@@ -262,6 +262,7 @@ impl<T> UnboundedHandle<T> {
 
 #[async_trait::async_trait]
 impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for UnboundedHandle<T> {
+    type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
     }
@@ -372,21 +373,15 @@ pub struct AbortableUnboundedChannel<E> {
 }
 
 #[async_trait::async_trait]
-impl<A, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableUnboundedHandle<T>
-where
-    A: Actor<Self>,
-{
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableUnboundedHandle<T> {
+    type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
     }
 }
 
 #[async_trait::async_trait]
-impl<A, T: ReportEvent<A>> Report<A> for AbortableUnboundedHandle<T>
-where
-    A: Actor<Self>,
-    T: EolEvent<A>,
-{
+impl<A: Send + 'static, T: ReportEvent<A>> Report<A> for AbortableUnboundedHandle<T> {
     async fn report(&self, scope_id: ScopeId, service: Service) -> Option<()> {
         self.send(T::report_event(scope_id, service)).ok()
     }
@@ -647,21 +642,15 @@ impl<T> BoundedHandle<T> {
 }
 
 #[async_trait::async_trait]
-impl<A, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableBoundedHandle<T>
-where
-    A: Actor<Self>,
-{
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableBoundedHandle<T> {
+    type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).await.ok()
     }
 }
 
 #[async_trait::async_trait]
-impl<A, T: ReportEvent<A>> Report<A> for AbortableBoundedHandle<T>
-where
-    A: Actor<Self>,
-    T: EolEvent<A>,
-{
+impl<A: Send + 'static, T: ReportEvent<A>> Report<A> for AbortableBoundedHandle<T> {
     async fn report(&self, scope_id: ScopeId, service: Service) -> Option<()> {
         self.send(T::report_event(scope_id, service)).await.ok()
     }

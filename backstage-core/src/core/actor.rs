@@ -35,6 +35,7 @@ pub trait ShutdownEvent: Send {
 pub struct NullSupervisor;
 #[async_trait::async_trait]
 impl<T: Send + 'static> Sup<T> for NullSupervisor {
+    type Event = ();
     // End of life for Actor of type T, invoked on shutdown.
     async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, r: super::ActorResult) -> Option<()> {
         Some(())
