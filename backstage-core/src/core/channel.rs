@@ -163,7 +163,7 @@ pub trait ChannelBuilder<C: Channel> {
     async fn build_channel<S>(&mut self) -> Result<C, Reason>
     where
         Self: Actor<S, Channel = C>,
-        S: Sup<Self>;
+        S: SupHandle<Self>;
 }
 
 #[async_trait::async_trait]
@@ -261,7 +261,7 @@ impl<T> UnboundedHandle<T> {
 }
 
 #[async_trait::async_trait]
-impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for UnboundedHandle<T> {
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for UnboundedHandle<T> {
     type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
@@ -373,7 +373,7 @@ pub struct AbortableUnboundedChannel<E> {
 }
 
 #[async_trait::async_trait]
-impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableUnboundedHandle<T> {
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for AbortableUnboundedHandle<T> {
     type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
@@ -642,7 +642,7 @@ impl<T> BoundedHandle<T> {
 }
 
 #[async_trait::async_trait]
-impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> Sup<A> for AbortableBoundedHandle<T> {
+impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for AbortableBoundedHandle<T> {
     type Event = T;
     async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).await.ok()

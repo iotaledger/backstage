@@ -24,9 +24,9 @@ impl ShutdownEvent for WebsocketSenderEvent {
 }
 
 #[async_trait::async_trait]
-impl<S: Sup<Self>> Actor<S> for WebsocketSender
+impl<S> Actor<S> for WebsocketSender
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = UnboundedChannel<WebsocketSenderEvent>;

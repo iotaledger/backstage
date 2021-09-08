@@ -94,7 +94,7 @@ impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
 #[async_trait::async_trait]
 impl<S> Actor<S> for Hyper
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = HyperChannel<MakeSvc>;

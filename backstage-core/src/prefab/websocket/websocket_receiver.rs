@@ -33,7 +33,7 @@ impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
 #[async_trait::async_trait]
 impl<S> Actor<S> for WebsocketReceiver
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = WsRxChannel;

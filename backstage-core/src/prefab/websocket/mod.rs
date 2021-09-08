@@ -177,20 +177,17 @@ impl ShutdownEvent for WebsocketEvent {
 }
 
 #[async_trait::async_trait]
-impl<S: Sup<Self>> Actor<S> for Websocket {
+impl<S: SupHandle<Self>> Actor<S> for Websocket {
     type Data = ();
     type Channel = UnboundedChannel<WebsocketEvent>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason>
-    where
-        S: Sup<Self>,
-    {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         let listener = WebsocketListener::new(self.addr, self.ttl);
         rt.start(None, listener).await?;
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult
     where
-        S: Sup<Self>,
+        S: SupHandle<Self>,
     {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {

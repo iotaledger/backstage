@@ -7,7 +7,7 @@ struct First;
 #[async_trait::async_trait]
 impl<S> Actor<S> for First
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
@@ -31,7 +31,7 @@ struct Second;
 #[async_trait::async_trait]
 impl<S> Actor<S> for Second
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ScopeId;
     type Channel = AbortableUnboundedChannel<String>;
@@ -77,7 +77,7 @@ impl<T> EolEvent<T> for BackstageEvent {
 #[async_trait::async_trait]
 impl<S> Actor<S> for Backstage
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;

@@ -1,9 +1,9 @@
-use super::{rt::Rt, ActorResult, Channel, Sup};
+use super::{rt::Rt, ActorResult, Channel, SupHandle};
 use async_trait::async_trait;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor<S: Sup<Self>>: Sized + Send + Sync + 'static {
+pub trait Actor<S: SupHandle<Self>>: Sized + Send + Sync + 'static {
     /// Allows specifying an actor's startup dependencies.
     type Data: Send + Sync + 'static;
     /// The type of channel this actor will use to receive events
@@ -27,17 +27,19 @@ pub trait Shutdown: Send + 'static + Sync + dyn_clone::DynClone {
 
 dyn_clone::clone_trait_object!(Shutdown);
 
+/// Defines the Shutdown event variant
 pub trait ShutdownEvent: Send {
+    /// Return Shutdown variant
     fn shutdown_event() -> Self;
 }
 
-// Null supervisor
+/// Null supervisor, with no-ops
 pub struct NullSupervisor;
 #[async_trait::async_trait]
-impl<T: Send + 'static> Sup<T> for NullSupervisor {
+impl<T: Send + 'static> SupHandle<T> for NullSupervisor {
     type Event = ();
     // End of life for Actor of type T, invoked on shutdown.
-    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, r: super::ActorResult) -> Option<()> {
+    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, _r: super::ActorResult) -> Option<()> {
         Some(())
     }
 }
@@ -59,7 +61,7 @@ mod tests {
     #[async_trait::async_trait]
     impl<S> Actor<S> for PrintHelloEveryFewMs
     where
-        S: super::Sup<Self>,
+        S: super::SupHandle<Self>,
     {
         type Data = ();
         type Channel = IntervalChannel<100>;
