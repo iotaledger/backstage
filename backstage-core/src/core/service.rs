@@ -94,7 +94,7 @@ impl<'a> Iterator for ServiceScopesIterator<'a> {
 
 impl Service {
     /// Create a new Service
-    pub fn new<A: Actor<S>, S: Sup<A>>(directory: Option<String>) -> Self {
+    pub fn new<A: Actor<S>, S: SupHandle<A>>(directory: Option<String>) -> Self {
         Self {
             actor_type_id: std::any::TypeId::of::<A>(),
             actor_type_name: A::type_name(),
@@ -212,7 +212,7 @@ impl std::fmt::Display for Service {
 }
 
 #[async_trait::async_trait]
-pub trait Sup<T: Send>: Report<T> + 'static + Send + Sized + Sync {
+pub trait SupHandle<T: Send>: Report<T> + 'static + Send + Sized + Sync {
     type Event;
     /// Report End of life for a T actor
     /// return Some(()) if the report success
@@ -228,7 +228,7 @@ pub trait Report<T: Send>: Send + Sized + 'static {
     async fn report(&self, scope_id: super::ScopeId, service: Service) -> Option<()>
     where
         T: Actor<Self>,
-        Self: Sup<T>;
+        Self: SupHandle<T>;
 }
 
 /// Ideally it should be implemented using proc_macro on the event type

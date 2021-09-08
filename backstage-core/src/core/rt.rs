@@ -1,13 +1,13 @@
 use super::{
     AbortRegistration, Abortable, Actor, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data, NullSupervisor, Reason,
-    Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, Sup, BACKSTAGE_PARTITIONS, SCOPES, VISIBLE_DATA,
+    Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle, BACKSTAGE_PARTITIONS, SCOPES, VISIBLE_DATA,
 };
 
 use crate::prefab::websocket::Websocket;
 
 use prometheus::core::Collector;
 use std::collections::HashMap;
-pub struct Rt<A: Actor<S>, S: Sup<A>>
+pub struct Rt<A: Actor<S>, S: SupHandle<A>>
 where
     Self: Send,
 {
@@ -113,7 +113,7 @@ impl LocateScopeId {
     }
 }
 
-impl<A: Actor<S>, S: Sup<A>> Rt<A, S>
+impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S>
 where
     Self: Send + Sync,
 {
@@ -137,15 +137,12 @@ where
     pub fn uncle<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
         self.parent().child(dir_name)
     }
-    pub fn abort_registration(&self) -> AbortRegistration {
-        self.abort_registration.clone()
-    }
     /// Create abortable future which will be aborted if the actor got shutdown signal.
     pub fn abortable<F>(&self, fut: F) -> Abortable<F>
     where
         F: std::future::Future + Send + Sync,
     {
-        let abort_registration = self.abort_registration();
+        let abort_registration = self.abort_registration.clone();
         Abortable::new(fut, abort_registration)
     }
     pub async fn start<Dir: Into<Option<String>>, Child>(
@@ -155,7 +152,7 @@ where
     ) -> Result<<Child::Channel as Channel>::Handle, Reason>
     where
         Child: Actor<<A::Channel as Channel>::Handle> + super::ChannelBuilder<Child::Channel>,
-        <A::Channel as Channel>::Handle: Sup<Child>,
+        <A::Channel as Channel>::Handle: SupHandle<Child>,
         Self: Send,
     {
         let (h, init_signal) = self.spawn(directory, child).await?;
@@ -175,7 +172,7 @@ where
         <A::Channel as Channel>::Handle: Clone,
         Child: super::ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel> + Actor<<A::Channel as Channel>::Handle>,
         Dir: Into<Option<String>>,
-        <A::Channel as Channel>::Handle: Sup<Child>,
+        <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
         // try to create the actor's channel
         let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
@@ -381,7 +378,7 @@ where
     /// Shutdown all the children of a given type within this actor context
     pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(&mut self)
     where
-        <A::Channel as Channel>::Handle: Sup<T>,
+        <A::Channel as Channel>::Handle: SupHandle<T>,
     {
         // extract the scopes for a given type
         let mut iter = self.service.scopes_iter::<T>();
@@ -491,7 +488,7 @@ where
     }
 }
 
-impl<A: Actor<S>, S: Sup<A>> Rt<A, S> {
+impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     /// Create backstage context
     pub fn new(
         depth: usize,
@@ -538,7 +535,7 @@ impl<A: Actor<S>, S: Sup<A>> Rt<A, S> {
     }
 }
 
-impl<A: Actor<S>, S: Sup<A>> Rt<A, S> {
+impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     /// Add exposed resource
     pub async fn add_resource<T: Resource>(&mut self, resource: T) {
         // publish the resource in the local scope data_store
@@ -930,7 +927,7 @@ where
         A: super::ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
         <A as Actor<S>>::Channel: Channel<Handle = H>,
-        S: Sup<A>,
+        S: SupHandle<A>,
         H: Shutdown + Clone,
     {
         // try to create the actor's channel
@@ -1128,7 +1125,7 @@ mod tests {
     #[async_trait::async_trait]
     impl<S> Actor<S> for Backstage
     where
-        S: Sup<Self>,
+        S: SupHandle<Self>,
     {
         type Data = ();
         type Channel = UnboundedChannel<BackstageEvent>;

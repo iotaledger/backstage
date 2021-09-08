@@ -47,7 +47,7 @@ where
 #[async_trait::async_trait]
 impl<T, E, F, R, S> Actor<S> for Hyper<T>
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
     for<'a> T:
         Send + Sync + 'static + hyper::service::Service<&'a hyper::server::conn::AddrStream, Error = E, Response = R, Future = F> + Send,
     E: std::error::Error + Send + Sync + 'static,

@@ -11,7 +11,7 @@ struct Incrementer;
 #[async_trait::async_trait]
 impl<S> Actor<S> for Incrementer
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = Arc<AtomicIsize>;
     type Channel = IntervalChannel<1000>;
@@ -43,7 +43,7 @@ struct Decrementer;
 #[async_trait::async_trait]
 impl<S> Actor<S> for Decrementer
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = Arc<AtomicIsize>;
     type Channel = IntervalChannel<1000>;
@@ -103,7 +103,7 @@ impl<T> EolEvent<T> for BackstageEvent {
 #[async_trait::async_trait]
 impl<S> Actor<S> for Backstage
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;

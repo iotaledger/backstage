@@ -5,7 +5,7 @@ struct HelloWorld;
 #[async_trait::async_trait]
 impl<S> Actor<S> for HelloWorld
 where
-    S: Sup<Self>,
+    S: SupHandle<Self>,
 {
     type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
