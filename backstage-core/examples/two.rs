@@ -88,7 +88,7 @@ where
         let first = First;
         // start first
         rt.start(Some("first".into()), first).await?;
-        //
+        // 
         // - build Second
         let second = Second;
         // start second
@@ -126,6 +126,7 @@ where
 
 #[tokio::main]
 async fn main() {
+    #[cfg(not(feature = "console"))]
     env_logger::init();
     let backstage = Backstage;
     let websocket_server_addr = "127.0.0.1:9000".parse::<std::net::SocketAddr>().expect("parsable socket addr");

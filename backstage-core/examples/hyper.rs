@@ -114,6 +114,7 @@ where
 
 #[tokio::main]
 async fn main() {
+    #[cfg(not(feature = "console"))]
     env_logger::init();
     let addr = ([127, 0, 0, 1], 3000).into();
     let hyper = Hyper::new(addr);

@@ -188,6 +188,7 @@ where
         let mut metric;
         // create the service
         let mut dir = directory.into();
+        let task_name = dir.clone().unwrap_or_default();
         let mut service = Service::new::<Child, <A::Channel as Channel>::Handle>(dir.clone());
         loop {
             // generate unique scope_id
@@ -280,7 +281,7 @@ where
                 }
             }
         };
-        let join_handle = tokio::spawn(wrapped_fut);
+        let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
         self.children_joins.insert(child_scope_id, join_handle);
         Ok((handle, InitializedRx(child_scope_id, rx_oneshot)))
     }
@@ -921,6 +922,9 @@ where
         <A as Actor<super::NullSupervisor>>::Channel: Channel<Handle = H>,
         H: Shutdown + Clone,
     {
+        #[cfg(feature = "console")]
+        console_subscriber::init();
+
         Self::with_supervisor(root_dir, child, super::NullSupervisor).await
     }
 
@@ -941,6 +945,7 @@ where
         let child_scope_id = 0;
         // create the service
         let dir = dir.into();
+        let task_name = dir.clone().unwrap_or_default();
         let mut service = Service::new::<A, S>(dir.clone());
         let mut lock = SCOPES[0].write().await;
         service.update_status(ServiceStatus::Initializing);
@@ -1000,8 +1005,8 @@ where
                 }
             }
         };
-        let join_handle = tokio::spawn(wrapped_fut);
-        tokio::spawn(ctrl_c(handle.clone()));
+        let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
+        crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
         Ok(Self {
             handle,
             join_handle,
@@ -1081,7 +1086,7 @@ where
                 }
             }
         };
-        let join_handle = tokio::spawn(wrapped_fut);
+        let join_handle = crate::spawn_task("websocket server", wrapped_fut);
         self.websocket_join_handle.replace(join_handle);
         self.websocket_server.replace(Box::new(handle.clone()));
         Ok(self)

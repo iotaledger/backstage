@@ -27,6 +27,7 @@ where
 
 #[tokio::main]
 async fn main() {
+    #[cfg(not(feature = "console"))]
     env_logger::init();
     let hello_world = HelloWorld;
     let websocket_server_addr = "127.0.0.1:9000".parse::<std::net::SocketAddr>().expect("parsable socket addr");
@@ -36,7 +37,7 @@ async fn main() {
         .websocket_server(websocket_server_addr, None)
         .await
         .expect("Websocket server to run");
-    tokio::spawn(ws_client());
+    backstage::spawn_task("backstage websocket", ws_client());
     runtime.block_on().await.expect("Runtime to shutdown gracefully");
 }
 
