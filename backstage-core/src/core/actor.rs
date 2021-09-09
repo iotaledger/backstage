@@ -1,4 +1,12 @@
-use super::{rt::Rt, ActorResult, Channel, SupHandle};
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{
+    rt::Rt,
+    ActorResult,
+    Channel,
+    SupHandle,
+};
 use async_trait::async_trait;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
@@ -39,7 +47,13 @@ pub struct NullSupervisor;
 impl<T: Send + 'static> SupHandle<T> for NullSupervisor {
     type Event = ();
     // End of life for Actor of type T, invoked on shutdown.
-    async fn eol(self, _scope_id: super::ScopeId, _service: super::Service, _actor: T, _r: super::ActorResult) -> Option<()> {
+    async fn eol(
+        self,
+        _scope_id: super::ScopeId,
+        _service: super::Service,
+        _actor: T,
+        _r: super::ActorResult,
+    ) -> Option<()> {
         Some(())
     }
 }
@@ -55,7 +69,14 @@ impl<T: Send> super::Report<T> for NullSupervisor {
 // test
 #[cfg(test)]
 mod tests {
-    use crate::core::{Actor, ActorResult, IntervalChannel, Reason, Rt, StreamExt};
+    use crate::core::{
+        Actor,
+        ActorResult,
+        IntervalChannel,
+        Reason,
+        Rt,
+        StreamExt,
+    };
 
     struct PrintHelloEveryFewMs;
     #[async_trait::async_trait]

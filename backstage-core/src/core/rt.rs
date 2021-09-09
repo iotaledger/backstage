@@ -1,8 +1,33 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::{
-    AbortRegistration, Abortable, Actor, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data, NullSupervisor, Reason,
-    Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle, BACKSTAGE_PARTITIONS, SCOPES, VISIBLE_DATA,
+    AbortRegistration,
+    Abortable,
+    Actor,
+    ActorResult,
+    Channel,
+    ChannelBuilder,
+    Cleanup,
+    CleanupData,
+    Data,
+    NullSupervisor,
+    Reason,
+    Resource,
+    Route,
+    Scope,
+    ScopeId,
+    Service,
+    ServiceStatus,
+    Shutdown,
+    Subscriber,
+    SupHandle,
+    BACKSTAGE_PARTITIONS,
+    SCOPES,
+    VISIBLE_DATA,
 };
 
+#[cfg(all(feature = "prefabs", feature = "tungstenite"))]
 use crate::prefab::websocket::Websocket;
 
 use prometheus::core::Collector;
@@ -170,7 +195,8 @@ where
     ) -> Result<(<Child::Channel as Channel>::Handle, InitializedRx), Reason>
     where
         <A::Channel as Channel>::Handle: Clone,
-        Child: super::ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel> + Actor<<A::Channel as Channel>::Handle>,
+        Child: super::ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
+            + Actor<<A::Channel as Channel>::Handle>,
         Dir: Into<Option<String>>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
@@ -579,7 +605,11 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             None
         }
     }
-    pub async fn try_borrow<'a, T: Resource, R>(&self, resource_scope_id: ScopeId, fn_once: fn(&T) -> R) -> Option<R::Output>
+    pub async fn try_borrow<'a, T: Resource, R>(
+        &self,
+        resource_scope_id: ScopeId,
+        fn_once: fn(&T) -> R,
+    ) -> Option<R::Output>
     where
         R: std::future::Future + Send + 'static,
     {
@@ -594,7 +624,11 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         }
         None
     }
-    pub async fn try_borrow_mut<'a, T: Resource, R>(&self, resource_scope_id: ScopeId, fn_once: fn(&T) -> R) -> Option<R::Output>
+    pub async fn try_borrow_mut<'a, T: Resource, R>(
+        &self,
+        resource_scope_id: ScopeId,
+        fn_once: fn(&T) -> R,
+    ) -> Option<R::Output>
     where
         R: std::future::Future + Send + 'static,
     {
@@ -814,7 +848,8 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                     if let Ok(r) = abortable.await {
                         let r = r?;
                         if r.is_ok() {
-                            // as mentioned above, this needed to cleanup the provider if the linked subscriber shutdown before the provider
+                            // as mentioned above, this needed to cleanup the provider if the linked subscriber shutdown
+                            // before the provider
                             self.add_cleanup_from_other_obj::<T>(resource_scope_id).await;
                         };
                         r
@@ -848,7 +883,10 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             anyhow::bail!("Resource scope doesn't exist");
         }
     }
-    pub async fn depends_on_dyn<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<Option<T>, anyhow::Error>
+    pub async fn depends_on_dyn<T: Resource>(
+        &self,
+        resource_scope_id: ScopeId,
+    ) -> anyhow::Result<Option<T>, anyhow::Error>
     where
         <A::Channel as Channel>::Handle: Route<Option<T>>,
     {
@@ -935,7 +973,8 @@ where
         H: Shutdown + Clone,
     {
         // try to create the actor's channel
-        let (handle, inbox, abort_registration, mut metric, mut route) = child.build_channel::<S>().await?.channel::<A>(0);
+        let (handle, inbox, abort_registration, mut metric, mut route) =
+            child.build_channel::<S>().await?.channel::<A>(0);
         // this is the root runtime, so we are going to use 0 as the parent_id
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = 0;
@@ -1018,6 +1057,8 @@ where
     pub fn handle_mut(&mut self) -> &mut H {
         &mut self.handle
     }
+
+    #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
     pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason>
     where
         Websocket: Actor<NullSupervisor> + ChannelBuilder<<Websocket as Actor<NullSupervisor>>::Channel>,
@@ -1156,7 +1197,9 @@ mod tests {
     async fn custom_backstage() {
         env_logger::init();
         let backstage = Backstage;
-        let runtime = Runtime::new(Some("Backstage".into()), backstage).await.expect("Runtime to build");
+        let runtime = Runtime::new(Some("Backstage".into()), backstage)
+            .await
+            .expect("Runtime to build");
         runtime.block_on().await.expect("Runtime to run");
     }
     ////////// Custom backstage end /////////

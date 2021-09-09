@@ -1,11 +1,21 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 ///////////////// Forked from hyper example START //////
 /// https://github.com/hyperium/hyper/blob/master/examples/service_struct_impl.rs
-use hyper::{Body, Request, Response};
+use hyper::{
+    Body,
+    Request,
+    Response,
+};
 
 use std::{
     future::Future,
     pin::Pin,
-    task::{Context, Poll},
+    task::{
+        Context,
+        Poll,
+    },
 };
 
 type Counter = i32;

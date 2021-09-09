@@ -15,38 +15,53 @@ backstage-macros = { path = "../backstage-macros" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
-async-recursion = "0.3"
 futures = "0.3"
 tokio = { version = "1.11", features = ["sync", "time", "rt"] }
 lazy_static = "1.4"
 anyhow = "1.0"
 anymap = "0.12"
 thiserror = "1.0"
-daggy = "0.7"
-lru = "0.6"
-num-traits = "0.2"
 ptree = "0.3"
-pin-project-lite = "0.2.7"
+pin-project-lite = "0.2"
 num_cpus = "1.13"
-log = { version = "0.4", optional = true }
-rand = { version = "0.8", optional = true }
-futures-util = { version = "0.3", optional = true }
-tokio-tungstenite = { version = "0.14", optional = true }
-tokio-stream = { version = "~0.1.7", features = ["sync", "net"] }
+log = "0.4"
+rand = "0.8"
+tokio-stream = { version = "0.1", features = ["sync", "net"] }
 prometheus = "0.12.0"
 dyn-clone = "1.0.4"
-hyper = { version = "0.14", features = ["full"] }
+
+hyper = { version = "0.14", features = ["full"], optional = true }
+tokio-tungstenite = { version = "0.15", optional = true }
 tracing-subscriber = { version = "0.2", optional = true }
 console-subscriber = { git = "https://github.com/tokio-rs/console", branch = "main", optional = true }
 
 [dev-dependencies]
-serde_json = "1.0"
 tokio = { version = "1.11", features = ["macros", "rt-multi-thread", "signal"] }
 env_logger = "0.9"
-log = "0.4"
 url = "2.2"
 
 [features]
-default = ["log", "prefabs", "rand"]
-prefabs = ["tokio/net", "futures-util", "tokio-tungstenite"]
+default = []
+tungstenite = ["tokio/net", "tokio-tungstenite"]
 console = ["tracing-subscriber", "console-subscriber", "tokio/tracing"]
+prefabs = []
+
+[[example]]
+name = "hyper"
+required-features = ["prefabs", "hyper"]
+
+[[example]]
+name = "hyper_prefab"
+required-features = ["prefabs", "hyper"]
+
+[[example]]
+name = "hello_world"
+required-features = ["prefabs", "tungstenite"]
+
+[[example]]
+name = "two"
+required-features = ["prefabs", "tungstenite"]
+
+[[example]]
+name = "custom"
+required-features = ["prefabs", "tungstenite"]

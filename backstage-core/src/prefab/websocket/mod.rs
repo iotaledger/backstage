@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 /// Websocket listener
 mod websocket_listener;
 /// WebSocket receiver (incomings from client)
@@ -7,7 +10,10 @@ mod websocket_sender;
 
 use websocket_listener::WebsocketListener;
 use websocket_receiver::WebsocketReceiver;
-use websocket_sender::{WebsocketSender, WebsocketSenderEvent};
+use websocket_sender::{
+    WebsocketSender,
+    WebsocketSenderEvent,
+};
 
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
 pub struct RouteMessage(pub String);
@@ -71,7 +77,10 @@ pub struct ActorPath {
 impl ActorPath {
     /// Create new actor path, with root = 0 as the default scope_id
     pub fn new() -> Self {
-        Self { root: 0, path: Vec::new() }
+        Self {
+            root: 0,
+            path: Vec::new(),
+        }
     }
     pub fn with_scope_id(scope_id: ScopeId) -> Self {
         Self {

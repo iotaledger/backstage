@@ -1,5 +1,11 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 pub use actor::*;
-pub use backstage_macros::{build, supervise};
+pub use backstage_macros::{
+    build,
+    supervise,
+};
 pub use channel::*;
 pub use futures::stream::StreamExt;
 pub use registry::*;

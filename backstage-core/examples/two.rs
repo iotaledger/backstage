@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use backstage::core::*;
 
 ////////////////// First ///////////
@@ -129,7 +132,9 @@ async fn main() {
     #[cfg(not(feature = "console"))]
     env_logger::init();
     let backstage = Backstage;
-    let websocket_server_addr = "127.0.0.1:9000".parse::<std::net::SocketAddr>().expect("parsable socket addr");
+    let websocket_server_addr = "127.0.0.1:9000"
+        .parse::<std::net::SocketAddr>()
+        .expect("parsable socket addr");
     let runtime = Runtime::new(Some("backstage".into()), backstage)
         .await
         .expect("Runtime to build")

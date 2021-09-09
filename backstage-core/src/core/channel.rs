@@ -1,26 +1,41 @@
-use super::*;
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
 
+use super::*;
 use async_trait::async_trait;
 use core::pin::Pin;
 use futures::{
     future::Aborted,
-    stream::{SplitSink, SplitStream, StreamExt},
-    task::{AtomicWaker, Context, Poll},
+    stream::{
+        SplitSink,
+        SplitStream,
+        StreamExt,
+    },
+    task::{
+        AtomicWaker,
+        Context,
+        Poll,
+    },
 };
 use pin_project_lite::pin_project;
 use prometheus::core::Collector;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 pub use tokio::net::TcpListener;
 use tokio::{
     net::TcpStream,
-    sync::mpsc::{error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender},
+    sync::mpsc::{
+        error::TrySendError,
+        Receiver,
+        Sender,
+        UnboundedReceiver,
+        UnboundedSender,
+    },
 };
 use tokio_stream::wrappers::IntervalStream;
 pub use tokio_stream::wrappers::TcpListenerStream;
-pub use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
-pub type WsTx = SplitSink<WebSocketStream<TcpStream>, Message>;
-pub type WsRx = SplitStream<WebSocketStream<TcpStream>>;
 
 // Inner type storing the waker to awaken and a bool indicating that it
 // should be cancelled.
@@ -234,7 +249,12 @@ impl<T> Clone for UnboundedHandle<T> {
 }
 
 impl<T> UnboundedHandle<T> {
-    pub fn new(sender: UnboundedSender<T>, gauge: prometheus::IntGauge, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+    pub fn new(
+        sender: UnboundedSender<T>,
+        gauge: prometheus::IntGauge,
+        abort_handle: AbortHandle,
+        scope_id: ScopeId,
+    ) -> Self {
         Self {
             scope_id,
             abort_handle,
@@ -314,7 +334,8 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
             std::any::type_name::<T>(),
             Self::type_name()
         );
-        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
+        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name)
+            .expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
         let abort_handle = self.abort_handle;
@@ -322,7 +343,13 @@ impl<E: ShutdownEvent + 'static> Channel for UnboundedChannel<E> {
         let unbounded_handle = UnboundedHandle::new(sender, gauge.clone(), abort_handle, scope_id);
         let unbounded_inbox = UnboundedInbox::new(recv, gauge.clone());
         let route = Box::new(unbounded_handle.clone());
-        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge), Some(route))
+        (
+            unbounded_handle,
+            unbounded_inbox,
+            abort_registration,
+            Some(gauge),
+            Some(route),
+        )
     }
 }
 
@@ -436,7 +463,9 @@ pub struct AbortableUnboundedHandle<T> {
 
 impl<T> Clone for AbortableUnboundedHandle<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -480,7 +509,8 @@ impl<E: Send + 'static> Channel for AbortableUnboundedChannel<E> {
             std::any::type_name::<T>(),
             Self::type_name()
         );
-        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
+        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name)
+            .expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
         let abort_handle = self.abort_handle;
@@ -616,7 +646,11 @@ impl<T> BoundedHandle<T> {
     }
     #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
-    pub async fn send_timeout(&self, value: T, timeout: Duration) -> Result<(), tokio::sync::mpsc::error::SendTimeoutError<T>> {
+    pub async fn send_timeout(
+        &self,
+        value: T,
+        timeout: Duration,
+    ) -> Result<(), tokio::sync::mpsc::error::SendTimeoutError<T>> {
         let r = self.inner.send_timeout(message).await;
         if r.is_ok() {
             self.metric.inc();
@@ -695,7 +729,8 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
             std::any::type_name::<T>(),
             Self::type_name()
         );
-        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
+        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name)
+            .expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
         let abort_handle = self.abort_handle;
@@ -703,7 +738,13 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
         let unbounded_handle = BoundedHandle::new(sender, gauge.clone(), abort_handle, scope_id);
         let unbounded_inbox = BoundedInbox::new(recv, gauge.clone());
         let route = Box::new(unbounded_handle.clone());
-        (unbounded_handle, unbounded_inbox, abort_registration, Some(gauge), Some(route))
+        (
+            unbounded_handle,
+            unbounded_inbox,
+            abort_registration,
+            Some(gauge),
+            Some(route),
+        )
     }
 }
 
@@ -805,7 +846,9 @@ pub struct AbortableBoundedHandle<T> {
 
 impl<T> Clone for AbortableBoundedHandle<T> {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
@@ -824,7 +867,11 @@ impl<T> AbortableBoundedHandle<T> {
     }
     #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
-    pub async fn send_timeout(&self, value: T, timeout: Duration) -> Result<(), tokio::sync::mpsc::error::SendTimeoutError<T>> {
+    pub async fn send_timeout(
+        &self,
+        value: T,
+        timeout: Duration,
+    ) -> Result<(), tokio::sync::mpsc::error::SendTimeoutError<T>> {
         self.inner.send_timeout(message).await
     }
     #[cfg(feature = "sync")]
@@ -862,7 +909,8 @@ impl<E: Send + 'static, const C: usize> Channel for AbortableBoundedChannel<E, C
             std::any::type_name::<T>(),
             Self::type_name()
         );
-        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name).expect("channel gauge can be created");
+        let gauge = prometheus::core::GenericGauge::new(metric_fq_name, metric_helper_name)
+            .expect("channel gauge can be created");
         let sender = self.tx;
         let recv = self.rx;
         let abort_handle = self.abort_handle;
@@ -944,130 +992,157 @@ impl Channel for TcpListenerStream {
     }
 }
 
-pub struct HyperChannel<S> {
-    server: hyper::Server<hyper::server::conn::AddrIncoming, S>,
-}
-
-impl<S: Send> HyperChannel<S> {
-    pub fn new(server: hyper::Server<hyper::server::conn::AddrIncoming, S>) -> Self {
-        Self { server }
+#[cfg(feature = "hyper")]
+mod hyper {
+    use super::*;
+    pub struct HyperChannel<S> {
+        server: ::hyper::Server<::hyper::server::conn::AddrIncoming, S>,
     }
-}
 
-use hyper::{server::conn::AddrStream, Body, Request, Response};
-impl<S, E, R, F> Channel for HyperChannel<S>
-where
-    for<'a> S: hyper::service::Service<&'a AddrStream, Error = E, Response = R, Future = F> + Send,
-    E: std::error::Error + Send + Sync + 'static,
-    S: Send + 'static + Sync,
-    F: Send + std::future::Future<Output = Result<R, E>> + 'static,
-    R: Send + hyper::service::Service<Request<Body>, Response = Response<Body>> + 'static,
-    R::Error: std::error::Error + Send + Sync,
-    R::Future: Send,
-{
-    type Event = ();
-    type Handle = HyperHandle;
-    type Inbox = HyperInbox;
-    type Metric = prometheus::IntGauge;
-    fn channel<T>(
-        self,
-        scope_id: ScopeId,
-    ) -> (
-        Self::Handle,
-        Self::Inbox,
-        AbortRegistration,
-        Option<prometheus::IntGauge>,
-        Option<Box<dyn Route<()>>>,
-    ) {
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let f = futures::future::pending::<()>();
-        let abortable = Abortable::new(f, abort_registration.clone());
-        let graceful = self.server.with_graceful_shutdown(async {
-            abortable.await.ok();
-        });
-        let hyper_handle = HyperHandle::new(abort_handle, scope_id);
-        let hyper_inbox = HyperInbox::new(Box::pin(graceful));
-        (hyper_handle, hyper_inbox, abort_registration, None, None)
-    }
-}
-
-#[derive(Clone)]
-pub struct HyperHandle {
-    abort_handle: AbortHandle,
-    scope_id: ScopeId,
-}
-
-impl HyperHandle {
-    pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
-        Self { abort_handle, scope_id }
-    }
-}
-
-#[async_trait::async_trait]
-impl Shutdown for HyperHandle {
-    async fn shutdown(&self) {
-        self.abort_handle.abort();
-    }
-    fn scope_id(&self) -> ScopeId {
-        self.scope_id
-    }
-}
-
-pub struct HyperInbox {
-    pined_graceful: Option<Pin<Box<dyn futures::Future<Output = Result<(), hyper::Error>> + std::marker::Send + Sync + 'static>>>,
-}
-impl HyperInbox {
-    pub async fn ignite(&mut self) -> Result<(), hyper::Error> {
-        if let Some(server) = self.pined_graceful.take() {
-            server.await?
-        }
-        Ok(())
-    }
-}
-impl HyperInbox {
-    pub fn new(
-        pined_graceful: Pin<Box<dyn futures::Future<Output = Result<(), hyper::Error>> + std::marker::Send + Sync + 'static>>,
-    ) -> Self {
-        Self {
-            pined_graceful: Some(pined_graceful),
+    impl<S: Send> HyperChannel<S> {
+        pub fn new(server: ::hyper::Server<::hyper::server::conn::AddrIncoming, S>) -> Self {
+            Self { server }
         }
     }
-}
-pub struct WsRxChannel(pub WsRx);
 
-#[derive(Clone)]
-pub struct WsRxHandle(AbortHandle, ScopeId);
-#[async_trait::async_trait]
-impl super::Shutdown for WsRxHandle {
-    async fn shutdown(&self) {
-        self.0.abort();
+    use ::hyper::{
+        server::conn::AddrStream,
+        Body,
+        Request,
+        Response,
+    };
+    impl<S, E, R, F> Channel for HyperChannel<S>
+    where
+        for<'a> S: ::hyper::service::Service<&'a AddrStream, Error = E, Response = R, Future = F> + Send,
+        E: std::error::Error + Send + Sync + 'static,
+        S: Send + 'static + Sync,
+        F: Send + std::future::Future<Output = Result<R, E>> + 'static,
+        R: Send + ::hyper::service::Service<Request<Body>, Response = Response<Body>> + 'static,
+        R::Error: std::error::Error + Send + Sync,
+        R::Future: Send,
+    {
+        type Event = ();
+        type Handle = HyperHandle;
+        type Inbox = HyperInbox;
+        type Metric = prometheus::IntGauge;
+        fn channel<T>(
+            self,
+            scope_id: ScopeId,
+        ) -> (
+            Self::Handle,
+            Self::Inbox,
+            AbortRegistration,
+            Option<prometheus::IntGauge>,
+            Option<Box<dyn Route<()>>>,
+        ) {
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            let f = futures::future::pending::<()>();
+            let abortable = Abortable::new(f, abort_registration.clone());
+            let graceful = self.server.with_graceful_shutdown(async {
+                abortable.await.ok();
+            });
+            let hyper_handle = HyperHandle::new(abort_handle, scope_id);
+            let hyper_inbox = HyperInbox::new(Box::pin(graceful));
+            (hyper_handle, hyper_inbox, abort_registration, None, None)
+        }
     }
-    fn scope_id(&self) -> ScopeId {
-        self.1
-    }
-}
 
-impl Channel for WsRxChannel {
-    type Event = ();
-    type Handle = WsRxHandle;
-    type Inbox = Abortable<WsRx>;
-    type Metric = prometheus::IntGauge;
-    fn channel<T>(
-        self,
+    #[derive(Clone)]
+    pub struct HyperHandle {
+        abort_handle: AbortHandle,
         scope_id: ScopeId,
-    ) -> (
-        Self::Handle,
-        Self::Inbox,
-        AbortRegistration,
-        Option<prometheus::IntGauge>,
-        Option<Box<dyn Route<()>>>,
-    ) {
-        let (abort_handle, abort_registration) = AbortHandle::new_pair();
-        let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
-        let abortable_handle = WsRxHandle(abort_handle, scope_id);
-        (abortable_handle, abortable_inbox, abort_registration, None, None)
+    }
+
+    impl HyperHandle {
+        pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+            Self { abort_handle, scope_id }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Shutdown for HyperHandle {
+        async fn shutdown(&self) {
+            self.abort_handle.abort();
+        }
+        fn scope_id(&self) -> ScopeId {
+            self.scope_id
+        }
+    }
+
+    pub struct HyperInbox {
+        pined_graceful: Option<
+            Pin<Box<dyn futures::Future<Output = Result<(), ::hyper::Error>> + std::marker::Send + Sync + 'static>>,
+        >,
+    }
+    impl HyperInbox {
+        pub async fn ignite(&mut self) -> Result<(), ::hyper::Error> {
+            if let Some(server) = self.pined_graceful.take() {
+                server.await?
+            }
+            Ok(())
+        }
+    }
+    impl HyperInbox {
+        pub fn new(
+            pined_graceful: Pin<
+                Box<dyn futures::Future<Output = Result<(), ::hyper::Error>> + std::marker::Send + Sync + 'static>,
+            >,
+        ) -> Self {
+            Self {
+                pined_graceful: Some(pined_graceful),
+            }
+        }
     }
 }
+#[cfg(feature = "hyper")]
+pub use self::hyper::*;
+
+#[cfg(feature = "tungstenite")]
+mod tungstenite {
+    use super::*;
+    pub use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
+    pub type WsTx = SplitSink<WebSocketStream<TcpStream>, Message>;
+    pub type WsRx = SplitStream<WebSocketStream<TcpStream>>;
+
+    pub struct WsRxChannel(pub WsRx);
+
+    #[derive(Clone)]
+    pub struct WsRxHandle(AbortHandle, ScopeId);
+    #[async_trait::async_trait]
+    impl super::Shutdown for WsRxHandle {
+        async fn shutdown(&self) {
+            self.0.abort();
+        }
+        fn scope_id(&self) -> ScopeId {
+            self.1
+        }
+    }
+
+    impl Channel for WsRxChannel {
+        type Event = ();
+        type Handle = WsRxHandle;
+        type Inbox = Abortable<WsRx>;
+        type Metric = prometheus::IntGauge;
+        fn channel<T>(
+            self,
+            scope_id: ScopeId,
+        ) -> (
+            Self::Handle,
+            Self::Inbox,
+            AbortRegistration,
+            Option<prometheus::IntGauge>,
+            Option<Box<dyn Route<()>>>,
+        ) {
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
+            let abortable_handle = WsRxHandle(abort_handle, scope_id);
+            (abortable_handle, abortable_inbox, abort_registration, None, None)
+        }
+    }
+}
+#[cfg(feature = "tungstenite")]
+pub use tungstenite::*;
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;

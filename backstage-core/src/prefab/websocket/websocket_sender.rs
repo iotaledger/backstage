@@ -1,8 +1,17 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use super::ResponseResult;
 use crate::core::*;
-use futures::{stream::SplitSink, SinkExt};
+use futures::{
+    stream::SplitSink,
+    SinkExt,
+};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    tungstenite::Message,
+    WebSocketStream,
+};
 
 pub struct WebsocketSender {
     split_sink: SplitSink<WebSocketStream<TcpStream>, Message>,

@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 /// Our hyper example STARTS from here
 use crate::core::*;
 
@@ -20,8 +23,11 @@ impl<T> Hyper<T> {
 #[async_trait::async_trait]
 impl<T, E, F, R> ChannelBuilder<HyperChannel<T>> for Hyper<T>
 where
-    for<'a> T:
-        Send + Sync + 'static + hyper::service::Service<&'a hyper::server::conn::AddrStream, Error = E, Response = R, Future = F> + Send,
+    for<'a> T: Send
+        + Sync
+        + 'static
+        + hyper::service::Service<&'a hyper::server::conn::AddrStream, Error = E, Response = R, Future = F>
+        + Send,
     E: std::error::Error + Send + Sync + 'static,
     F: Send + std::future::Future<Output = Result<R, E>> + 'static,
     R: Send + hyper::service::Service<hyper::Request<hyper::Body>, Response = hyper::Response<hyper::Body>> + 'static,
@@ -48,8 +54,11 @@ where
 impl<T, E, F, R, S> Actor<S> for Hyper<T>
 where
     S: SupHandle<Self>,
-    for<'a> T:
-        Send + Sync + 'static + hyper::service::Service<&'a hyper::server::conn::AddrStream, Error = E, Response = R, Future = F> + Send,
+    for<'a> T: Send
+        + Sync
+        + 'static
+        + hyper::service::Service<&'a hyper::server::conn::AddrStream, Error = E, Response = R, Future = F>
+        + Send,
     E: std::error::Error + Send + Sync + 'static,
     F: Send + std::future::Future<Output = Result<R, E>> + 'static,
     R: Send + hyper::service::Service<hyper::Request<hyper::Body>, Response = hyper::Response<hyper::Body>> + 'static,

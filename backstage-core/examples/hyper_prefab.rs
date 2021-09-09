@@ -1,9 +1,17 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 //// Based on hyper hello example https://github.com/hyperium/hyper/blob/master/examples/hello.rs
 use std::convert::Infallible;
 
 use hyper::{
-    service::{make_service_fn, service_fn},
-    Body, Request, Response,
+    service::{
+        make_service_fn,
+        service_fn,
+    },
+    Body,
+    Request,
+    Response,
 };
 
 async fn hello(_: Request<Body>) -> Result<Response<Body>, Infallible> {
@@ -11,7 +19,10 @@ async fn hello(_: Request<Body>) -> Result<Response<Body>, Infallible> {
 }
 
 // our prefab example starts from here
-use backstage::{core::*, prefab::hyper::Hyper};
+use backstage::{
+    core::*,
+    prefab::hyper::Hyper,
+};
 
 #[tokio::main]
 async fn main() {

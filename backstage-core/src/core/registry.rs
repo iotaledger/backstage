@@ -1,5 +1,14 @@
-use super::{Channel, Message, Route, Service, Shutdown};
-use std::{any::TypeId, collections::HashMap};
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{
+    Route,
+    Shutdown,
+};
+use std::{
+    any::TypeId,
+    collections::HashMap,
+};
 use tokio::sync::RwLock;
 
 pub type Depth = usize;
@@ -59,7 +68,10 @@ pub enum Subscriber<T: Resource> {
     OneCopy(tokio::sync::oneshot::Sender<anyhow::Result<T>>),
     /// LinkedOneCopy subscriber will receive one copy of the resource once it's available,
     /// subscriber will get shutdown if the resource is replaced or dropped.
-    LinkedOneCopy(Option<tokio::sync::oneshot::Sender<anyhow::Result<T>>>, Box<dyn Shutdown>),
+    LinkedOneCopy(
+        Option<tokio::sync::oneshot::Sender<anyhow::Result<T>>>,
+        Box<dyn Shutdown>,
+    ),
     /// Subscriber will receive dynamic copies, pushed by the publisher,
     /// and None will be pushed if the resource got dropped by the publisher.
     DynCopy(Box<dyn Route<Option<T>>>),
@@ -69,7 +81,10 @@ impl<T: Resource> Subscriber<T> {
     pub fn one_copy(one_shot: tokio::sync::oneshot::Sender<anyhow::Result<T>>) -> Self {
         Self::OneCopy(one_shot)
     }
-    pub fn linked_one_copy(one_shot: tokio::sync::oneshot::Sender<anyhow::Result<T>>, shutdown_handle: Box<dyn Shutdown>) -> Self {
+    pub fn linked_one_copy(
+        one_shot: tokio::sync::oneshot::Sender<anyhow::Result<T>>,
+        shutdown_handle: Box<dyn Shutdown>,
+    ) -> Self {
         Self::LinkedOneCopy(Some(one_shot), shutdown_handle)
     }
     pub fn dyn_copy(boxed_route: Box<dyn Route<Option<T>>>) -> Self {

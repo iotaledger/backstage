@@ -1,4 +1,10 @@
-use backstage::{core::*, prefab::websocket::RouteMessage};
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use backstage::{
+    core::*,
+    prefab::websocket::RouteMessage,
+};
 
 struct HelloWorld;
 
@@ -30,7 +36,9 @@ async fn main() {
     #[cfg(not(feature = "console"))]
     env_logger::init();
     let hello_world = HelloWorld;
-    let websocket_server_addr = "127.0.0.1:9000".parse::<std::net::SocketAddr>().expect("parsable socket addr");
+    let websocket_server_addr = "127.0.0.1:9000"
+        .parse::<std::net::SocketAddr>()
+        .expect("parsable socket addr");
     let runtime = Runtime::new(Some("HelloWorld".into()), hello_world)
         .await
         .expect("Runtime to run")

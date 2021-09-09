@@ -1,6 +1,10 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 #![warn(missing_docs)]
 
 pub mod core;
+#[cfg(feature = "prefabs")]
 pub mod prefab;
 
 /// Spawn a task with a provided name, if tokio console tracing is enabled

@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use proc_macro::TokenStream;
 use quote::quote;
 use std::collections::HashMap;
@@ -70,7 +73,8 @@ pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let builder = quote::format_ident!("{}Builder", actor);
 
-    let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut add_fns, mut inputs, mut input_names, mut input_unwraps) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for input in fn_inputs {
         match input {
             syn::FnArg::Typed(mut t) => {
@@ -211,14 +215,19 @@ pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
     for child in children {
         match child {
             syn::Type::Path(p) => {
-                let id = p.path.get_ident().unwrap_or_else(|| &p.path.segments.last().unwrap().ident).clone();
+                let id = p
+                    .path
+                    .get_ident()
+                    .unwrap_or_else(|| &p.path.segments.last().unwrap().ident)
+                    .clone();
                 ident_paths.entry(id).or_default().push(p);
             }
             _ => panic!("Expected child type!"),
         }
     }
 
-    let (mut children, mut states, mut from_state_impls, mut from_child_impls) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut children, mut states, mut from_state_impls, mut from_child_impls) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (ident, paths) in ident_paths.iter() {
         if paths.len() == 1 {
             let path = &paths[0];
@@ -253,7 +262,9 @@ pub fn supervise(attr: TokenStream, item: TokenStream) -> TokenStream {
                             match generic {
                                 syn::GenericArgument::Lifetime(l) => ident = format!("{}_{}", ident, l.ident),
                                 syn::GenericArgument::Type(t) => match t {
-                                    syn::Type::Path(tp) => ident = format!("{}_{}", ident, tp.path.segments.last().unwrap().ident),
+                                    syn::Type::Path(tp) => {
+                                        ident = format!("{}_{}", ident, tp.path.segments.last().unwrap().ident)
+                                    }
                                     _ => panic!("Expected path!"),
                                 },
                                 syn::GenericArgument::Binding(_) => panic!("Bindings not supported!"),

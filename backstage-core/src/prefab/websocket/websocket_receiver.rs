@@ -1,8 +1,23 @@
-use super::{Error, Event, Interface, Response, WebsocketSenderEvent};
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{
+    Error,
+    Event,
+    Interface,
+    Response,
+    WebsocketSenderEvent,
+};
 use crate::core::*;
-use futures::stream::{SplitStream, StreamExt};
+use futures::stream::{
+    SplitStream,
+    StreamExt,
+};
 use tokio::net::TcpStream;
-use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    tungstenite::Message,
+    WebSocketStream,
+};
 
 pub struct WebsocketReceiver {
     sender_handle: UnboundedHandle<WebsocketSenderEvent>,
@@ -11,7 +26,10 @@ pub struct WebsocketReceiver {
 
 impl WebsocketReceiver {
     /// Create new WebsocketReceiver struct
-    pub fn new(split_stream: SplitStream<WebSocketStream<TcpStream>>, sender_handle: UnboundedHandle<WebsocketSenderEvent>) -> Self {
+    pub fn new(
+        split_stream: SplitStream<WebSocketStream<TcpStream>>,
+        sender_handle: UnboundedHandle<WebsocketSenderEvent>,
+    ) -> Self {
         Self {
             sender_handle,
             split_stream: Some(split_stream),
@@ -93,7 +111,11 @@ where
                                         }
                                     };
                                 } else {
-                                    let r = Error::Cast(interface.actor_path, message_to_route, "Unreachable ActorPath".into());
+                                    let r = Error::Cast(
+                                        interface.actor_path,
+                                        message_to_route,
+                                        "Unreachable ActorPath".into(),
+                                    );
                                     self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
                                 }
                             }

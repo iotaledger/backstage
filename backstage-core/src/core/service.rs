@@ -1,6 +1,15 @@
-use super::{Actor, ScopeId};
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{
+    Actor,
+    ScopeId,
+};
 use ptree::TreeItem;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use std::time::SystemTime;
 /// The possible statuses a service (application) can be
 #[repr(u8)]

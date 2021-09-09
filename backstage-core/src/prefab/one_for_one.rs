@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::core::*;
 use std::collections::HashMap;
 /// One for one supervisor

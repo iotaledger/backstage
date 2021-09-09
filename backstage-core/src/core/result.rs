@@ -1,3 +1,6 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
 use std::time::Duration;
 /// The returned result by the actor
 pub type ActorResult = std::result::Result<(), Reason>;
