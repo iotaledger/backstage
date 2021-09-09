@@ -8,9 +8,9 @@ mod websocket_receiver;
 /// WebSocket Sender (outcomings to client)
 mod websocket_sender;
 
-use websocket_listener::WebsocketListener;
-use websocket_receiver::WebsocketReceiver;
-use websocket_sender::{
+pub(crate) use websocket_listener::WebsocketListener;
+pub(crate) use websocket_receiver::WebsocketReceiver;
+pub(crate) use websocket_sender::{
     WebsocketSender,
     WebsocketSenderEvent,
 };

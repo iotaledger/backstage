@@ -125,7 +125,7 @@ where
         })?;
         // await incrementer till it gets initialized
         i.initialized().await?;
-        // 
+        //
         // - build Decrementer
         let decrementer = Decrementer;
         // spawn decrementer
@@ -167,7 +167,10 @@ where
 #[tokio::main]
 async fn main() {
     #[cfg(not(feature = "console"))]
-    env_logger::init();
+    {
+        let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
+        env_logger::Builder::from_env(env).init();
+    }
     let backstage = Backstage;
     let websocket_server_addr = "127.0.0.1:9000"
         .parse::<std::net::SocketAddr>()

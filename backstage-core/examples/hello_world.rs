@@ -34,15 +34,18 @@ where
 #[tokio::main]
 async fn main() {
     #[cfg(not(feature = "console"))]
-    env_logger::init();
+    {
+        let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
+        env_logger::Builder::from_env(env).init();
+    }
     let hello_world = HelloWorld;
-    let websocket_server_addr = "127.0.0.1:9000"
+    let server_addr = "127.0.0.1:9000"
         .parse::<std::net::SocketAddr>()
         .expect("parsable socket addr");
     let runtime = Runtime::new(Some("HelloWorld".into()), hello_world)
         .await
         .expect("Runtime to run")
-        .websocket_server(websocket_server_addr, None)
+        .backserver(server_addr)
         .await
         .expect("Websocket server to run");
     backstage::spawn_task("backstage websocket", ws_client());

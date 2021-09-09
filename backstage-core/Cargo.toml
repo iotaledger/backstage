@@ -32,6 +32,7 @@ dyn-clone = "1.0.4"
 
 hyper = { version = "0.14", features = ["full"], optional = true }
 tokio-tungstenite = { version = "0.15", optional = true }
+hyper-tungstenite = { version = "0.4", optional = true }
 tracing-subscriber = { version = "0.2", optional = true }
 console-subscriber = { git = "https://github.com/tokio-rs/console", branch = "main", optional = true }
 
@@ -43,9 +44,10 @@ url = "2.2"
 [features]
 default = []
 tungstenite = ["tokio/net", "tokio-tungstenite"]
+websocket_server = ["tungstenite", "prefabs"]
 console = ["tracing-subscriber", "console-subscriber", "tokio/tracing"]
 prefabs = []
-
+backserver = ["hyper", "hyper-tungstenite", "prefabs", "tungstenite"]
 [[example]]
 name = "hyper"
 required-features = ["prefabs", "hyper"]
@@ -56,12 +58,12 @@ required-features = ["prefabs", "hyper"]
 
 [[example]]
 name = "hello_world"
-required-features = ["prefabs", "tungstenite"]
+required-features = ["backserver"]
 
 [[example]]
 name = "two"
-required-features = ["prefabs", "tungstenite"]
+required-features = ["websocket_server"]
 
 [[example]]
 name = "custom"
-required-features = ["prefabs", "tungstenite"]
+required-features = ["websocket_server"]

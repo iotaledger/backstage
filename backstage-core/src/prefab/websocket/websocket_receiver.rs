@@ -11,25 +11,32 @@ use super::{
 use crate::core::*;
 use futures::stream::{
     SplitStream,
+    Stream,
     StreamExt,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    tungstenite::Message,
+    tungstenite::{
+        Error as WsError,
+        Message,
+    },
     WebSocketStream,
 };
 
-pub struct WebsocketReceiver {
+pub struct WebsocketReceiver<T>
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+{
     sender_handle: UnboundedHandle<WebsocketSenderEvent>,
-    split_stream: Option<WsRx>,
+    split_stream: Option<T>,
 }
 
-impl WebsocketReceiver {
+impl<T> WebsocketReceiver<T>
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+{
     /// Create new WebsocketReceiver struct
-    pub fn new(
-        split_stream: SplitStream<WebSocketStream<TcpStream>>,
-        sender_handle: UnboundedHandle<WebsocketSenderEvent>,
-    ) -> Self {
+    pub fn new(split_stream: T, sender_handle: UnboundedHandle<WebsocketSenderEvent>) -> Self {
         Self {
             sender_handle,
             split_stream: Some(split_stream),
@@ -38,8 +45,11 @@ impl WebsocketReceiver {
 }
 
 #[async_trait::async_trait]
-impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
-    async fn build_channel<S>(&mut self) -> Result<WsRxChannel, Reason> {
+impl<T> ChannelBuilder<WsRxChannel<T>> for WebsocketReceiver<T>
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+{
+    async fn build_channel<S>(&mut self) -> Result<WsRxChannel<T>, Reason> {
         if let Some(stream) = self.split_stream.take() {
             Ok(WsRxChannel(stream))
         } else {
@@ -49,12 +59,13 @@ impl ChannelBuilder<WsRxChannel> for WebsocketReceiver {
 }
 
 #[async_trait::async_trait]
-impl<S> Actor<S> for WebsocketReceiver
+impl<S, T> Actor<S> for WebsocketReceiver<T>
 where
     S: SupHandle<Self>,
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>> + Unpin,
 {
     type Data = ();
-    type Channel = WsRxChannel;
+    type Channel = WsRxChannel<T>;
     async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         Ok(())
     }

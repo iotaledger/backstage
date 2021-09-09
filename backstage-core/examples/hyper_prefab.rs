@@ -27,7 +27,10 @@ use backstage::{
 #[tokio::main]
 async fn main() {
     #[cfg(not(feature = "console"))]
-    env_logger::init();
+    {
+        let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
+        env_logger::Builder::from_env(env).init();
+    }
     let make_svc = make_service_fn(|_conn| async { Ok::<_, Infallible>(service_fn(hello)) });
     let addr = ([127, 0, 0, 1], 3000).into();
     let hyper = Hyper::new(addr, make_svc);

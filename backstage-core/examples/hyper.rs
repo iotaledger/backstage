@@ -125,7 +125,10 @@ where
 #[tokio::main]
 async fn main() {
     #[cfg(not(feature = "console"))]
-    env_logger::init();
+    {
+        let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
+        env_logger::Builder::from_env(env).init();
+    }
     let addr = ([127, 0, 0, 1], 3000).into();
     let hyper = Hyper::new(addr);
     let runtime = Runtime::new("hyper".to_string(), hyper).await.expect("Runtime to run");

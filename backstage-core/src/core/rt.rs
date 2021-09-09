@@ -939,11 +939,12 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
 }
 
 pub struct Runtime<H> {
+    scope_id: ScopeId,
     join_handle: tokio::task::JoinHandle<()>,
     handle: H,
     initialized_rx: Option<InitializedRx>,
-    websocket_server: Option<Box<dyn Shutdown>>,
-    websocket_join_handle: Option<tokio::task::JoinHandle<()>>,
+    server: Option<Box<dyn Shutdown>>,
+    server_join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<H> Runtime<H>
@@ -1044,11 +1045,12 @@ where
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
         crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
         Ok(Self {
+            scope_id: 0,
             handle,
             join_handle,
             initialized_rx: Some(InitializedRx(child_scope_id, rx_oneshot)),
-            websocket_server: None,
-            websocket_join_handle: None,
+            server: None,
+            server_join_handle: None,
         })
     }
     pub fn handle(&self) -> &H {
@@ -1058,7 +1060,8 @@ where
         &mut self.handle
     }
 
-    #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
+    #[cfg(feature = "websocket_server")]
+    #[cfg(not(feature = "backserver"))]
     pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason>
     where
         Websocket: Actor<NullSupervisor> + ChannelBuilder<<Websocket as Actor<NullSupervisor>>::Channel>,
@@ -1069,9 +1072,10 @@ where
         if let Some(ttl) = ttl.take() {
             websocket = websocket.set_ttl(ttl);
         }
-        let built_channel = Websocket::build_channel::<NullSupervisor>(&mut websocket).await?;
-        let (handle, inbox, abort_registration, mut metric, mut route) =
-            <Websocket as Actor<NullSupervisor>>::Channel::channel::<Websocket>(built_channel, websocket_scope_id);
+        let (handle, inbox, abort_registration, mut metric, mut route) = websocket
+            .build_channel::<NullSupervisor>()
+            .await?
+            .channel::<Websocket>(websocket_scope_id);
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = websocket_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
@@ -1125,8 +1129,80 @@ where
             }
         };
         let join_handle = crate::spawn_task("websocket server", wrapped_fut);
-        self.websocket_join_handle.replace(join_handle);
-        self.websocket_server.replace(Box::new(handle.clone()));
+        self.server_join_handle.replace(join_handle);
+        self.server.replace(Box::new(handle.clone()));
+        Ok(self)
+    }
+
+    #[cfg(feature = "backserver")]
+    pub async fn backserver(mut self, addr: std::net::SocketAddr) -> Result<Self, Reason>
+    where
+        crate::prefab::backserver::Backserver: Actor<NullSupervisor>
+            + ChannelBuilder<<crate::prefab::backserver::Backserver as Actor<NullSupervisor>>::Channel>,
+        <Websocket as Actor<NullSupervisor>>::Channel: Channel,
+    {
+        use crate::prefab::backserver::Backserver;
+        let server_scope_id = 1;
+        let mut websocket = Backserver::new(addr.clone(), self.scope_id).link_to(Box::new(self.handle.clone()));
+        let (handle, inbox, abort_registration, mut metric, mut route) = websocket
+            .build_channel::<NullSupervisor>()
+            .await?
+            .channel::<Backserver>(server_scope_id);
+        let shutdown_handle = Box::new(handle.clone());
+        let scopes_index = server_scope_id % *BACKSTAGE_PARTITIONS;
+        // create the service
+        let dir_name: String = format!("backserver@{}", addr);
+        let mut service = Service::new::<Backserver, NullSupervisor>(Some(dir_name));
+        let mut lock = SCOPES[scopes_index].write().await;
+        service.update_status(ServiceStatus::Initializing);
+        let mut scope = Scope::new(None, shutdown_handle.clone());
+        if let Some(route) = route.take() {
+            scope.router.insert(route);
+        }
+        lock.insert(server_scope_id, scope);
+        drop(lock);
+        let visible_data = std::collections::HashSet::new();
+        let depth = 0;
+        // create child context
+        let mut child_context = Rt::<Backserver, NullSupervisor>::new(
+            depth,
+            service,
+            scopes_index,
+            1,
+            None,
+            NullSupervisor,
+            handle.clone(),
+            inbox,
+            abort_registration,
+            visible_data,
+        );
+        if let Some(metric) = metric.take() {
+            child_context.register(metric).expect("Metric to be registered");
+        }
+        let wrapped_fut = async move {
+            let mut child = websocket;
+            let mut rt = child_context;
+            let f = child.init(&mut rt);
+            match f.await {
+                Err(reason) => {
+                    // breakdown the child
+                    let f = rt.breakdown(child, Err(reason));
+                    f.await;
+                }
+                Ok(deps) => {
+                    if rt.service().is_initializing() {
+                        rt.update_status(ServiceStatus::Running).await
+                    }
+                    let f = child.run(&mut rt, deps);
+                    let r = f.await;
+                    let f = rt.breakdown(child, r);
+                    f.await
+                }
+            }
+        };
+        let join_handle = crate::spawn_task("websocket server", wrapped_fut);
+        self.server_join_handle.replace(join_handle);
+        self.server.replace(Box::new(handle.clone()));
         Ok(self)
     }
 
@@ -1135,9 +1211,9 @@ where
     }
     pub async fn block_on(mut self) -> Result<(), tokio::task::JoinError> {
         let r = self.join_handle.await;
-        if let Some(ws_server_handle) = self.websocket_server.take() {
+        if let Some(ws_server_handle) = self.server.take() {
             ws_server_handle.shutdown().await;
-            self.websocket_join_handle.expect("websocket join handle").await.ok();
+            self.server_join_handle.expect("websocket join handle").await.ok();
         }
         r
     }

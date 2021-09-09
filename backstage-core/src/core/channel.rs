@@ -1100,12 +1100,15 @@ pub use self::hyper::*;
 #[cfg(feature = "tungstenite")]
 mod tungstenite {
     use super::*;
-    pub use tokio_tungstenite::tungstenite::Message;
+    pub use tokio_tungstenite::tungstenite::{
+        Error as WsError,
+        Message,
+    };
     use tokio_tungstenite::WebSocketStream;
-    pub type WsTx = SplitSink<WebSocketStream<TcpStream>, Message>;
-    pub type WsRx = SplitStream<WebSocketStream<TcpStream>>;
 
-    pub struct WsRxChannel(pub WsRx);
+    pub struct WsRxChannel<T>(pub T)
+    where
+        T: Send + 'static + Sync + futures::stream::Stream<Item = Result<Message, WsError>>;
 
     #[derive(Clone)]
     pub struct WsRxHandle(AbortHandle, ScopeId);
@@ -1119,10 +1122,13 @@ mod tungstenite {
         }
     }
 
-    impl Channel for WsRxChannel {
+    impl<S> Channel for WsRxChannel<S>
+    where
+        S: Send + 'static + Sync + futures::Stream<Item = Result<Message, WsError>>,
+    {
         type Event = ();
         type Handle = WsRxHandle;
-        type Inbox = Abortable<WsRx>;
+        type Inbox = Abortable<S>;
         type Metric = prometheus::IntGauge;
         fn channel<T>(
             self,

@@ -6,6 +6,7 @@ use crate::core::*;
 use futures::{
     stream::SplitSink,
     SinkExt,
+    sink::Sink,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -13,12 +14,16 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-pub struct WebsocketSender {
-    split_sink: SplitSink<WebSocketStream<TcpStream>, Message>,
+pub struct WebsocketSender<T>
+where T: Sink<Message>
+{
+    split_sink: T,
 }
 
-impl WebsocketSender {
-    pub(crate) fn new(split_sink: SplitSink<WebSocketStream<TcpStream>, Message>) -> Self {
+impl<T> WebsocketSender<T>
+where T: Sink<Message> + Send + Sync + 'static
+{
+    pub(crate) fn new(split_sink: T) -> Self {
         Self { split_sink }
     }
 }
@@ -33,9 +38,10 @@ impl ShutdownEvent for WebsocketSenderEvent {
 }
 
 #[async_trait::async_trait]
-impl<S> Actor<S> for WebsocketSender
+impl<S, T> Actor<S> for WebsocketSender<T>
 where
     S: SupHandle<Self>,
+    T: Sink<Message> + Send + 'static + Sync + Unpin,
 {
     type Data = ();
     type Channel = UnboundedChannel<WebsocketSenderEvent>;
