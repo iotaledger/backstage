@@ -66,7 +66,7 @@ impl<S: SupHandle<Self>> Actor<S> for Backserver {
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         // spawn backserver listener using prefab hyper
         let my_handle = rt.handle().clone();
-        let make_svc = server::MakeListenerSvc::new(0, my_handle);
+        let make_svc = server::MakeListenerSvc::new(self.root_scope_id, my_handle);
         let addr = self.addr;
         let hyper = super::hyper::Hyper::new(addr, make_svc);
         rt.start("server".to_string(), hyper).await?;

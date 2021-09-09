@@ -50,7 +50,35 @@ impl hyper::service::Service<Request<Body>> for ListenerSvc {
             Box::pin(async { Ok(response) })
         } else {
             let res = match req.uri().path() {
-                "/metrics" => mk_response(format!("todo metrics")),
+                "/metrics" => {
+                    use prometheus::Encoder;
+                    let encoder = prometheus::TextEncoder::new();
+                    let mut buffer = Vec::new();
+                    if let Err(e) = encoder.encode(&prometheus::gather(), &mut buffer) {
+                        log::error!("could not encode prometheus default metrics: {}", e);
+                    };
+                    let mut res = match String::from_utf8(buffer.clone()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("prometheus default metrics could not be from_utf8'd: {}", e);
+                            String::default()
+                        }
+                    };
+                    buffer.clear();
+                    if let Err(e) = encoder.encode(&crate::core::PROMETHEUS_REGISTRY.gather(), &mut buffer) {
+                        log::error!("could not encode prometheus default metrics: {}", e);
+                    };
+                    let res_custom = match String::from_utf8(buffer.clone()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("backstage metrics could not be from_utf8'd: {}", e);
+                            String::default()
+                        }
+                    };
+                    buffer.clear();
+                    res.push_str(&res_custom);
+                    mk_response(res)
+                }
                 "/service" => mk_response(format!("todo service")),
                 "/info" => mk_response(format!("backstage info, commit header, version and such.")),
                 "/readme" => mk_response(format!("todo return readme.md")),

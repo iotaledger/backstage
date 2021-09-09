@@ -45,7 +45,7 @@ async fn main() {
     let runtime = Runtime::new(Some("HelloWorld".into()), hello_world)
         .await
         .expect("Runtime to run")
-        .backserver(server_addr)
+        .websocket_server(server_addr, None)
         .await
         .expect("Websocket server to run");
     backstage::spawn_task("backstage websocket", ws_client());
