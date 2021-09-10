@@ -160,7 +160,7 @@ where
         self.parent().parent()
     }
     pub fn uncle<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
-        self.parent().child(dir_name)
+        self.grandparent().child(dir_name)
     }
     /// Create abortable future which will be aborted if the actor got shutdown signal.
     pub fn abortable<F>(&self, fut: F) -> Abortable<F>
