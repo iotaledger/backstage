@@ -4,6 +4,7 @@
 pub use actor::*;
 pub use backstage_macros::{
     build,
+    children,
     supervise,
 };
 pub use channel::*;

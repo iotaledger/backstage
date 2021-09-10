@@ -54,28 +54,36 @@ where
 }
 // The root custom actor, equivalent to a launcher;
 struct Backstage;
+
+#[supervise]
 enum BackstageEvent {
+    #[shutdown]
     Shutdown,
-    Microservice(ScopeId, Service),
+    #[report]
+    Report(ScopeId, Service),
+    #[eol]
+    Exit(ScopeId, Service, BackstageChild),
 }
 
-///// Alll of these should be implemented using proc_macro or some macro. start //////
-impl ShutdownEvent for BackstageEvent {
-    fn shutdown_event() -> Self {
-        Self::Shutdown
+#[children]
+enum BackstageChild {
+    First(First),
+    Second(Second),
+}
+
+// ### Impl using #[children] proc macro ### //
+impl From<First> for BackstageChild {
+    fn from(f: First) -> Self {
+        Self::First(f)
     }
 }
-impl<T> ReportEvent<T> for BackstageEvent {
-    fn report_event(scope_id: ScopeId, service: Service) -> Self {
-        Self::Microservice(scope_id, service)
+
+impl From<Second> for BackstageChild {
+    fn from(s: Second) -> Self {
+        Self::Second(s)
     }
 }
-impl<T> EolEvent<T> for BackstageEvent {
-    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult) -> Self {
-        Self::Microservice(scope_id, service)
-    }
-}
-///// All of these should be implemented using proc_macro or some macro end ///////
+// ### Impl using #[children] proc macro ### //
 
 #[async_trait::async_trait]
 impl<S> Actor<S> for Backstage
@@ -91,7 +99,7 @@ where
         let first = First;
         // start first
         rt.start(Some("first".into()), first).await?;
-        //
+        // 
         // - build Second
         let second = Second;
         // start second
@@ -109,7 +117,7 @@ where
                         rt.inbox_mut().close();
                     }
                 }
-                BackstageEvent::Microservice(scope_id, service) => {
+                BackstageEvent::Report(scope_id, service) => {
                     log::info!(
                         "Microservice: {}, dir: {:?}, status: {}",
                         service.actor_type_name(),
@@ -117,9 +125,16 @@ where
                         service.status()
                     );
                     rt.upsert_microservice(scope_id, service);
-                    if rt.microservices_stopped() {
-                        rt.inbox_mut().close();
-                    }
+                }
+                BackstageEvent::Exit(scope_id, service, child) => {
+                    log::info!(
+                        "Microservice: {}, dir: {:?}, status: {}",
+                        service.actor_type_name(),
+                        service.directory(),
+                        service.status()
+                    );
+                    rt.upsert_microservice(scope_id, service);
+                    rt.inbox_mut().close();
                 }
             }
         }

@@ -62,7 +62,7 @@ required-features = ["websocket_server"]
 
 [[example]]
 name = "two"
-required-features = ["backserver"]
+required-features = ["websocket_server"]
 
 [[example]]
 name = "custom"
