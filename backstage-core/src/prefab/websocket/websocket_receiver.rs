@@ -11,32 +11,32 @@ use super::{
 use crate::core::*;
 use futures::stream::{
     SplitStream,
-    Stream,
     StreamExt,
+    Stream,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    tungstenite::{
-        Error as WsError,
-        Message,
-    },
+    tungstenite::Message,
     WebSocketStream,
+    tungstenite::Error as WsError,
 };
 
 pub struct WebsocketReceiver<T>
-where
-    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
 {
     sender_handle: UnboundedHandle<WebsocketSenderEvent>,
     split_stream: Option<T>,
 }
 
 impl<T> WebsocketReceiver<T>
-where
-    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
+
 {
     /// Create new WebsocketReceiver struct
-    pub fn new(split_stream: T, sender_handle: UnboundedHandle<WebsocketSenderEvent>) -> Self {
+    pub fn new(
+        split_stream: T,
+        sender_handle: UnboundedHandle<WebsocketSenderEvent>,
+    ) -> Self {
         Self {
             sender_handle,
             split_stream: Some(split_stream),
@@ -45,13 +45,13 @@ where
 }
 
 #[async_trait::async_trait]
-impl<T> ChannelBuilder<WsRxChannel<T>> for WebsocketReceiver<T>
-where
-    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
+impl<T> ChannelBuilder<IoChannel<T>> for WebsocketReceiver<T>
+where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
+
 {
-    async fn build_channel<S>(&mut self) -> Result<WsRxChannel<T>, Reason> {
+    async fn build_channel<S>(&mut self) -> Result<IoChannel<T>, Reason> {
         if let Some(stream) = self.split_stream.take() {
-            Ok(WsRxChannel(stream))
+            Ok(IoChannel(stream))
         } else {
             Err(Reason::Exit)
         }
@@ -62,10 +62,10 @@ where
 impl<S, T> Actor<S> for WebsocketReceiver<T>
 where
     S: SupHandle<Self>,
-    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>> + Unpin,
+    T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>> + Unpin,
 {
     type Data = ();
-    type Channel = WsRxChannel<T>;
+    type Channel = IoChannel<T>;
     async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         Ok(())
     }

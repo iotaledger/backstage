@@ -79,6 +79,18 @@ pin_project! {
         inner: std::sync::Arc<AbortInner>,
     }
 }
+impl<T> std::ops::Deref for Abortable<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.task
+    }
+}
+impl<T> std::ops::DerefMut for Abortable<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.task
+    }
+}
 
 impl<T> std::convert::AsMut<T> for Abortable<T> {
     fn as_mut(&mut self) -> &mut T {
@@ -97,7 +109,7 @@ impl<T> Abortable<T> {
     fn try_poll<I>(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        poll: impl Fn(Pin<&mut T>, &mut Context<'_>) -> Poll<I>,
+        mut poll: impl FnMut(Pin<&mut T>, &mut Context<'_>) -> Poll<I>,
     ) -> Poll<Result<I, Aborted>> {
         // Check if the task has been aborted
         if self.is_aborted() {
@@ -121,6 +133,7 @@ impl<T> Abortable<T> {
     }
 }
 
+/// Implementation to make Abortable future
 impl<Fut> futures::future::Future for Abortable<Fut>
 where
     Fut: futures::future::Future,
@@ -132,6 +145,7 @@ where
     }
 }
 
+/// Implementation to make Abortable Stream
 impl<St> futures::stream::Stream for Abortable<St>
 where
     St: futures::stream::Stream,
@@ -142,6 +156,78 @@ where
         self.try_poll(cx, |stream, cx| stream.poll_next(cx))
             .map(Result::ok)
             .map(Option::flatten)
+    }
+}
+
+/// Implementation to make Abortable AsyncRead
+impl<R> tokio::io::AsyncRead for Abortable<R>
+where
+    R: tokio::io::AsyncRead,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let r = self.try_poll(cx, |inner_fut, cx| inner_fut.poll_read(cx, buf));
+        match r {
+            Poll::Ready(outer_res) => match outer_res {
+                Ok(inner_res) => Poll::Ready(inner_res),
+                Err(Aborted) => {
+                    return Poll::Ready(Ok(()));
+                }
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Implementation to make Abortable AsyncWrite
+impl<R> tokio::io::AsyncWrite for Abortable<R>
+where
+    R: tokio::io::AsyncWrite,
+{
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+        let r = self.try_poll(cx, |inner_fut, cx| inner_fut.poll_write(cx, buf));
+        match r {
+            Poll::Ready(outer_res) => match outer_res {
+                Ok(inner_res) => Poll::Ready(inner_res),
+                Err(Aborted) => {
+                    return Poll::Ready(Ok(0));
+                }
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let r = self.try_poll(cx, |inner_fut, cx| inner_fut.poll_write_vectored(cx, bufs));
+        match r {
+            Poll::Ready(outer_res) => match outer_res {
+                Ok(inner_res) => Poll::Ready(inner_res),
+                Err(Aborted) => {
+                    return Poll::Ready(Ok(0));
+                }
+            },
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.task.is_write_vectored()
+    }
+
+    #[inline]
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.as_mut().project().task.poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.as_mut().project().task.poll_shutdown(cx)
     }
 }
 
@@ -1094,6 +1180,7 @@ mod hyper {
         }
     }
 }
+
 #[cfg(feature = "hyper")]
 pub use self::hyper::*;
 
@@ -1261,5 +1348,94 @@ impl super::Shutdown for NullHandle {
     }
     fn scope_id(&self) -> ScopeId {
         self.scope_id
+    }
+}
+
+pub struct IoChannel<T>(pub T);
+impl<T> IoChannel<T> {
+    pub fn new(channel: T) -> Self {
+        Self(channel)
+    }
+}
+#[derive(Clone)]
+pub struct NetHandle(AbortHandle, ScopeId);
+impl NetHandle {
+    fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+        Self(abort_handle, scope_id)
+    }
+}
+
+#[async_trait::async_trait]
+impl Shutdown for NetHandle {
+    async fn shutdown(&self) {
+        self.0.abort()
+    }
+    fn scope_id(&self) -> ScopeId {
+        self.1
+    }
+}
+impl<S> Channel for IoChannel<S>
+where
+    S: Send + 'static + Sync,
+{
+    type Event = ();
+    type Handle = NetHandle;
+    type Inbox = Abortable<S>;
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<()>>>,
+    ) {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
+        let abortable_handle = NetHandle::new(abort_handle, scope_id);
+        (abortable_handle, abortable_inbox, abort_registration, None, None)
+    }
+}
+
+// test
+#[cfg(test)]
+mod tests {
+    use crate::core::{
+        Actor,
+        ActorResult,
+        IoChannel,
+        Reason,
+        Rt,
+        StreamExt,
+        SupHandle,
+    };
+
+    use tokio::io::{
+        AsyncReadExt,
+        AsyncWriteExt,
+    };
+
+    struct TcpStreamActor;
+    #[async_trait::async_trait]
+    impl<S> Actor<S> for TcpStreamActor
+    where
+        S: SupHandle<Self>,
+    {
+        type Data = ();
+        type Channel = IoChannel<tokio::net::TcpStream>;
+        async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+            Ok(())
+        }
+        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+            let mut buf = vec![0; 1024];
+            while let Ok(n) = rt.inbox_mut().read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+            }
+            Ok(())
+        }
     }
 }

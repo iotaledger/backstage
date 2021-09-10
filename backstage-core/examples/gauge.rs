@@ -19,7 +19,7 @@ impl<S> Actor<S> for Incrementer
 where
     S: SupHandle<Self>,
 {
-    type Data = Arc<prometheus::IntGauge>;
+    type Data = prometheus::IntGauge;
     type Channel = IntervalChannel<10>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!(
@@ -32,10 +32,9 @@ where
             prometheus::core::GenericGauge::new("magnitude", "Decrementer and Incrementer gauge resource").unwrap();
         // register the gauge
         rt.register(gauge.clone());
-        // create atomic resource, and publish it
-        let counter = Arc::new(gauge);
-        rt.add_resource(counter.clone()).await;
-        Ok(counter)
+        // add it as resource
+        rt.add_resource(gauge.clone()).await;
+        Ok(gauge)
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult {
         while let Some(_instant) = rt.inbox_mut().next().await {
@@ -54,7 +53,7 @@ impl<S> Actor<S> for Decrementer
 where
     S: SupHandle<Self>,
 {
-    type Data = Arc<prometheus::IntGauge>;
+    type Data = prometheus::IntGauge;
     type Channel = IntervalChannel<10>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
         log::info!(
@@ -83,7 +82,7 @@ where
     }
 }
 
-// The root custome actor, equivalent to a launcher;
+// The root custom actor, equivalent to a launcher;
 struct Backstage;
 enum BackstageEvent {
     Shutdown,

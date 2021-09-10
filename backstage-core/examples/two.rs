@@ -99,7 +99,7 @@ where
         let first = First;
         // start first
         rt.start(Some("first".into()), first).await?;
-        // 
+        //
         // - build Second
         let second = Second;
         // start second
@@ -134,7 +134,9 @@ where
                         service.status()
                     );
                     rt.upsert_microservice(scope_id, service);
-                    rt.inbox_mut().close();
+                    if rt.microservices_stopped() {
+                        rt.inbox_mut().close();
+                    }
                 }
             }
         }
