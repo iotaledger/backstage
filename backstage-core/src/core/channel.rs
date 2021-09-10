@@ -1358,15 +1358,15 @@ impl<T> IoChannel<T> {
     }
 }
 #[derive(Clone)]
-pub struct NetHandle(AbortHandle, ScopeId);
-impl NetHandle {
+pub struct IoHandle(AbortHandle, ScopeId);
+impl IoHandle {
     fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
         Self(abort_handle, scope_id)
     }
 }
 
 #[async_trait::async_trait]
-impl Shutdown for NetHandle {
+impl Shutdown for IoHandle {
     async fn shutdown(&self) {
         self.0.abort()
     }
@@ -1379,7 +1379,7 @@ where
     S: Send + 'static + Sync,
 {
     type Event = ();
-    type Handle = NetHandle;
+    type Handle = IoHandle;
     type Inbox = Abortable<S>;
     type Metric = prometheus::IntGauge;
     fn channel<T>(
@@ -1394,7 +1394,7 @@ where
     ) {
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
-        let abortable_handle = NetHandle::new(abort_handle, scope_id);
+        let abortable_handle = IoHandle::new(abort_handle, scope_id);
         (abortable_handle, abortable_inbox, abort_registration, None, None)
     }
 }
