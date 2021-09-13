@@ -1,10 +1,9 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use backstage::{
-    core::*,
-    prefab::websocket::RouteMessage,
-};
+use backstage::core::*;
+#[cfg(feature = "websocket_server")]
+use backstage::prefab::websocket::RouteMessage;
 
 struct HelloWorld;
 

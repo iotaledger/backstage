@@ -4,6 +4,7 @@
 //// Based on hyper hello example https://github.com/hyperium/hyper/blob/master/examples/hello.rs
 use std::convert::Infallible;
 
+#[cfg(feature = "hyper")]
 use hyper::{
     service::{
         make_service_fn,
@@ -17,7 +18,7 @@ use hyper::{
 async fn hello(_: Request<Body>) -> Result<Response<Body>, Infallible> {
     Ok(Response::new(Body::from("Hello World!")))
 }
-
+#[cfg(feature = "hyper")]
 // our prefab example starts from here
 use backstage::{
     core::*,

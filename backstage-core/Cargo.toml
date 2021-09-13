@@ -50,7 +50,7 @@ prefabs = []
 backserver = ["hyper", "hyper-tungstenite", "prefabs", "tungstenite"]
 [[example]]
 name = "hyper"
-required-features = ["prefabs", "hyper"]
+required-features = ["hyper"]
 
 [[example]]
 name = "hyper_prefab"
@@ -58,7 +58,7 @@ required-features = ["prefabs", "hyper"]
 
 [[example]]
 name = "hello_world"
-required-features = ["websocket_server"]
+required-features = ["websocket_server", "prefabs"]
 
 [[example]]
 name = "two"

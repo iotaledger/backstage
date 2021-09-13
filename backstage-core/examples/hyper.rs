@@ -3,6 +3,7 @@
 
 ///////////////// Forked from hyper example START //////
 /// https://github.com/hyperium/hyper/blob/master/examples/service_struct_impl.rs
+#[cfg(feature = "hyper")]
 use hyper::{
     Body,
     Request,
