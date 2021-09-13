@@ -224,7 +224,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let ReportData {
         id: report_var,
         fields: report_fields,
-        children: report_children,
+        children: _report_children,
         named_fields,
         ..
     } = &report_data;

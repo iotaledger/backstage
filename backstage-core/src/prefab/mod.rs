@@ -9,5 +9,5 @@ pub mod backserver;
 /// Hyper, provides hyper channel and prefab functionality
 pub mod hyper;
 #[cfg(feature = "tungstenite")]
-/// The websocket server 
+/// The websocket server
 pub mod websocket;

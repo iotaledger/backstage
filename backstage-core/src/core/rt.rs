@@ -202,7 +202,7 @@ where
         child: Child,
     ) -> Result<<Child::Channel as Channel>::Handle, Reason>
     where
-        Child: Actor<<A::Channel as Channel>::Handle> + super::ChannelBuilder<Child::Channel>,
+        Child: Actor<<A::Channel as Channel>::Handle> + ChannelBuilder<Child::Channel>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
         Self: Send,
     {
@@ -222,7 +222,7 @@ where
     ) -> Result<(<Child::Channel as Channel>::Handle, InitializedRx), Reason>
     where
         <A::Channel as Channel>::Handle: Clone,
-        Child: super::ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
+        Child: ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
             + Actor<<A::Channel as Channel>::Handle>,
         Dir: Into<Option<String>>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
@@ -960,6 +960,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
 
 /// Backstage runtime, spawn the root actor, and server (if enabled)
 pub struct Runtime<H> {
+    #[allow(unused)]
     scope_id: ScopeId,
     join_handle: tokio::task::JoinHandle<()>,
     handle: H,
@@ -975,21 +976,21 @@ where
     /// Create and spawn runtime with null supervisor handle
     pub async fn new<T, A>(root_dir: T, child: A) -> Result<Self, Reason>
     where
-        A: super::ChannelBuilder<<A as Actor<super::NullSupervisor>>::Channel> + Actor<super::NullSupervisor>,
+        A: ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor>,
         T: Into<Option<String>>,
-        <A as Actor<super::NullSupervisor>>::Channel: Channel<Handle = H>,
+        <A as Actor<NullSupervisor>>::Channel: Channel<Handle = H>,
         H: Shutdown + Clone,
     {
         #[cfg(feature = "console")]
         console_subscriber::init();
 
-        Self::with_supervisor(root_dir, child, super::NullSupervisor).await
+        Self::with_supervisor(root_dir, child, NullSupervisor).await
     }
 
     /// Create new runtime with provided supervisor handle
     pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> Result<Self, Reason>
     where
-        A: super::ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
+        A: ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
         <A as Actor<S>>::Channel: Channel<Handle = H>,
         S: SupHandle<A>,
