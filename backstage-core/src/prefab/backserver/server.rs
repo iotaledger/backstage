@@ -4,16 +4,11 @@ use crate::core::{
     UnboundedHandle,
 };
 use hyper::{
-    upgrade::Upgraded,
     Body,
     Request,
     Response,
 };
-use hyper_tungstenite::{
-    tungstenite,
-    HyperWebsocket,
-    WebSocketStream,
-};
+
 use std::{
     future::Future,
     pin::Pin,
@@ -24,6 +19,8 @@ use std::{
 };
 
 pub(crate) struct ListenerSvc {
+    /// The root scope_id, for now it's mostly 0
+    #[allow(unused)]
     root_scope_id: ScopeId,
     backserver_handle: UnboundedHandle<BackserverEvent>,
 }

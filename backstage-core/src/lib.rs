@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #![warn(missing_docs)]
-
+/// Backstage core functionality
 pub mod core;
 #[cfg(feature = "prefabs")]
+/// Backstage core functionality
 pub mod prefab;
 
 /// Spawn a task with a provided name, if tokio console tracing is enabled

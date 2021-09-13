@@ -4,13 +4,6 @@
 use backstage::core::*;
 
 ////////////////// Incrementer ///////////
-use std::sync::{
-    atomic::{
-        AtomicIsize,
-        Ordering,
-    },
-    Arc,
-};
 
 struct Incrementer;
 
@@ -31,7 +24,7 @@ where
         let gauge: prometheus::IntGauge =
             prometheus::core::GenericGauge::new("magnitude", "Decrementer and Incrementer gauge resource").unwrap();
         // register the gauge
-        rt.register(gauge.clone());
+        rt.register(gauge.clone()).ok();
         // add it as resource
         rt.add_resource(gauge.clone()).await;
         Ok(gauge)

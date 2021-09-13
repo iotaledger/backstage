@@ -60,6 +60,7 @@ impl Default for ServiceStatus {
 #[derive(Clone, Debug, Serialize)]
 pub struct Service {
     #[serde(skip_serializing)]
+    /// The actor's type id, who owns/manages the service
     pub actor_type_id: std::any::TypeId,
     /// The actor type name, only for debuging or to provide context
     pub actor_type_name: &'static str,
@@ -74,7 +75,7 @@ pub struct Service {
     /// Microservices
     pub microservices: std::collections::HashMap<ScopeId, Self>,
 }
-
+/// The microservices scopes ids iterator
 pub struct ServiceScopesIterator<'a> {
     actor_type_id: std::any::TypeId,
     inner: std::collections::hash_map::Iter<'a, ScopeId, Service>,
@@ -136,6 +137,7 @@ impl Service {
         // todo update the uptime/downtime if needed
         self.status = service_status;
     }
+    /// Return the directory name of the actor (if available)
     pub fn directory(&self) -> &Option<String> {
         &self.directory
     }
@@ -144,6 +146,7 @@ impl Service {
         self.downtime_ms = downtime_ms;
         self
     }
+    /// Check the owner actor's type of the service
     pub fn is_type<T: 'static>(&self) -> bool {
         let is_type_id = std::any::TypeId::of::<T>();
         self.actor_type_id == is_type_id
@@ -180,9 +183,11 @@ impl Service {
     pub fn status(&self) -> &ServiceStatus {
         &self.status
     }
+    /// Return immutable reference to the microservices HashMap
     pub fn microservices(&self) -> &std::collections::HashMap<ScopeId, Service> {
         &self.microservices
     }
+    /// Return mutable reference to the microservices HashMap
     pub fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
         &mut self.microservices
     }
@@ -221,7 +226,9 @@ impl std::fmt::Display for Service {
 }
 
 #[async_trait::async_trait]
+/// The sup handle which supervise T: Actor<Self>
 pub trait SupHandle<T: Send>: Report<T> + 'static + Send + Sized + Sync {
+    /// The supervisor event type
     type Event;
     /// Report End of life for a T actor
     /// return Some(()) if the report success
@@ -231,6 +238,7 @@ pub trait SupHandle<T: Send>: Report<T> + 'static + Send + Sized + Sync {
 }
 
 #[async_trait::async_trait]
+/// Report status change trait
 pub trait Report<T: Send>: Send + Sized + 'static {
     /// Report any status & service changes
     /// return Some(()) if the report success
@@ -242,10 +250,12 @@ pub trait Report<T: Send>: Send + Sized + 'static {
 
 /// Ideally it should be implemented using proc_macro on the event type
 pub trait ReportEvent<T>: Send + 'static {
+    /// Creates report event that will be pushed as status change from the Child: T
     fn report_event(scope: super::ScopeId, service: Service) -> Self;
 }
 
 /// Ideally it should be implemented using proc_macro on the event type
 pub trait EolEvent<T>: Send + 'static {
+    /// Creates eol event that will be pushed as end of life event once the Child: T breakdown
     fn eol_event(scope: super::ScopeId, service: Service, actor: T, r: super::ActorResult) -> Self;
 }

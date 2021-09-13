@@ -4,12 +4,12 @@ mod server;
 use super::websocket::{
     WebsocketReceiver,
     WebsocketSender,
-    WebsocketSenderEvent,
 };
 use crate::core::*;
 use hyper_tungstenite::HyperWebsocket;
-// Backserver supervisor
 
+/// Backserver supervisor, enables websocket & http servers
+/// and manages all the active websocket connections
 pub struct Backserver {
     addr: std::net::SocketAddr,
     root_scope_id: ScopeId,
@@ -32,6 +32,7 @@ impl Backserver {
     }
 }
 
+/// Backserver Event type
 pub enum BackserverEvent {
     /// Shutdown signal
     Shutdown,

@@ -32,6 +32,7 @@ use crate::prefab::websocket::Websocket;
 
 use prometheus::core::Collector;
 use std::collections::HashMap;
+/// The actor's local context
 pub struct Rt<A: Actor<S>, S: SupHandle<A>>
 where
     Self: Send,
@@ -40,22 +41,36 @@ where
     pub(crate) depth: usize,
     /// The service of the actor
     pub(crate) service: Service,
+    /// The PartitionedScope's position index in the SCOPES
+    /// That owns the actor's scope.
     pub(crate) scopes_index: usize,
+    /// ScopeId of the actor
     pub(crate) scope_id: ScopeId,
+    /// the parent's scope id
     pub(crate) parent_scope_id: Option<ScopeId>,
-    pub(crate) supervisor: S,
+    /// The supervisor handle
+    pub(crate) sup_handle: S,
+    /// The actor's handle
     pub(crate) handle: <A::Channel as Channel>::Handle,
+    /// The actor's inbox
     pub(crate) inbox: <A::Channel as Channel>::Inbox,
+    /// The actor's children handles
     pub(crate) children_handles: std::collections::HashMap<ScopeId, Box<dyn Shutdown>>,
+    /// The actor's children joins
     pub(crate) children_joins: std::collections::HashMap<ScopeId, tokio::task::JoinHandle<()>>,
+    /// The actor abort_registration copy
     pub(crate) abort_registration: AbortRegistration,
+    /// Registered prometheus metrics
     pub(crate) registered_metrics: Vec<Box<dyn prometheus::core::Collector>>,
+    /// Visiable/ exposed global resources
     pub(crate) visible_data: std::collections::HashSet<std::any::TypeId>,
 }
-
+/// InitializedRx signal receiver
 pub struct InitializedRx(ScopeId, tokio::sync::oneshot::Receiver<Result<Service, super::Reason>>);
+type InitSignalTx = tokio::sync::oneshot::Sender<Result<Service, super::Reason>>;
 
 impl InitializedRx {
+    /// Await till the actor get initialized
     pub async fn initialized(self) -> Result<(ScopeId, Service), super::Reason> {
         let service = self.1.await.expect("Expected functional CheckInit oneshot")?;
         Ok((self.0, service))
@@ -65,37 +80,42 @@ enum Direction {
     Child(String),
     Parent,
 }
+/// Helper struct, to traverse the supervision tree and locate the scope id
 pub struct LocateScopeId {
     start: Option<ScopeId>,
     directory_path: std::collections::VecDeque<Direction>,
 }
 
 impl LocateScopeId {
+    /// Create new LocateScopeId struct with null start scope_id
     pub fn new() -> Self {
         Self {
             start: None,
             directory_path: std::collections::VecDeque::new(),
         }
     }
+    /// Create new LocateScopeId struct with scope id as its start id
     pub fn with_scope_id(start: ScopeId) -> Self {
         Self {
             start: Some(start),
             directory_path: std::collections::VecDeque::new(),
         }
     }
-
+    /// Add child with the provided name to the directory path
     pub fn child<D: Into<String>>(mut self, dir_name: D) -> Self {
         self.directory_path.push_back(Direction::Child(dir_name.into()));
         self
     }
+    /// Add parent to the directory path
     pub fn parent(mut self) -> Self {
         self.directory_path.push_back(Direction::Parent);
         self
     }
+    /// Add grand parent to the directory path
     pub fn grandparent(self) -> Self {
         self.parent().parent()
     }
-    /// Get the most recent scope_id
+    /// Process the directory path and get the scope_id
     pub async fn scope_id(&self) -> Option<ScopeId> {
         if let Some(start) = self.start.as_ref() {
             let mut recent = *start;
@@ -142,10 +162,12 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S>
 where
     Self: Send + Sync,
 {
+    /// Start traversing from the child with the provided dir name
     pub fn child<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
         let locate = LocateScopeId::with_scope_id(self.scope_id());
         locate.child(dir_name)
     }
+    /// Start traversing from the parent
     pub fn parent(&self) -> LocateScopeId {
         if let Some(parent_id) = self.parent_scope_id {
             LocateScopeId::with_scope_id(parent_id)
@@ -153,12 +175,15 @@ where
             LocateScopeId::new()
         }
     }
+    /// Start traversing from the sibling with the provided dir name
     pub fn sibling<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
         self.parent().child(dir_name)
     }
+    /// Start traversing from the grand parent
     pub fn grandparent(&self) -> LocateScopeId {
         self.parent().parent()
     }
+    /// Start traversing from the uncle
     pub fn uncle<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
         self.grandparent().child(dir_name)
     }
@@ -170,6 +195,7 @@ where
         let abort_registration = self.abort_registration.clone();
         Abortable::new(fut, abort_registration)
     }
+    /// Spawn the provided child and await it's initialized
     pub async fn start<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
@@ -188,6 +214,7 @@ where
             Err(Reason::Aborted)
         }
     }
+    /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
     pub async fn spawn<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
@@ -277,37 +304,13 @@ where
         }
         let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
         // create child future;
-        let wrapped_fut = async move {
-            let mut child = child;
-            let mut rt = child_context;
-            let check_init = tx_oneshot;
-            let f = child.init(&mut rt);
-            match f.await {
-                Err(reason) => {
-                    // inform oneshot receiver
-                    check_init.send(Err(reason.clone())).ok();
-                    // breakdown the child
-                    let f = rt.breakdown(child, Err(reason));
-                    f.await;
-                }
-                Ok(deps) => {
-                    if rt.service().is_initializing() {
-                        rt.update_status(ServiceStatus::Running).await
-                    }
-                    let service = rt.service().clone();
-                    // inform oneshot receiver
-                    check_init.send(Ok(service)).ok();
-                    let f = child.run(&mut rt, deps);
-                    let r = f.await;
-                    let f = rt.breakdown(child, r);
-                    f.await
-                }
-            }
-        };
+        let wrapped_fut = actor_fut_with_signal::<Child, _>(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
         self.children_joins.insert(child_scope_id, join_handle);
         Ok((handle, InitializedRx(child_scope_id, rx_oneshot)))
     }
+    /// Insert/Update microservice.
+    /// Note: it will remove the children handles/joins if the provided service is stopped
     pub fn upsert_microservice(&mut self, scope_id: ScopeId, service: Service) {
         if service.is_stopped() {
             self.children_handles.remove(&scope_id);
@@ -315,36 +318,42 @@ where
         }
         self.service.microservices.insert(scope_id, service);
     }
-    pub fn remove_microservice(&mut self, scope_id: ScopeId) {
-        self.service.microservices.remove(&scope_id);
+    /// Remove the microservice microservice under the provided scope_id
+    pub fn remove_microservice(&mut self, scope_id: ScopeId) -> Option<Service> {
         self.children_handles.remove(&scope_id);
         self.children_joins.remove(&scope_id);
+        self.service.microservices.remove(&scope_id)
     }
-    // Update context service status
+    /// Update the service status, and report to the supervisor and subscribers (if any)
     pub async fn update_status(&mut self, service_status: ServiceStatus) {
         self.service.update_status(service_status);
         let service = self.service.clone();
         // report to supervisor
-        self.supervisor.report(self.scope_id, service.clone()).await;
+        self.sup_handle.report(self.scope_id, service.clone()).await;
         // publish the service to subscribers
         self.publish(service).await;
     }
+    /// Returns mutable reference to the actor's inbox
     pub fn inbox_mut(&mut self) -> &mut <A::Channel as Channel>::Inbox {
         &mut self.inbox
     }
+    /// Returns mutable reference to the actor's handle
     pub fn handle_mut(&mut self) -> &mut <A::Channel as Channel>::Handle {
         &mut self.handle
     }
+    /// Returns immutable reference to the actor's handle
     pub fn handle(&self) -> &<A::Channel as Channel>::Handle {
         &self.handle
     }
+    /// Returns mutable reference to the actor's supervisor handle
     pub fn supervisor_handle_mut(&mut self) -> &mut S {
-        &mut self.supervisor
+        &mut self.sup_handle
     }
+    /// Returns immutable reference to the actor's supervisor handle
     pub fn supervisor_handle(&self) -> &S {
-        &self.supervisor
+        &self.sup_handle
     }
-    /// Get the service
+    /// Get the local service
     pub fn service(&self) -> &Service {
         &self.service
     }
@@ -356,17 +365,7 @@ where
     pub fn parent_id(&self) -> Option<ScopeId> {
         self.parent_scope_id
     }
-    pub async fn get_directory_scope_id(&self, parent_scope_id: ScopeId, dir_name: &String) -> Option<ScopeId> {
-        let scopes_index = parent_scope_id % *BACKSTAGE_PARTITIONS;
-        let lock = SCOPES[scopes_index].read().await;
-        if let Some(scope) = lock.get(&parent_scope_id) {
-            let dir_name = scope.active_directories.get(dir_name).and_then(|s| Some(s.to_owned()));
-            drop(lock);
-            dir_name
-        } else {
-            None
-        }
-    }
+    /// Shutdown the scope under the provided scope_id
     pub async fn shutdown_scope(&self, scope_id: ScopeId) -> anyhow::Result<()>
     where
         Self: Send,
@@ -383,15 +382,19 @@ where
         };
         Ok(())
     }
+    /// Check if microservices are stopped
     pub fn microservices_stopped(&self) -> bool {
         self.service.microservices.iter().all(|(_, s)| s.is_stopped())
     }
-    pub fn microservices_all(&self, is: fn(&Service) -> bool) -> bool {
-        self.service.microservices.iter().all(|(_, s)| is(s))
+    /// Check if all microservices are _
+    pub fn microservices_all(&self, are: fn(&Service) -> bool) -> bool {
+        self.service.microservices.iter().all(|(_, s)| are(s))
     }
+    /// Check if any microservice is _
     pub fn microservices_any(&self, is: fn(&Service) -> bool) -> bool {
         self.service.microservices.iter().any(|(_, s)| is(s))
     }
+    /// Stop the microservices and update status to stopping
     pub async fn stop(&mut self) {
         self.shutdown_children().await;
         self.update_status(ServiceStatus::Stopping).await;
@@ -426,6 +429,11 @@ where
         for (_, c) in self.children_joins.drain() {
             let _ = c.await;
         }
+        // Iterate all the microservices and set them to stopped
+        self.service
+            .microservices
+            .iter_mut()
+            .for_each(|(_, c)| c.update_status(ServiceStatus::Stopped));
         // unregister registered_metrics
         self.unregister_metrics().expect("To unregister metrics");
         // update service to be Stopped
@@ -472,8 +480,9 @@ where
             cleanup_from_other.cleanup_from_other(self.scope_id).await;
         }
         // aknshutdown to supervisor
-        self.supervisor.eol(self.scope_id, service, actor, r).await;
+        self.sup_handle.eol(self.scope_id, service, actor, r).await;
     }
+    /// Add route for T
     pub async fn add_route<T: Send + 'static>(&self) -> anyhow::Result<()>
     where
         <A::Channel as Channel>::Handle: Route<T>,
@@ -484,12 +493,14 @@ where
         my_scope.router.insert(route);
         Ok(())
     }
+    /// Remove route of T
     pub async fn remove_route<T: Send + 'static>(&self) -> anyhow::Result<()> {
         let mut lock = SCOPES[self.scopes_index].write().await;
         let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
         my_scope.router.remove::<Box<dyn Route<T>>>();
         Ok(())
     }
+    /// Try to send message T, to the provided scope_i
     pub async fn send<T: Send + 'static>(&self, scope_id: ScopeId, message: T) -> anyhow::Result<()>
     where
         Self: Send + Sync,
@@ -523,7 +534,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         scopes_index: usize,
         scope_id: ScopeId,
         parent_scope_id: Option<ScopeId>,
-        supervisor: S,
+        sup_handle: S,
         handle: <A::Channel as Channel>::Handle,
         inbox: <A::Channel as Channel>::Inbox,
         abort_registration: AbortRegistration,
@@ -535,7 +546,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             scopes_index,
             scope_id,
             parent_scope_id,
-            supervisor,
+            sup_handle,
             handle,
             inbox,
             children_handles: std::collections::HashMap::new(),
@@ -586,7 +597,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             .or_insert(vec![(depth, scope_id)]);
         drop(lock);
     }
-    /// Get the highest resource (at the most top level)
+    /// Get the highest resource's scope id (at the most top level) for a given global visiable resource
     pub async fn highest_scope_id<T: Resource>(&self) -> Option<ScopeId> {
         let type_id = std::any::TypeId::of::<T>();
         let lock = VISIBLE_DATA.read().await;
@@ -596,6 +607,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             None
         }
     }
+    /// Gets the lowest resource's scope id for a given global visiable resource
     pub async fn lowest_scope_id<T: Resource>(&self) -> Option<ScopeId> {
         let type_id = std::any::TypeId::of::<T>();
         let lock = VISIBLE_DATA.read().await;
@@ -605,6 +617,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             None
         }
     }
+    /// Try to borrow resource and invoke fn_once
     pub async fn try_borrow<'a, T: Resource, R>(
         &self,
         resource_scope_id: ScopeId,
@@ -624,6 +637,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         }
         None
     }
+    /// Try to borrow_mut the resource and invoke fn_once
     pub async fn try_borrow_mut<'a, T: Resource, R>(
         &self,
         resource_scope_id: ScopeId,
@@ -726,6 +740,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             drop(lock);
         };
     }
+    /// Lookup for resource T under the provider scope_id
     pub async fn lookup<T: Resource>(&self, resource_scope_id: ScopeId) -> Option<T> {
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
@@ -739,6 +754,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             None
         }
     }
+    /// Drop the resource, and inform the interested dyn subscribers
     pub async fn drop_resource<T: Resource>(&self) {
         // require further read locks
         let mut should_get_shutdown = Vec::<Box<dyn Shutdown>>::new();
@@ -780,6 +796,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             shutdown_handle.shutdown().await;
         }
     }
+    /// Depends on resource T, it will await/block till the resource is available
     pub async fn depends_on<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
         let my_scope_id = self.scope_id;
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
@@ -822,6 +839,8 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             anyhow::bail!("Resource scope doesn't exist");
         }
     }
+    /// Link to resource, which will await till it's available.
+    /// NOTE: similar to depends_on, but only shutdown self actor of the resource got dropped
     pub async fn link<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
         let my_scope_id = self.scope_id;
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
@@ -883,6 +902,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             anyhow::bail!("Resource scope doesn't exist");
         }
     }
+    /// Depends on dynamic Resource T
     pub async fn depends_on_dyn<T: Resource>(
         &self,
         resource_scope_id: ScopeId,
@@ -938,6 +958,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     }
 }
 
+/// Backstage runtime, spawn the root actor, and server (if enabled)
 pub struct Runtime<H> {
     scope_id: ScopeId,
     join_handle: tokio::task::JoinHandle<()>,
@@ -951,6 +972,7 @@ impl<H> Runtime<H>
 where
     H: Clone + Shutdown,
 {
+    /// Create and spawn runtime with null supervisor handle
     pub async fn new<T, A>(root_dir: T, child: A) -> Result<Self, Reason>
     where
         A: super::ChannelBuilder<<A as Actor<super::NullSupervisor>>::Channel> + Actor<super::NullSupervisor>,
@@ -964,7 +986,7 @@ where
         Self::with_supervisor(root_dir, child, super::NullSupervisor).await
     }
 
-    /// Create new runtime
+    /// Create new runtime with provided supervisor handle
     pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> Result<Self, Reason>
     where
         A: super::ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
@@ -1016,32 +1038,7 @@ where
         }
         let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
         // create child future;
-        let wrapped_fut = async move {
-            let mut child = child;
-            let mut rt = child_context;
-            let check_init = tx_oneshot;
-            let f = child.init(&mut rt);
-            match f.await {
-                Err(reason) => {
-                    // inform oneshot receiver
-                    check_init.send(Err(reason.clone())).ok();
-                    // breakdown the child
-                    let f = rt.breakdown(child, Err(reason));
-                    f.await;
-                }
-                Ok(deps) => {
-                    if rt.service().is_initializing() {
-                        rt.update_status(ServiceStatus::Running).await
-                    }
-                    // inform oneshot receiver
-                    check_init.send(Ok(rt.service().clone())).ok();
-                    let f = child.run(&mut rt, deps);
-                    let r = f.await;
-                    let f = rt.breakdown(child, r);
-                    f.await
-                }
-            }
-        };
+        let wrapped_fut = actor_fut_with_signal(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
         crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
         Ok(Self {
@@ -1053,15 +1050,18 @@ where
             server_join_handle: None,
         })
     }
+    /// Returns immutable reference to the root actor
     pub fn handle(&self) -> &H {
         &self.handle
     }
+    /// Returns mutable reference to the root actor
     pub fn handle_mut(&mut self) -> &mut H {
         &mut self.handle
     }
 
     #[cfg(feature = "websocket_server")]
     #[cfg(not(feature = "backserver"))]
+    /// Enable the websocket server
     pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason>
     where
         Websocket: Actor<NullSupervisor> + ChannelBuilder<<Websocket as Actor<NullSupervisor>>::Channel>,
@@ -1133,8 +1133,9 @@ where
         self.server.replace(Box::new(handle.clone()));
         Ok(self)
     }
-
+    #[cfg(not(feature = "websocket_server"))]
     #[cfg(feature = "backserver")]
+    /// Enable backserver (websocket server + http + prometheus metrics)
     pub async fn backserver(mut self, addr: std::net::SocketAddr) -> Result<Self, Reason>
     where
         crate::prefab::backserver::Backserver: Actor<NullSupervisor>
@@ -1205,10 +1206,11 @@ where
         self.server.replace(Box::new(handle.clone()));
         Ok(self)
     }
-
+    /// Returns the InitializedRx of the root actor, it's helper method.
     pub fn take_initialized_rx(&mut self) -> Option<InitializedRx> {
         self.initialized_rx.take()
     }
+    /// Block on the runtime till it shutdown gracefully
     pub async fn block_on(mut self) -> Result<(), tokio::task::JoinError> {
         let r = self.join_handle.await;
         if let Some(ws_server_handle) = self.server.take() {
@@ -1219,6 +1221,31 @@ where
     }
 }
 
+/// The actor wrapped future
+async fn actor_fut_with_signal<A: Actor<S>, S: SupHandle<A>>(mut actor: A, mut rt: Rt<A, S>, check_init: InitSignalTx) {
+    let f = actor.init(&mut rt);
+    match f.await {
+        Err(reason) => {
+            // inform oneshot receiver
+            check_init.send(Err(reason.clone())).ok();
+            // breakdown the child
+            let f = rt.breakdown(actor, Err(reason));
+            f.await;
+        }
+        Ok(deps) => {
+            if rt.service().is_initializing() {
+                rt.update_status(ServiceStatus::Running).await
+            }
+            let service = rt.service().clone();
+            // inform oneshot receiver
+            check_init.send(Ok(service)).ok();
+            let f = actor.run(&mut rt, deps);
+            let r = f.await;
+            let f = rt.breakdown(actor, r);
+            f.await
+        }
+    }
+}
 /// Useful function to exit program using ctrl_c signal
 async fn ctrl_c<H: Shutdown>(handle: H) {
     // await on ctrl_c

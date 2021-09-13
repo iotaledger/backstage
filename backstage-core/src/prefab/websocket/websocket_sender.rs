@@ -4,24 +4,20 @@
 use super::ResponseResult;
 use crate::core::*;
 use futures::{
-    stream::SplitSink,
-    SinkExt,
     sink::Sink,
+    SinkExt,
 };
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    tungstenite::Message,
-    WebSocketStream,
-};
-
+/// The websocket sender actor, manages the sink half of the client.
 pub struct WebsocketSender<T>
-where T: Sink<Message>
+where
+    T: Sink<Message>,
 {
     split_sink: T,
 }
 
 impl<T> WebsocketSender<T>
-where T: Sink<Message> + Send + Sync + 'static
+where
+    T: Sink<Message> + Send + Sync + 'static,
 {
     pub(crate) fn new(split_sink: T) -> Self {
         Self { split_sink }

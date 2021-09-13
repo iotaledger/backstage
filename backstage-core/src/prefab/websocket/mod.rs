@@ -16,6 +16,7 @@ pub(crate) use websocket_sender::{
 };
 
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
+/// The route message, wrapper around Message::Text inner string
 pub struct RouteMessage(pub String);
 impl From<RouteMessage> for String {
     fn from(v: RouteMessage) -> Self {
@@ -24,6 +25,7 @@ impl From<RouteMessage> for String {
 }
 // Deserializable event
 #[derive(serde::Deserialize, serde::Serialize)]
+/// The ws interface event type
 pub enum Event {
     /// shutdown the actor
     Shutdown,
@@ -36,18 +38,22 @@ pub enum Event {
 }
 
 impl Event {
+    /// Create shutdown event
     pub fn shutdown() -> Self {
         Self::Shutdown
     }
+    /// Create cast event
     pub fn cast(message: String) -> Self {
         Self::Cast(RouteMessage(message))
     }
+    /// Create request service tree event
     pub fn service() -> Self {
         Self::RequestServiceTree
     }
 }
 // Serializable response
 #[derive(serde::Serialize)]
+/// The expected client's response for a given event request
 pub enum Response {
     /// Success shutdown signal
     Shutdown(ActorPath),
@@ -60,16 +66,24 @@ pub enum Response {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+/// The expected client's error for a given event request
 pub enum Error {
+    /// Failed to shutdown the actor under the ActorPath
+    /// (path, error string)
     Shutdown(ActorPath, String),
+    /// Failed to cast RouteMessge to ActorPath.
     Cast(ActorPath, RouteMessage, String),
+    /// Failed to call RouteMessge to ActorPath.
     Call(ActorPath, RouteMessage, String),
+    /// Unable to fetch the service
     ServiceTree(String),
 }
 
+/// Wrapper around the final expected result
 pub type ResponseResult = Result<Response, Error>;
 
 #[derive(serde::Deserialize, serde::Serialize, Default, Clone)] // todo impl better ser/de
+/// The actor directory path
 pub struct ActorPath {
     root: ScopeId,
     path: Vec<String>,
@@ -82,16 +96,19 @@ impl ActorPath {
             path: Vec::new(),
         }
     }
+    /// Create actor path starting from the provided scope_id
     pub fn with_scope_id(scope_id: ScopeId) -> Self {
         Self {
             root: scope_id,
             path: Vec::new(),
         }
     }
+    /// Push directory name to the actor path
     pub fn push(mut self, dir_name: String) -> Self {
         self.path.push(dir_name);
         self
     }
+    /// Process the actor path and get the destination scope_id
     pub async fn destination(&self) -> Option<ScopeId> {
         let mut current_scope_id = self.root;
         let mut iter = self.path.iter();
@@ -115,15 +132,20 @@ impl ActorPath {
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
+/// The interface request, which is sent by the websocket clients
 pub struct Interface {
+    /// The targeted actor path
     pub actor_path: ActorPath,
+    /// The event which we should send to the targeted actor
     pub event: Event,
 }
 
 impl Interface {
+    /// Create new interface request with provided actor path and event
     pub fn new(actor_path: ActorPath, event: Event) -> Self {
         Self { actor_path, event }
     }
+    /// Convert the interface request into tungstenite's message type
     pub fn to_message(self) -> tokio_tungstenite::tungstenite::Message {
         let json = serde_json::to_string(&self).expect("Serializeable json");
         Message::Text(json)
@@ -133,6 +155,7 @@ impl Interface {
 use crate::core::*;
 // Websocket supervisor
 
+/// The websocket supervisor, enables websocket server and manages ws connections
 pub struct Websocket {
     addr: std::net::SocketAddr,
     ttl: Option<u32>,
@@ -160,8 +183,11 @@ impl Websocket {
     }
 }
 
+/// Websocket event type
 pub enum WebsocketEvent {
+    /// Shutdown variant, to receive shutdown signal
     Shutdown,
+    /// Microservice variant to receive report and eol events
     Microservice(ScopeId, Service, Option<ActorResult>),
     /// New TcpStream from listener
     TcpStream(tokio::net::TcpStream),

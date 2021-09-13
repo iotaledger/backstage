@@ -10,33 +10,24 @@ use super::{
 };
 use crate::core::*;
 use futures::stream::{
-    SplitStream,
-    StreamExt,
     Stream,
+    StreamExt,
 };
-use tokio::net::TcpStream;
-use tokio_tungstenite::{
-    tungstenite::Message,
-    WebSocketStream,
-    tungstenite::Error as WsError,
-};
-
+/// The websocket receiver actor, manages the Stream from the client
 pub struct WebsocketReceiver<T>
-where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
 {
     sender_handle: UnboundedHandle<WebsocketSenderEvent>,
     split_stream: Option<T>,
 }
 
 impl<T> WebsocketReceiver<T>
-where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
-
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
 {
     /// Create new WebsocketReceiver struct
-    pub fn new(
-        split_stream: T,
-        sender_handle: UnboundedHandle<WebsocketSenderEvent>,
-    ) -> Self {
+    pub fn new(split_stream: T, sender_handle: UnboundedHandle<WebsocketSenderEvent>) -> Self {
         Self {
             sender_handle,
             split_stream: Some(split_stream),
@@ -46,8 +37,8 @@ where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
 
 #[async_trait::async_trait]
 impl<T> ChannelBuilder<IoChannel<T>> for WebsocketReceiver<T>
-where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
-
+where
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
 {
     async fn build_channel<S>(&mut self) -> Result<IoChannel<T>, Reason> {
         if let Some(stream) = self.split_stream.take() {
@@ -62,7 +53,7 @@ where T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>>,
 impl<S, T> Actor<S> for WebsocketReceiver<T>
 where
     S: SupHandle<Self>,
-    T: Send + 'static + Sync + Stream<Item=Result<Message, WsError>> + Unpin,
+    T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>> + Unpin,
 {
     type Data = ();
     type Channel = IoChannel<T>;

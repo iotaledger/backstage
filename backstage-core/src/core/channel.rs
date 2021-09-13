@@ -6,11 +6,7 @@ use async_trait::async_trait;
 use core::pin::Pin;
 use futures::{
     future::Aborted,
-    stream::{
-        SplitSink,
-        SplitStream,
-        StreamExt,
-    },
+    stream::StreamExt,
     task::{
         AtomicWaker,
         Context,
@@ -24,15 +20,12 @@ use std::sync::atomic::{
     Ordering,
 };
 pub use tokio::net::TcpListener;
-use tokio::{
-    net::TcpStream,
-    sync::mpsc::{
-        error::TrySendError,
-        Receiver,
-        Sender,
-        UnboundedReceiver,
-        UnboundedSender,
-    },
+use tokio::sync::mpsc::{
+    error::TrySendError,
+    Receiver,
+    Sender,
+    UnboundedReceiver,
+    UnboundedSender,
 };
 use tokio_stream::wrappers::IntervalStream;
 pub use tokio_stream::wrappers::TcpListenerStream;
@@ -44,17 +37,20 @@ struct AbortInner {
     waker: AtomicWaker,
     aborted: AtomicBool,
 }
-
+/// AbortHandle used to abort Abortable<T>
 #[derive(Debug, Clone)]
 pub struct AbortHandle {
     inner: std::sync::Arc<AbortInner>,
 }
 
 impl AbortHandle {
+    /// Abort the abortable task
     pub fn abort(&self) {
         self.inner.aborted.store(true, Ordering::Relaxed);
         self.inner.waker.wake();
     }
+    /// Create new (abort_handle, abort_registration) pair
+    /// Note: AbortRegistration: should be used in sync order only.
     pub fn new_pair() -> (Self, AbortRegistration) {
         let inner = std::sync::Arc::new(AbortInner {
             waker: AtomicWaker::new(),
@@ -65,6 +61,7 @@ impl AbortHandle {
     }
 }
 
+/// Sync AbortRegistration, should only be used within the actor lifecycle.
 #[derive(Debug, Clone)]
 pub struct AbortRegistration {
     inner: std::sync::Arc<AbortInner>,
@@ -103,6 +100,7 @@ impl<T> Abortable<T> {
     pub fn new(task: T, reg: AbortRegistration) -> Self {
         Self { task, inner: reg.inner }
     }
+    /// Check if the abortable got aborted
     pub fn is_aborted(&self) -> bool {
         self.inner.aborted.load(Ordering::Relaxed)
     }
@@ -259,19 +257,23 @@ pub trait Channel: Send + Sized {
     }
 }
 
+/// Channel builder trait, to be implemented on the actor type
 #[async_trait::async_trait]
 pub trait ChannelBuilder<C: Channel> {
+    /// Implement how to build the channel for the corresponding actor
     async fn build_channel<S>(&mut self) -> Result<C, Reason>
     where
         Self: Actor<S, Channel = C>,
         S: SupHandle<Self>;
 }
 
+/// Dynamic route as trait object, should be implemented on the actor's handle
 #[async_trait::async_trait]
 pub trait Route<M>: Send + Sync + dyn_clone::DynClone {
+    /// Try to send message to the channel.
     async fn try_send_msg(&self, message: M) -> anyhow::Result<Option<M>>;
     /// if the Route<M> is behind lock, drop the lock before invoking this method.
-    async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()>;
+    async fn send_msg(&self, message: M) -> anyhow::Result<()>;
 }
 
 dyn_clone::clone_trait_object!(<M> Route<M>);
@@ -284,6 +286,7 @@ pub struct UnboundedChannel<E> {
     rx: UnboundedReceiver<E>,
 }
 
+/// Unbounded inbox of unbounded channel
 #[derive(Debug)]
 pub struct UnboundedInbox<T> {
     metric: prometheus::IntGauge,
@@ -315,6 +318,7 @@ impl<T> tokio_stream::Stream for UnboundedInbox<T> {
     }
 }
 
+/// Unbounded handle
 #[derive(Debug)]
 pub struct UnboundedHandle<T> {
     scope_id: ScopeId,
@@ -335,6 +339,7 @@ impl<T> Clone for UnboundedHandle<T> {
 }
 
 impl<T> UnboundedHandle<T> {
+    /// Create new abortable handle
     pub fn new(
         sender: UnboundedSender<T>,
         gauge: prometheus::IntGauge,
@@ -348,6 +353,7 @@ impl<T> UnboundedHandle<T> {
             inner: sender,
         }
     }
+    /// Send Message to the channel
     pub fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         let r = self.inner.send(message);
         if r.is_ok() {
@@ -355,12 +361,15 @@ impl<T> UnboundedHandle<T> {
         }
         r
     }
+    /// Await till the channel unbounded receiver is dropped/closed
     pub async fn closed(&self) {
         self.inner.closed().await
     }
+    /// Check if the channel is closed
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+    /// Returns true if senders belong to the same channel
     pub fn same_channel(&self, other: &Self) -> bool {
         self.inner.same_channel(&other.inner)
     }
@@ -465,7 +474,7 @@ where
         };
         Ok(None)
     }
-    async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()> {
+    async fn send_msg(&self, message: M) -> anyhow::Result<()> {
         if let Ok(event) = E::try_from(message) {
             if let Err(error) = self.send(event) {
                 anyhow::bail!("{}", error)
@@ -516,6 +525,7 @@ where
         })
     }
 }
+/// Abortable unbounded inbox, it returns None if the actor/channel got aborted
 #[derive(Debug)]
 pub struct AbortableUnboundedInbox<T> {
     inner: Abortable<UnboundedInbox<T>>,
@@ -542,6 +552,7 @@ where
     }
 }
 
+/// Abortable unbounded handle
 #[derive(Debug)]
 pub struct AbortableUnboundedHandle<T> {
     inner: UnboundedHandle<T>,
@@ -556,18 +567,23 @@ impl<T> Clone for AbortableUnboundedHandle<T> {
 }
 
 impl<T> AbortableUnboundedHandle<T> {
+    /// Create new abortable unbounded handle
     pub fn new(sender: UnboundedHandle<T>) -> Self {
         Self { inner: sender }
     }
+    /// Send Message to the channel
     pub fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         self.inner.send(message)
     }
+    /// Await till the channel is closed
     pub async fn closed(&self) {
         self.inner.closed().await
     }
+    /// Check if the channel is closed
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+    /// Returns true if senders belong to the same channel
     pub fn same_channel(&self, other: &Self) -> bool {
         self.inner.same_channel(&other.inner)
     }
@@ -633,7 +649,7 @@ where
     async fn try_send_msg(&self, message: M) -> anyhow::Result<Option<M>> {
         self.inner.try_send_msg(message).await
     }
-    async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()> {
+    async fn send_msg(&self, message: M) -> anyhow::Result<()> {
         if let Ok(event) = E::try_from(message) {
             if let Err(error) = self.send(event) {
                 anyhow::bail!("{}", error)
@@ -654,6 +670,7 @@ pub struct BoundedChannel<E, const C: usize> {
     rx: Receiver<E>,
 }
 
+/// Bounded inbox
 #[derive(Debug)]
 pub struct BoundedInbox<T> {
     metric: prometheus::IntGauge,
@@ -685,6 +702,7 @@ impl<T> tokio_stream::Stream for BoundedInbox<T> {
     }
 }
 
+/// Bounded handle
 #[derive(Debug)]
 pub struct BoundedHandle<T> {
     scope_id: ScopeId,
@@ -705,6 +723,7 @@ impl<T> Clone for BoundedHandle<T> {
 }
 
 impl<T> BoundedHandle<T> {
+    /// Create new bounded handle
     pub fn new(sender: Sender<T>, gauge: prometheus::IntGauge, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
         Self {
             scope_id,
@@ -713,6 +732,7 @@ impl<T> BoundedHandle<T> {
             inner: sender,
         }
     }
+    /// Send message to the bounded channel
     pub async fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         let r = self.inner.send(message).await;
         if r.is_ok() {
@@ -720,9 +740,11 @@ impl<T> BoundedHandle<T> {
         }
         r
     }
+    /// Await till the channel is closed
     pub async fn closed(&self) {
         self.inner.closed().await
     }
+    /// Attempt to send message to the bounded channel
     pub fn try_send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
         let r = self.inner.try_send(message);
         if r.is_ok() {
@@ -732,6 +754,7 @@ impl<T> BoundedHandle<T> {
     }
     #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    /// Send message within timeout limit
     pub async fn send_timeout(
         &self,
         value: T,
@@ -744,6 +767,7 @@ impl<T> BoundedHandle<T> {
         r
     }
     #[cfg(feature = "sync")]
+    /// Blocking send
     pub fn blocking_send(&self, value: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         let r = self.inner.blocking_send(message);
         if r.is_ok() {
@@ -751,10 +775,11 @@ impl<T> BoundedHandle<T> {
         }
         r
     }
+    /// check if the channel is closed
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
-
+    /// Returns true if the handle belongs to same channel
     pub fn same_channel(&self, other: &Self) -> bool {
         self.inner.same_channel(&other.inner)
     }
@@ -838,7 +863,7 @@ impl<E: ShutdownEvent + 'static, const C: usize> Channel for BoundedChannel<E, C
 impl<E: 'static + ShutdownEvent> super::Shutdown for BoundedHandle<E> {
     async fn shutdown(&self) {
         self.abort_handle.abort();
-        self.send(E::shutdown_event()).await;
+        self.send(E::shutdown_event()).await.ok();
     }
     fn scope_id(&self) -> ScopeId {
         self.scope_id
@@ -873,8 +898,7 @@ where
             }
         }
     }
-    async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()> {
-        // it's safe to send the message without causing deadlock
+    async fn send_msg(&self, message: M) -> anyhow::Result<()> {
         if let Ok(event) = E::try_from(message) {
             self.send(event).await.map_err(|e| anyhow::Error::msg(format!("{}", e)))
         } else {
@@ -891,6 +915,7 @@ pub struct AbortableBoundedChannel<E, const C: usize> {
     tx: Sender<E>,
     rx: Receiver<E>,
 }
+/// Abortable bounded inbox.
 #[derive(Debug)]
 pub struct AbortableBoundedInbox<T> {
     inner: Abortable<BoundedInbox<T>>,
@@ -926,6 +951,7 @@ impl<T> AbortableBoundedInbox<T> {
 }
 
 #[derive(Debug)]
+/// Abortable bounded handle
 pub struct AbortableBoundedHandle<T> {
     inner: BoundedHandle<T>,
 }
@@ -939,20 +965,25 @@ impl<T> Clone for AbortableBoundedHandle<T> {
 }
 
 impl<T> AbortableBoundedHandle<T> {
+    /// Crete new abortable bounded handle
     pub fn new(sender: BoundedHandle<T>) -> Self {
         Self { inner: sender }
     }
+    /// Send message to the channel
     pub async fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         self.inner.send(message).await
     }
+    /// Await till the channel is closed
     pub async fn closed(&self) {
         self.inner.closed().await
     }
+    /// Attempts to send message to the channel
     pub fn try_send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::TrySendError<T>> {
         self.inner.try_send(message)
     }
     #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    /// Send message within defined timeout limit
     pub async fn send_timeout(
         &self,
         value: T,
@@ -961,13 +992,15 @@ impl<T> AbortableBoundedHandle<T> {
         self.inner.send_timeout(message).await
     }
     #[cfg(feature = "sync")]
+    /// Send message to the channel in blocking fashion
     pub fn blocking_send(&self, value: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         self.inner.blocking_send(message)
     }
+    /// Check if the channel is closed
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
-
+    /// Returns true if the handle belongs to same channel
     pub fn same_channel(&self, other: &Self) -> bool {
         self.inner.same_channel(&other.inner)
     }
@@ -1035,7 +1068,7 @@ where
     async fn try_send_msg(&self, message: M) -> anyhow::Result<Option<M>> {
         self.inner.try_send_msg(message).await
     }
-    async fn send_msg(self: Box<Self>, message: M) -> anyhow::Result<()> {
+    async fn send_msg(&self, message: M) -> anyhow::Result<()> {
         // it's safe to send the message without causing deadlock
         if let Ok(event) = E::try_from(message) {
             self.send(event).await.map_err(|e| anyhow::Error::msg(format!("{}", e)))
@@ -1045,6 +1078,7 @@ where
     }
 }
 #[derive(Clone)]
+/// Tcp listener handle, for tokio TcpListenerStream channel
 pub struct TcpListenerHandle(AbortHandle, ScopeId);
 #[async_trait::async_trait]
 impl super::Shutdown for TcpListenerHandle {
@@ -1081,11 +1115,13 @@ impl Channel for TcpListenerStream {
 #[cfg(feature = "hyper")]
 mod hyper {
     use super::*;
+    /// Hyper channel wrapper
     pub struct HyperChannel<S> {
         server: ::hyper::Server<::hyper::server::conn::AddrIncoming, S>,
     }
 
     impl<S: Send> HyperChannel<S> {
+        /// Create new hyper channel
         pub fn new(server: ::hyper::Server<::hyper::server::conn::AddrIncoming, S>) -> Self {
             Self { server }
         }
@@ -1134,12 +1170,14 @@ mod hyper {
     }
 
     #[derive(Clone)]
+    /// Hyper channel's handle
     pub struct HyperHandle {
         abort_handle: AbortHandle,
         scope_id: ScopeId,
     }
 
     impl HyperHandle {
+        /// Create new Hyper channel's handle
         pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
             Self { abort_handle, scope_id }
         }
@@ -1155,12 +1193,14 @@ mod hyper {
         }
     }
 
+    /// Hyper channel's inbox, used to ignite hyper server inside the actor run loop
     pub struct HyperInbox {
         pined_graceful: Option<
             Pin<Box<dyn futures::Future<Output = Result<(), ::hyper::Error>> + std::marker::Send + Sync + 'static>>,
         >,
     }
     impl HyperInbox {
+        /// Ignite hyper server
         pub async fn ignite(&mut self) -> Result<(), ::hyper::Error> {
             if let Some(server) = self.pined_graceful.take() {
                 server.await?
@@ -1169,6 +1209,7 @@ mod hyper {
         }
     }
     impl HyperInbox {
+        /// Create new hyper inbox
         pub fn new(
             pined_graceful: Pin<
                 Box<dyn futures::Future<Output = Result<(), ::hyper::Error>> + std::marker::Send + Sync + 'static>,
@@ -1185,68 +1226,23 @@ mod hyper {
 pub use self::hyper::*;
 
 #[cfg(feature = "tungstenite")]
-mod tungstenite {
-    use super::*;
-    pub use tokio_tungstenite::tungstenite::{
-        Error as WsError,
-        Message,
-    };
-    use tokio_tungstenite::WebSocketStream;
-
-    pub struct WsRxChannel<T>(pub T)
-    where
-        T: Send + 'static + Sync + futures::stream::Stream<Item = Result<Message, WsError>>;
-
-    #[derive(Clone)]
-    pub struct WsRxHandle(AbortHandle, ScopeId);
-    #[async_trait::async_trait]
-    impl super::Shutdown for WsRxHandle {
-        async fn shutdown(&self) {
-            self.0.abort();
-        }
-        fn scope_id(&self) -> ScopeId {
-            self.1
-        }
-    }
-
-    impl<S> Channel for WsRxChannel<S>
-    where
-        S: Send + 'static + Sync + futures::Stream<Item = Result<Message, WsError>>,
-    {
-        type Event = ();
-        type Handle = WsRxHandle;
-        type Inbox = Abortable<S>;
-        type Metric = prometheus::IntGauge;
-        fn channel<T>(
-            self,
-            scope_id: ScopeId,
-        ) -> (
-            Self::Handle,
-            Self::Inbox,
-            AbortRegistration,
-            Option<prometheus::IntGauge>,
-            Option<Box<dyn Route<()>>>,
-        ) {
-            let (abort_handle, abort_registration) = AbortHandle::new_pair();
-            let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
-            let abortable_handle = WsRxHandle(abort_handle, scope_id);
-            (abortable_handle, abortable_inbox, abort_registration, None, None)
-        }
-    }
-}
-#[cfg(feature = "tungstenite")]
-pub use tungstenite::*;
+pub use tokio_tungstenite::tungstenite::{
+    Error as WsError,
+    Message,
+};
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;
 
 #[derive(Clone)]
+/// Interval channel's handle, can be used to abort the interval channel
 pub struct IntervalHandle {
     scope_id: ScopeId,
     abort_handle: AbortHandle,
 }
 
 impl IntervalHandle {
+    /// Create new interval handle
     pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
         Self { scope_id, abort_handle }
     }
@@ -1304,17 +1300,21 @@ where
         Ok(NullChannel)
     }
 }
-
+/// Null channel
 pub struct NullChannel;
+/// Null Inbox
 pub struct NullInbox;
 
 #[derive(Clone)]
+/// Null handle, note: invoking abort will abort the manually defined abortable future/streams in the actor's run
+/// lifecycle (if any)
 pub struct NullHandle {
     scope_id: ScopeId,
     abort_handle: AbortHandle,
 }
 
 impl NullHandle {
+    /// Create new null handle
     pub fn new(scope_id: ScopeId, abort_handle: AbortHandle) -> Self {
         Self { scope_id, abort_handle }
     }
@@ -1351,13 +1351,16 @@ impl super::Shutdown for NullHandle {
     }
 }
 
+/// IoChannel(Stream/AsyncRead/AsyncWrite/fut) wrapper
 pub struct IoChannel<T>(pub T);
 impl<T> IoChannel<T> {
+    /// Create new io channel
     pub fn new(channel: T) -> Self {
         Self(channel)
     }
 }
 #[derive(Clone)]
+/// IoChannel's handle
 pub struct IoHandle(AbortHandle, ScopeId);
 impl IoHandle {
     fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
@@ -1408,14 +1411,10 @@ mod tests {
         IoChannel,
         Reason,
         Rt,
-        StreamExt,
         SupHandle,
     };
 
-    use tokio::io::{
-        AsyncReadExt,
-        AsyncWriteExt,
-    };
+    use tokio::io::AsyncReadExt;
 
     struct TcpStreamActor;
     #[async_trait::async_trait]

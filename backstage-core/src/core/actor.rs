@@ -12,7 +12,7 @@ use async_trait::async_trait;
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor<S: SupHandle<Self>>: Sized + Send + Sync + 'static {
-    /// Allows specifying an actor's startup dependencies.
+    /// Allows specifying an actor's startup dependencies and data.
     type Data: Send + Sync + 'static;
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
@@ -29,7 +29,9 @@ pub trait Actor<S: SupHandle<Self>>: Sized + Send + Sync + 'static {
 /// Shutdown contract , should be implemented on the handle
 #[async_trait::async_trait]
 pub trait Shutdown: Send + 'static + Sync + dyn_clone::DynClone {
+    /// Send shutdown signal to the corresponding actor
     async fn shutdown(&self);
+    /// Return the corresponding actor's scope_id
     fn scope_id(&self) -> super::ScopeId;
 }
 
