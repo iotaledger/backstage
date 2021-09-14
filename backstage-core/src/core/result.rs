@@ -37,7 +37,7 @@ impl Clone for ActorError {
 
 impl fmt::Display for ActorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.reason.fmt(f)
+        write!(f, "actor errored: {} with request {:?}", &self.reason, &self.request)
     }
 }
 
