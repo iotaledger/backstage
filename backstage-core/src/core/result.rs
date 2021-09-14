@@ -1,7 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Duration;
+use std::{error::Error, fmt, time::Duration};
 /// The returned result by the actor
 pub type ActorResult<T> = std::result::Result<T, ActorError>;
 
@@ -35,6 +35,14 @@ impl Clone for ActorError {
     }
 }
 
+impl fmt::Display for ActorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "actor errored: {} with request {:?}", &self.reason, &self.request)
+    }
+}
+
+impl Error for ActorError {}
+
 impl ActorError {
     /// Create exit error from anyhow error
     pub fn exit<E: Into<anyhow::Error>>(error: E) -> Self {
@@ -46,7 +54,7 @@ impl ActorError {
     /// Create exit error from message
     pub fn exit_msg<E>(msg: E) -> Self
     where
-        E: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+        E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
             reason: anyhow::Error::msg(msg),
@@ -63,7 +71,7 @@ impl ActorError {
     /// Create Aborted error from message, note: this soft error
     pub fn aborted_msg<E>(msg: E) -> Self
     where
-        E: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+        E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
             reason: anyhow::Error::msg(msg),
@@ -80,7 +88,7 @@ impl ActorError {
     /// Create restart error, it means the actor is asking the supervisor for restart/reschedule if possible
     pub fn restart_msg<E, D: Into<Option<Duration>>>(msg: E, after: D) -> Self
     where
-        E: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+        E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
             reason: anyhow::Error::msg(msg),
