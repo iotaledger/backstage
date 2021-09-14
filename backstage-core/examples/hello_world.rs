@@ -14,12 +14,12 @@ where
 {
     type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         rt.add_route::<RouteMessage>().await.ok();
         log::info!("HelloWorld: {}", rt.service().status());
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         log::info!("HelloWorld: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("HelloWorld: Received {}", event);

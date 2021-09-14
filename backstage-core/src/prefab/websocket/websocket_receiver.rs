@@ -40,11 +40,11 @@ impl<T> ChannelBuilder<IoChannel<T>> for WebsocketReceiver<T>
 where
     T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
 {
-    async fn build_channel<S>(&mut self) -> Result<IoChannel<T>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<IoChannel<T>> {
         if let Some(stream) = self.split_stream.take() {
             Ok(IoChannel(stream))
         } else {
-            Err(Reason::Exit)
+            Err(ActorError::exit_msg("Unable to build websocket receiver channel"))
         }
     }
 }
@@ -57,10 +57,10 @@ where
 {
     type Data = ();
     type Channel = IoChannel<T>;
-    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         while let Some(Ok(message)) = rt.inbox_mut().next().await {
             // Deserialize message::text
             match message {

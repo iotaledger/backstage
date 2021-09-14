@@ -80,7 +80,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             panic!("Report variant must have at least a ScopeId and Service field!");
                         }
                         if fields.len() > 4 {
-                            panic!("Report variant must have at most 4 fields (ScopeId, Service, Option<ActorResult>, and an optional children type)!");
+                            panic!("Report variant must have at most 4 fields (ScopeId, Service, Option<ActorResult<()>>, and an optional children type)!");
                         }
                         let mut data = ReportData::new(ident.clone(), matches!(fields, syn::Fields::Named(_)));
                         for field in fields.iter() {
@@ -117,7 +117,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                                                 .to_string()
                                                                 .as_str()
                                                             {
-                                                                "ActorResult" => {
+                                                                "ActorResult<()>" => {
                                                                     if data.res {
                                                                         panic!("Too many ActorResult fields specified for Report variant!");
                                                                     }
@@ -163,7 +163,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             panic!("Eol variant must have at least a ScopeId and Service field!");
                         }
                         if fields.len() > 4 {
-                            panic!("Eol variant must have at most 4 fields (ScopeId, Service, ActorResult, and a children type)!");
+                            panic!("Eol variant must have at most 4 fields (ScopeId, Service, ActorResult<()>, and a children type)!");
                         }
                         let mut data = ReportData::new(ident.clone(), matches!(fields, syn::Fields::Named(_)));
                         for field in fields.iter() {
@@ -184,7 +184,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                             data.service = true;
                                             data.fields.push((field.ident.clone(), FieldType::Service));
                                         }
-                                        "ActorResult" => {
+                                        "ActorResult<()>" => {
                                             if data.res {
                                                 panic!("Too many ActorResult fields specified for Eol variant!");
                                             }
@@ -376,7 +376,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let eol = quote! {
         impl<T> backstage::core::EolEvent<T> for #ident #bounds {
-            fn eol_event(scope_id: ScopeId, service: Service, actor: T, res: ActorResult) -> Self {
+            fn eol_event(scope_id: ScopeId, service: Service, actor: T, res: ActorResult<()>) -> Self {
                 Self::#eol_var #fields
             }
         }

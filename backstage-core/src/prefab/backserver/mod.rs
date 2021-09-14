@@ -37,7 +37,7 @@ pub enum BackserverEvent {
     /// Shutdown signal
     Shutdown,
     /// Microservices reports and eol
-    Microservice(ScopeId, Service, Option<ActorResult>),
+    Microservice(ScopeId, Service, Option<ActorResult<()>>),
     /// New HyperWebsocket from listener
     HyperWebsocket(HyperWebsocket),
 }
@@ -49,7 +49,7 @@ impl<T> ReportEvent<T> for BackserverEvent {
 }
 
 impl<T> EolEvent<T> for BackserverEvent {
-    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, r: ActorResult) -> Self {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, r: ActorResult<()>) -> Self {
         Self::Microservice(scope_id, service, Some(r))
     }
 }
@@ -64,7 +64,7 @@ impl ShutdownEvent for BackserverEvent {
 impl<S: SupHandle<Self>> Actor<S> for Backserver {
     type Data = ();
     type Channel = UnboundedChannel<BackserverEvent>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         // spawn backserver listener using prefab hyper
         let my_handle = rt.handle().clone();
         let make_svc = server::MakeListenerSvc::new(self.root_scope_id, my_handle);
@@ -73,7 +73,7 @@ impl<S: SupHandle<Self>> Actor<S> for Backserver {
         rt.start("server".to_string(), hyper).await?;
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()>
     where
         S: SupHandle<Self>,
     {

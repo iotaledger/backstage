@@ -188,7 +188,7 @@ pub enum WebsocketEvent {
     /// Shutdown variant, to receive shutdown signal
     Shutdown,
     /// Microservice variant to receive report and eol events
-    Microservice(ScopeId, Service, Option<ActorResult>),
+    Microservice(ScopeId, Service, Option<ActorResult<()>>),
     /// New TcpStream from listener
     TcpStream(tokio::net::TcpStream),
 }
@@ -200,7 +200,7 @@ impl<T> ReportEvent<T> for WebsocketEvent {
 }
 
 impl<T> EolEvent<T> for WebsocketEvent {
-    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, r: ActorResult) -> Self {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, r: ActorResult<()>) -> Self {
         Self::Microservice(scope_id, service, Some(r))
     }
 }
@@ -215,12 +215,12 @@ impl ShutdownEvent for WebsocketEvent {
 impl<S: SupHandle<Self>> Actor<S> for Websocket {
     type Data = ();
     type Channel = UnboundedChannel<WebsocketEvent>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         let listener = WebsocketListener::new(self.addr, self.ttl);
         rt.start(None, listener).await?;
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()>
     where
         S: SupHandle<Self>,
     {

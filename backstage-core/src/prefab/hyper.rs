@@ -34,18 +34,18 @@ where
     R::Error: std::error::Error + Send + Sync,
     R::Future: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<HyperChannel<T>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<HyperChannel<T>> {
         if let Some(make_svc) = self.make_svc.take() {
             let server = hyper::Server::try_bind(&self.addr)
                 .map_err(|e| {
                     log::error!("{}", e);
-                    Reason::Exit
+                    ActorError::exit_msg(e)
                 })?
                 .serve(make_svc);
             Ok(HyperChannel::new(server))
         } else {
             log::error!("No provided make svc to serve");
-            return Err(Reason::Exit);
+            return Err(ActorError::exit_msg("No provided make svc to serve"));
         }
     }
 }
@@ -67,15 +67,15 @@ where
 {
     type Data = ();
     type Channel = HyperChannel<T>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!("Hyper: {}", rt.service().status());
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         log::info!("Hyper: {}", rt.service().status());
         if let Err(err) = rt.inbox_mut().ignite().await {
             log::error!("Hyper: {}", err);
-            return Err(Reason::Aborted);
+            return Err(ActorError::exit_msg(err));
         }
         Ok(())
     }

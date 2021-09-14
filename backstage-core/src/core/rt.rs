@@ -5,6 +5,7 @@ use super::{
     AbortRegistration,
     Abortable,
     Actor,
+    ActorError,
     ActorResult,
     Channel,
     ChannelBuilder,
@@ -12,7 +13,6 @@ use super::{
     CleanupData,
     Data,
     NullSupervisor,
-    Reason,
     Resource,
     Route,
     Scope,
@@ -66,12 +66,12 @@ where
     pub(crate) visible_data: std::collections::HashSet<std::any::TypeId>,
 }
 /// InitializedRx signal receiver
-pub struct InitializedRx(ScopeId, tokio::sync::oneshot::Receiver<Result<Service, super::Reason>>);
-type InitSignalTx = tokio::sync::oneshot::Sender<Result<Service, super::Reason>>;
+pub struct InitializedRx(ScopeId, tokio::sync::oneshot::Receiver<ActorResult<Service>>);
+type InitSignalTx = tokio::sync::oneshot::Sender<ActorResult<Service>>;
 
 impl InitializedRx {
     /// Await till the actor get initialized
-    pub async fn initialized(self) -> Result<(ScopeId, Service), super::Reason> {
+    pub async fn initialized(self) -> ActorResult<(ScopeId, Service)> {
         let service = self.1.await.expect("Expected functional CheckInit oneshot")?;
         Ok((self.0, service))
     }
@@ -195,12 +195,12 @@ where
         let abort_registration = self.abort_registration.clone();
         Abortable::new(fut, abort_registration)
     }
-    /// Spawn the provided child and await it's initialized
+    /// Spawn the provided child and await till it's initialized
     pub async fn start<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
         child: Child,
-    ) -> Result<<Child::Channel as Channel>::Handle, Reason>
+    ) -> ActorResult<<Child::Channel as Channel>::Handle>
     where
         Child: Actor<<A::Channel as Channel>::Handle> + ChannelBuilder<Child::Channel>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
@@ -211,7 +211,8 @@ where
             self.upsert_microservice(scope_id, service);
             Ok(h)
         } else {
-            Err(Reason::Aborted)
+            let msg = format!("Aborted inside start method while awaiting child to get initialized");
+            Err(ActorError::aborted_msg(msg))
         }
     }
     /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
@@ -219,7 +220,7 @@ where
         &mut self,
         directory: Dir,
         mut child: Child,
-    ) -> Result<(<Child::Channel as Channel>::Handle, InitializedRx), Reason>
+    ) -> ActorResult<(<Child::Channel as Channel>::Handle, InitializedRx)>
     where
         <A::Channel as Channel>::Handle: Clone,
         Child: ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
@@ -302,7 +303,7 @@ where
         if let Some(metric) = metric.take() {
             child_context.register(metric).expect("Metric to be registered");
         }
-        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
+        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<ActorResult<Service>>();
         // create child future;
         let wrapped_fut = actor_fut_with_signal::<Child, _>(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
@@ -419,7 +420,7 @@ where
         }
     }
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
-    async fn breakdown(mut self, actor: A, r: ActorResult)
+    async fn breakdown(mut self, actor: A, r: ActorResult<()>)
     where
         Self: Send,
     {
@@ -974,7 +975,7 @@ where
     H: Clone + Shutdown,
 {
     /// Create and spawn runtime with null supervisor handle
-    pub async fn new<T, A>(root_dir: T, child: A) -> Result<Self, Reason>
+    pub async fn new<T, A>(root_dir: T, child: A) -> ActorResult<Self>
     where
         A: ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor>,
         T: Into<Option<String>>,
@@ -988,7 +989,7 @@ where
     }
 
     /// Create new runtime with provided supervisor handle
-    pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> Result<Self, Reason>
+    pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> ActorResult<Self>
     where
         A: ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
@@ -1037,7 +1038,7 @@ where
         if let Some(metric) = metric.take() {
             child_context.register(metric).expect("Metric to be registered");
         }
-        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<Result<Service, Reason>>();
+        let (tx_oneshot, rx_oneshot) = tokio::sync::oneshot::channel::<ActorResult<Service>>();
         // create child future;
         let wrapped_fut = actor_fut_with_signal(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
@@ -1063,7 +1064,7 @@ where
     #[cfg(feature = "websocket_server")]
     #[cfg(not(feature = "backserver"))]
     /// Enable the websocket server
-    pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> Result<Self, Reason>
+    pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> ActorResult<Self>
     where
         Websocket: Actor<NullSupervisor> + ChannelBuilder<<Websocket as Actor<NullSupervisor>>::Channel>,
         <Websocket as Actor<NullSupervisor>>::Channel: Channel,
@@ -1137,7 +1138,7 @@ where
     #[cfg(not(feature = "websocket_server"))]
     #[cfg(feature = "backserver")]
     /// Enable backserver (websocket server + http + prometheus metrics)
-    pub async fn backserver(mut self, addr: std::net::SocketAddr) -> Result<Self, Reason>
+    pub async fn backserver(mut self, addr: std::net::SocketAddr) -> ActorResult<Self>
     where
         crate::prefab::backserver::Backserver: Actor<NullSupervisor>
             + ChannelBuilder<<crate::prefab::backserver::Backserver as Actor<NullSupervisor>>::Channel>,
@@ -1202,7 +1203,7 @@ where
                 }
             }
         };
-        let join_handle = crate::spawn_task("websocket server", wrapped_fut);
+        let join_handle = crate::spawn_task("backserver", wrapped_fut);
         self.server_join_handle.replace(join_handle);
         self.server.replace(Box::new(handle.clone()));
         Ok(self)
@@ -1279,12 +1280,12 @@ mod tests {
     {
         type Data = ();
         type Channel = UnboundedChannel<BackstageEvent>;
-        async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+        async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
             // build and spawn your apps actors using the rt
             rt.handle().shutdown().await;
             Ok(())
         }
-        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
             while let Some(event) = rt.inbox_mut().next().await {
                 match event {
                     BackstageEvent::Shutdown => {

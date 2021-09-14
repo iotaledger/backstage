@@ -17,9 +17,9 @@ pub trait Actor<S: SupHandle<Self>>: Sized + Send + Sync + 'static {
     /// The type of channel this actor will use to receive events
     type Channel: Channel;
     /// Used to initialize the actor.
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, super::Reason>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data>;
     /// The main function for the actor
-    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult;
+    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()>;
     /// Get this actor's type name
     fn type_name() -> &'static str {
         std::any::type_name::<Self>()
@@ -54,7 +54,7 @@ impl<T: Send + 'static> SupHandle<T> for NullSupervisor {
         _scope_id: super::ScopeId,
         _service: super::Service,
         _actor: T,
-        _r: super::ActorResult,
+        _r: super::ActorResult<()>,
     ) -> Option<()> {
         Some(())
     }
@@ -75,7 +75,6 @@ mod tests {
         Actor,
         ActorResult,
         IntervalChannel,
-        Reason,
         Rt,
         StreamExt,
     };
@@ -88,10 +87,10 @@ mod tests {
     {
         type Data = ();
         type Channel = IntervalChannel<100>;
-        async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+        async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
             Ok(())
         }
-        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+        async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
             while let Some(_) = rt.inbox_mut().next().await {
                 println!("HelloWorld")
             }

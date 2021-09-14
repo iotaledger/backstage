@@ -14,7 +14,7 @@ where
 {
     type Data = prometheus::IntGauge;
     type Channel = IntervalChannel<10>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!(
             "scope_id: {}, {} is {}",
             rt.scope_id(),
@@ -29,7 +29,7 @@ where
         rt.add_resource(gauge.clone()).await;
         Ok(gauge)
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult<()> {
         while let Some(_instant) = rt.inbox_mut().next().await {
             // increment the counter
             counter.inc();
@@ -48,7 +48,7 @@ where
 {
     type Data = prometheus::IntGauge;
     type Channel = IntervalChannel<10>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!(
             "scope_id: {}, {} is {}",
             rt.scope_id(),
@@ -59,14 +59,16 @@ where
         if let Some(resource_scope_id) = rt.highest_scope_id::<Self::Data>().await {
             let counter = rt.link::<Self::Data>(resource_scope_id).await.map_err(|e| {
                 log::error!("{:?}", e);
-                Reason::Exit
+                ActorError::exit_msg(format!("{:?}", e))
             })?;
             Ok(counter)
         } else {
-            Err(Reason::Exit)
+            Err(ActorError::exit_msg(
+                "Unable to find scope id for IntGauge data resource",
+            ))
         }
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, counter: Self::Data) -> ActorResult<()> {
         while let Some(_instant) = rt.inbox_mut().next().await {
             // decrement the counter
             counter.dec();
@@ -82,7 +84,7 @@ enum BackstageEvent {
     Microservice(ScopeId, Service),
 }
 
-///// Alll of these should be implemented using proc_macro or some macro. start //////
+///// All of these should be implemented using proc_macro or some macro. start //////
 impl ShutdownEvent for BackstageEvent {
     fn shutdown_event() -> Self {
         Self::Shutdown
@@ -94,7 +96,7 @@ impl<T> ReportEvent<T> for BackstageEvent {
     }
 }
 impl<T> EolEvent<T> for BackstageEvent {
-    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult) -> Self {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
         Self::Microservice(scope_id, service)
     }
 }
@@ -107,29 +109,27 @@ where
 {
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!("Backstage: {}", rt.service().status());
         // build and spawn your apps actors using the rt
         // - build Incrementer
         let incrementer = Incrementer;
         // spawn incrementer
-        let (_h, i) = rt.spawn(Some("incrementer".into()), incrementer).await.map_err(|e| {
+        rt.start(Some("incrementer".into()), incrementer).await.map_err(|e| {
             log::error!("{:?}", e);
-            Reason::Exit
+            ActorError::exit_msg(format!("{:?}", e))
         })?;
-        // await incrementer till it gets initialized
-        i.initialized().await?;
         //
         // - build Decrementer
         let decrementer = Decrementer;
         // spawn decrementer
-        rt.spawn(Some("decrementer".into()), decrementer).await.map_err(|e| {
+        rt.start(Some("decrementer".into()), decrementer).await.map_err(|e| {
             log::error!("{:?}", e);
-            Reason::Exit
+            ActorError::exit_msg(format!("{:?}", e))
         })?;
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult<()> {
         log::info!("Backstage: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             match event {

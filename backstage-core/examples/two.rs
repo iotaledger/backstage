@@ -14,10 +14,10 @@ where
 {
     type Data = ();
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("First received: {}", event);
             if let Some(second_scope_id) = rt.sibling("second").scope_id().await {
@@ -38,13 +38,13 @@ where
 {
     type Data = ScopeId;
     type Channel = AbortableUnboundedChannel<String>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         if let Some(first_scope_id) = rt.sibling("first").scope_id().await {
             return Ok(first_scope_id);
         };
-        Err(Reason::Exit)
+        Err(ActorError::exit_msg("Unable to get first scope id"))
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, first_scope_id: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, first_scope_id: Self::Data) -> ActorResult<()> {
         rt.send(first_scope_id, "Hey first".to_string()).await.ok();
         while let Some(event) = rt.inbox_mut().next().await {
             log::info!("Second received: {}", event);
@@ -92,7 +92,7 @@ where
 {
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!("Backstage: {}", rt.service().status());
         // build and spawn your apps actors using the rt
         // - build First
@@ -106,7 +106,7 @@ where
         rt.start(Some("second".into()), second).await?;
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult<()> {
         log::info!("Backstage: {}", rt.service().status());
         while let Some(event) = rt.inbox_mut().next().await {
             match event {

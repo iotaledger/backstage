@@ -261,7 +261,7 @@ pub trait Channel: Send + Sized {
 #[async_trait::async_trait]
 pub trait ChannelBuilder<C: Channel> {
     /// Implement how to build the channel for the corresponding actor
-    async fn build_channel<S>(&mut self) -> Result<C, Reason>
+    async fn build_channel<S>(&mut self) -> ActorResult<C>
     where
         Self: Actor<S, Channel = C>,
         S: SupHandle<Self>;
@@ -378,7 +378,7 @@ impl<T> UnboundedHandle<T> {
 #[async_trait::async_trait]
 impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for UnboundedHandle<T> {
     type Event = T;
-    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: ActorResult<()>) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
     }
 }
@@ -395,7 +395,7 @@ impl<E: ShutdownEvent + 'static, T> ChannelBuilder<UnboundedChannel<E>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<UnboundedChannel<E>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<UnboundedChannel<E>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(UnboundedChannel {
@@ -497,7 +497,7 @@ pub struct AbortableUnboundedChannel<E> {
 #[async_trait::async_trait]
 impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for AbortableUnboundedHandle<T> {
     type Event = T;
-    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult<()>) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).ok()
     }
 }
@@ -514,7 +514,7 @@ impl<E: Send + 'static, T> ChannelBuilder<AbortableUnboundedChannel<E>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<AbortableUnboundedChannel<E>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<AbortableUnboundedChannel<E>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableUnboundedChannel {
@@ -789,7 +789,7 @@ impl<T> BoundedHandle<T> {
 #[async_trait::async_trait]
 impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for AbortableBoundedHandle<T> {
     type Event = T;
-    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: super::ActorResult) -> Option<()> {
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: A, r: ActorResult<()>) -> Option<()> {
         self.send(T::eol_event(scope_id, service, actor, r)).await.ok()
     }
 }
@@ -806,7 +806,7 @@ impl<E: ShutdownEvent + 'static, T, const C: usize> ChannelBuilder<BoundedChanne
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<BoundedChannel<E, C>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<BoundedChannel<E, C>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(BoundedChannel {
@@ -926,7 +926,7 @@ impl<E: Send + 'static, T, const C: usize> ChannelBuilder<AbortableBoundedChanne
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<AbortableBoundedChannel<E, C>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<AbortableBoundedChannel<E, C>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableBoundedChannel {
@@ -1253,7 +1253,7 @@ impl<T, const I: u64> ChannelBuilder<IntervalChannel<I>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<IntervalChannel<I>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<IntervalChannel<I>> {
         Ok(IntervalChannel::<I>)
     }
 }
@@ -1296,7 +1296,7 @@ impl<T> ChannelBuilder<NullChannel> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> Result<NullChannel, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<NullChannel> {
         Ok(NullChannel)
     }
 }

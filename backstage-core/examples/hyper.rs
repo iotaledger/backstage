@@ -91,12 +91,12 @@ impl Hyper {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
-    async fn build_channel<S>(&mut self) -> Result<HyperChannel<MakeSvc>, Reason> {
+    async fn build_channel<S>(&mut self) -> ActorResult<HyperChannel<MakeSvc>> {
         let make_svc = MakeSvc { counter: 81818 };
         let server = hyper::Server::try_bind(&self.addr)
             .map_err(|e| {
                 log::error!("{}", e);
-                Reason::Exit
+                ActorError::exit_msg(e)
             })?
             .serve(make_svc);
         Ok(HyperChannel::new(server))
@@ -109,11 +109,11 @@ where
 {
     type Data = ();
     type Channel = HyperChannel<MakeSvc>;
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> Result<Self::Data, Reason> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         log::info!("Hyper: {}", rt.service().status());
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult<()> {
         log::info!("Hyper: {}", rt.service().status());
         if let Err(err) = rt.inbox_mut().ignite().await {
             log::error!("Hyper: {}", err);

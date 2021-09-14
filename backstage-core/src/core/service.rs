@@ -232,7 +232,7 @@ pub trait SupHandle<T: Send>: Report<T> + 'static + Send + Sized + Sync {
     type Event;
     /// Report End of life for a T actor
     /// return Some(()) if the report success
-    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: T, r: super::ActorResult) -> Option<()>
+    async fn eol(self, scope_id: super::ScopeId, service: Service, actor: T, r: super::ActorResult<()>) -> Option<()>
     where
         T: Actor<Self>;
 }
@@ -257,5 +257,5 @@ pub trait ReportEvent<T>: Send + 'static {
 /// Ideally it should be implemented using proc_macro on the event type
 pub trait EolEvent<T>: Send + 'static {
     /// Creates eol event that will be pushed as end of life event once the Child: T breakdown
-    fn eol_event(scope: super::ScopeId, service: Service, actor: T, r: super::ActorResult) -> Self;
+    fn eol_event(scope: super::ScopeId, service: Service, actor: T, r: super::ActorResult<()>) -> Self;
 }
