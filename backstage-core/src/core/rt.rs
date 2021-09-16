@@ -362,6 +362,10 @@ where
     pub fn scope_id(&self) -> ScopeId {
         self.scope_id
     }
+    /// Return the actor's depth
+    pub fn depth(&self) -> super::Depth {
+        self.depth
+    }
     /// Return the actor parent's scope id
     pub fn parent_id(&self) -> Option<ScopeId> {
         self.parent_scope_id
