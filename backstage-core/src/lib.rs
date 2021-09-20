@@ -8,6 +8,9 @@ pub mod core;
 /// Backstage core functionality
 pub mod prefab;
 
+#[cfg(feature = "config")]
+pub mod config;
+
 /// Spawn a task with a provided name, if tokio console tracing is enabled
 pub fn spawn_task<T>(name: &str, future: T) -> tokio::task::JoinHandle<T::Output>
 where
