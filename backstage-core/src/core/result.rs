@@ -1,7 +1,11 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{error::Error, fmt, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    time::Duration,
+};
 /// The returned result by the actor
 pub type ActorResult<T> = std::result::Result<T, ActorError>;
 
