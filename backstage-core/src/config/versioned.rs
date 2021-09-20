@@ -13,42 +13,39 @@ use serde::{
     Deserializer,
     Serialize,
 };
-use std::{
-    convert::{
-        TryFrom,
-        TryInto,
-    },
-    marker::PhantomData,
+use std::convert::{
+    TryFrom,
+    TryInto,
 };
 
+/// A versioned configuration
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct VersionedConfig<C, const V: usize> {
     version: usize,
     config: C,
 }
 
-impl<C: FileSystemConfig + DeserializeOwned, const V: usize> VersionedConfig<C, V> {
-    pub fn load<CT, Val>() -> anyhow::Result<Self>
-    where
-        CT: ConfigFileType,
-        Val: 'static,
-        for<'de> Val: Deserializer<'de>,
-        for<'de> <Val as Deserializer<'de>>::Error: Into<anyhow::Error>,
-        VersionedValue<CT, Val, V>: DeserializeOwned,
-    {
-        VersionedValue::<CT, Val, V>::load()?.verify_version()?.try_into()
+impl<C: FileSystemConfig + DeserializeOwned, const V: usize> VersionedConfig<C, V>
+where
+    VersionedValue<<C as FileSystemConfig>::ConfigType, V>: DeserializeOwned,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    for<'de> <<C as FileSystemConfig>::ConfigType as ValueType>::Value: Deserializer<'de>,
+    for<'de> <<<C as FileSystemConfig>::ConfigType as ValueType>::Value as Deserializer<'de>>::Error:
+        Into<anyhow::Error>,
+{
+    /// Load a versioned configuration from a file. Will fail if the file does not exist or the actual version does not
+    /// match the requested one.
+    pub fn load() -> anyhow::Result<Self> {
+        VersionedValue::load()?.verify_version()?.try_into()
     }
 
-    pub fn load_or_save_default<CT, Val>() -> anyhow::Result<Self>
+    /// Load a versioned configuration from a file. Will fail if the file does not exist or the actual version does not
+    /// match the requested one. If the file does not exist, a default config will be saved to the disk.
+    pub fn load_or_save_default() -> anyhow::Result<Self>
     where
         Self: Default + SerializableConfig,
-        CT: ConfigFileType,
-        Val: 'static,
-        for<'de> Val: Deserializer<'de>,
-        for<'de> <Val as Deserializer<'de>>::Error: Into<anyhow::Error>,
-        VersionedValue<CT, Val, V>: DeserializeOwned,
     {
-        match VersionedValue::<CT, Val, V>::load() {
+        match VersionedValue::load() {
             Ok(v) => v.verify_version()?.try_into(),
             Err(e) => {
                 Self::default().save()?;
@@ -75,22 +72,15 @@ impl<C: FileSystemConfig, const V: usize> FileSystemConfig for VersionedConfig<C
 }
 impl<C, const V: usize> DefaultFileSave for VersionedConfig<C, V> {}
 
-impl<C: FileSystemConfig + DeserializeOwned, CT, Val, const V: usize> TryFrom<VersionedValue<CT, Val, V>>
+impl<C: FileSystemConfig + DeserializeOwned, CT: ValueType, const V: usize> TryFrom<VersionedValue<CT, V>>
     for VersionedConfig<C, V>
 where
-    Val: 'static,
-    for<'de> Val: Deserializer<'de>,
-    for<'de> <Val as Deserializer<'de>>::Error: Into<anyhow::Error>,
+    for<'de> CT::Value: Deserializer<'de>,
+    for<'de> <CT::Value as Deserializer<'de>>::Error: Into<anyhow::Error>,
 {
     type Error = anyhow::Error;
 
-    fn try_from(
-        VersionedValue {
-            version,
-            config,
-            _config_type,
-        }: VersionedValue<CT, Val, V>,
-    ) -> anyhow::Result<VersionedConfig<C, V>> {
+    fn try_from(VersionedValue { version, config }: VersionedValue<CT, V>) -> anyhow::Result<VersionedConfig<C, V>> {
         Ok(Self {
             version,
             config: C::deserialize(config).map_err(|e| anyhow::anyhow!(e))?,
@@ -102,14 +92,12 @@ where
 /// a config file independent of its inner structure so the version can
 /// be validated.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct VersionedValue<CT, Val, const V: usize> {
+pub struct VersionedValue<CT: ValueType, const V: usize> {
     version: usize,
-    config: Val,
-    #[serde(skip)]
-    _config_type: PhantomData<fn(CT) -> CT>,
+    config: CT::Value,
 }
 
-impl<CT, Val, const V: usize> VersionedValue<CT, Val, V> {
+impl<CT: ValueType, const V: usize> VersionedValue<CT, V> {
     fn verify_version(self) -> anyhow::Result<Self> {
         anyhow::ensure!(
             self.version == V,
@@ -121,7 +109,7 @@ impl<CT, Val, const V: usize> VersionedValue<CT, Val, V> {
     }
 }
 
-impl<CT: ConfigFileType, Val, const V: usize> FileSystemConfig for VersionedValue<CT, Val, V> {
+impl<CT: ConfigFileType + ValueType, const V: usize> FileSystemConfig for VersionedValue<CT, V> {
     type ConfigType = CT;
 }
-impl<CT, Val, const V: usize> DefaultFileLoad for VersionedValue<CT, Val, V> {}
+impl<CT: ValueType, const V: usize> DefaultFileLoad for VersionedValue<CT, V> {}

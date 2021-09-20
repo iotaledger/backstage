@@ -23,6 +23,10 @@ impl ConfigFileType for RONConfig {
         ron::de::from_reader(reader).map_err(|e| anyhow!(e))
     }
 }
+#[cfg(feature = "ron_config")]
+impl ValueType for RONConfig {
+    type Value = ron::Value;
+}
 
 #[cfg(feature = "json_config")]
 /// JSON file config
@@ -40,6 +44,10 @@ impl ConfigFileType for JSONConfig {
     fn deserialize<C: DeserializeOwned, R: Read>(reader: &mut R) -> anyhow::Result<C> {
         serde_json::from_reader(reader).map_err(|e| anyhow!(e))
     }
+}
+#[cfg(feature = "json_config")]
+impl ValueType for JSONConfig {
+    type Value = serde_json::Value;
 }
 
 #[cfg(feature = "toml_config")]
@@ -61,4 +69,8 @@ impl ConfigFileType for TOMLConfig {
         reader.read_to_string(&mut s).map_err(|e| anyhow!(e))?;
         toml::from_str(&s).map_err(|e| anyhow!(e))
     }
+}
+#[cfg(feature = "toml_config")]
+impl ValueType for TOMLConfig {
+    type Value = toml::Value;
 }

@@ -15,6 +15,12 @@ pub trait ConfigFileType {
     fn deserialize<C: DeserializeOwned, R: Read>(reader: &mut R) -> anyhow::Result<C>;
 }
 
+/// Defines a value type which can be used as an intermediate step when serializing and deserializing
+pub trait ValueType {
+    /// The value type
+    type Value;
+}
+
 /// Marker trait which enables the default file save implementation
 pub trait DefaultFileSave {}
 
