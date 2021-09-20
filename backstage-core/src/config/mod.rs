@@ -42,9 +42,12 @@ pub use types::*;
 mod history;
 pub use history::*;
 
-mod persist;
-
-mod file;
+/// File system loading utilities
+pub mod file;
+/// Peristence trait and handle implementations
+pub mod persist;
+/// Versioned config wrappers
+pub mod versioned;
 
 #[cfg(all(test, any(feature = "ron_config", feature = "json_config", feature = "toml_config")))]
 mod test;
