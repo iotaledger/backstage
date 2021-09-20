@@ -46,7 +46,7 @@ mod persist;
 
 mod file;
 
-#[cfg(all(test))]
+#[cfg(all(test, any(feature = "ron_config", feature = "json_config", feature = "toml_config")))]
 mod test;
 
 /// The default config file name
