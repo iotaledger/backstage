@@ -410,18 +410,34 @@ where
             c.shutdown().await;
         }
     }
+    /// Shutdown child using its scope_id
+    pub async fn shutdown_child(&mut self, child_scope_id: &ScopeId) -> Option<tokio::task::JoinHandle<()>> {
+        if let Some(h) = self.children_handles.remove(child_scope_id) {
+            h.shutdown().await;
+            self.children_joins.remove(child_scope_id)
+        } else {
+            None
+        }
+    }
     /// Shutdown all the children of a given type within this actor context
-    pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(&mut self)
+    pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(
+        &mut self,
+    ) -> HashMap<ScopeId, tokio::task::JoinHandle<()>>
     where
         <A::Channel as Channel>::Handle: SupHandle<T>,
     {
         // extract the scopes for a given type
         let mut iter = self.service.scopes_iter::<T>();
+        let mut joins = HashMap::new();
         while let Some(scope_id) = iter.next() {
             if let Some(h) = self.children_handles.remove(&scope_id) {
                 h.shutdown().await;
+                self.children_joins
+                    .remove(&scope_id)
+                    .and_then(|j| joins.insert(scope_id, j));
             };
         }
+        joins
     }
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
     async fn breakdown(mut self, actor: A, r: ActorResult<()>)
