@@ -24,8 +24,8 @@ pub enum ActorRequest {
 #[derive(Debug)]
 /// The Actor Error
 pub struct ActorError {
-    reason: anyhow::Error,
-    request: ActorRequest,
+    pub reason: anyhow::Error,
+    pub request: ActorRequest,
 }
 
 impl Clone for ActorError {
