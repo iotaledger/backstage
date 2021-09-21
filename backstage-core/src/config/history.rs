@@ -8,12 +8,12 @@ use super::{
 };
 
 /// A historical record
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Default, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
 pub struct HistoricalConfig<C: Config> {
     #[serde(bound(deserialize = "C: DeserializeOwned"))]
     config: C,
     /// The timestamp representing when this record was created
-    pub created: u64,
+    pub created: u128,
 }
 
 impl<C: Config> HistoricalConfig<C> {
@@ -24,8 +24,14 @@ impl<C: Config> HistoricalConfig<C> {
             created: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs(),
+                .as_nanos(),
         }
+    }
+}
+
+impl<C: Config> Clone for HistoricalConfig<C> {
+    fn clone(&self) -> Self {
+        Self::new(self.config.clone())
     }
 }
 
@@ -35,8 +41,8 @@ impl<C: Config> From<C> for HistoricalConfig<C> {
     }
 }
 
-impl<C: Config> From<(C, u64)> for HistoricalConfig<C> {
-    fn from((config, created): (C, u64)) -> Self {
+impl<C: Config> From<(C, u128)> for HistoricalConfig<C> {
+    fn from((config, created): (C, u128)) -> Self {
         Self { config, created }
     }
 }
@@ -64,30 +70,44 @@ impl<C: Config> Wrapper for HistoricalConfig<C> {
 impl<C: Config + FileSystemConfig> FileSystemConfig for HistoricalConfig<C> {
     type ConfigType = C::ConfigType;
     const CONFIG_DIR: &'static str = "./historical_config";
+    const FILENAME: &'static str = C::FILENAME;
+
+    fn dir() -> PathBuf {
+        PathBuf::from(Self::CONFIG_DIR)
+    }
 }
 
-impl<C: Config + FileSystemConfig> Persist for HistoricalConfig<C> {
+impl<C: Config> Persist for HistoricalConfig<C>
+where
+    Self: FileSystemConfig,
+{
     fn persist(&self) -> anyhow::Result<()> {
+        let dir = Self::dir();
+        debug!("Persisting historical config to {}", dir.to_string_lossy());
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir)?;
+        }
         OpenOptions::new()
+            .create(true)
             .write(true)
-            .open(Self::dir().join(format!(
+            .open(dir.join(format!(
                 "{}_{}.{}",
                 self.created,
                 Self::FILENAME,
                 <Self as FileSystemConfig>::ConfigType::extension()
             )))
             .map_err(|e| anyhow!(e))?
-            .write_config(&self.config)
+            .write_config(self)
     }
 }
 
-impl<C: Config + Ord + PartialOrd> PartialOrd for HistoricalConfig<C> {
+impl<C: Config> PartialOrd for HistoricalConfig<C> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+        Some(self.created.cmp(&other.created))
     }
 }
 
-impl<C: Config + Ord> Ord for HistoricalConfig<C> {
+impl<C: Config> Ord for HistoricalConfig<C> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.created.cmp(&other.created)
     }
@@ -97,7 +117,6 @@ impl<C: Config + Ord> Ord for HistoricalConfig<C> {
 #[derive(Deserialize, Serialize)]
 pub struct History<R: Ord> {
     records: BinaryHeap<R>,
-    config_filename: String,
     max_records: usize,
 }
 
@@ -106,10 +125,9 @@ where
     R: DerefMut + Default + Ord + Persist + Wrapper,
 {
     /// Create a new history with `max_records`
-    pub fn new<S: Into<Option<String>>>(max_records: usize, config_filename: S) -> Self {
+    pub fn new(max_records: usize) -> Self {
         Self {
             records: BinaryHeap::new(),
-            config_filename: config_filename.into().unwrap_or_else(|| DEFAULT_FILENAME.to_string()),
             max_records,
         }
     }
@@ -142,9 +160,9 @@ where
 
     /// Add to the history with a new record and a timestamp and return a reference to it.
     /// *This should only be used to deserialize a `History`.*
-    pub fn add(&mut self, record: R::Target, created: u64)
+    fn add(&mut self, record: R::Target, created: u128)
     where
-        R: From<(<R as Deref>::Target, u64)>,
+        R: From<(<R as Deref>::Target, u128)>,
         R::Target: Sized,
     {
         self.records.push((record, created).into());
@@ -169,47 +187,41 @@ where
     }
 }
 
-impl<C: Config + Ord + Persist + FileSystemConfig + DeserializeOwned> History<HistoricalConfig<C>> {
+impl<C: Config + Persist + FileSystemConfig + DeserializeOwned> History<HistoricalConfig<C>> {
     /// Load the historical config from the file system
-    pub fn load<M: Into<Option<usize>>, S: Into<Option<String>>>(max_records: M, config_filename: S) -> Self {
+    pub fn load<M: Into<Option<usize>>>(max_records: M) -> anyhow::Result<Self> {
         let mut history = max_records
             .into()
-            .map(|max_records| Self::new(max_records, config_filename))
+            .map(|max_records| Self::new(max_records))
             .unwrap_or_default();
-        match C::load() {
-            Ok(latest) => {
-                debug!("Latest Config found! {:?}", latest);
-                let historical_config_path = <HistoricalConfig<C> as FileSystemConfig>::CONFIG_DIR;
-                history.update(latest);
-                glob(&format!(r"{}/\d+_config.ron", historical_config_path))
-                    .into_iter()
-                    .flat_map(|v| v.into_iter())
-                    .filter_map(|path| {
-                        debug!("historical path: {:?}", path);
-                        path.map(|ref p| {
-                            File::open(p)
-                                .map_err(|e| anyhow!(e))
-                                .and_then(|f| f.read_config())
-                                .ok()
-                                .and_then(|c| {
-                                    p.file_name()
-                                        .and_then(|s| s.to_string_lossy().split("_").next().map(|s| s.to_owned()))
-                                        .and_then(|s| s.parse::<u64>().ok())
-                                        .map(|created| (c, created))
-                                })
-                        })
+        let latest = C::load_or_save_default()?;
+        debug!("Latest Config found! {:?}", latest);
+        let historical_config_path = <HistoricalConfig<C> as FileSystemConfig>::CONFIG_DIR;
+        history.update(latest);
+        glob(&format!(r"{}/\d+_config.ron", historical_config_path))
+            .into_iter()
+            .flat_map(|v| v.into_iter())
+            .filter_map(|path| {
+                debug!("historical path: {:?}", path);
+                path.map(|ref p| {
+                    File::open(p)
+                        .map_err(|e| anyhow!(e))
+                        .and_then(|f| f.read_config())
                         .ok()
-                        .flatten()
-                    })
-                    .for_each(|(config, created)| {
-                        history.add(config, created);
-                    });
-            }
-            Err(e) => {
-                panic!("{}", e)
-            }
-        }
-        history
+                        .and_then(|c| {
+                            p.file_name()
+                                .and_then(|s| s.to_string_lossy().split("_").next().map(|s| s.to_owned()))
+                                .and_then(|s| s.parse::<u128>().ok())
+                                .map(|created| (c, created))
+                        })
+                })
+                .ok()
+                .flatten()
+            })
+            .for_each(|(config, created)| {
+                history.add(config, created);
+            });
+        Ok(history)
     }
 }
 
@@ -221,21 +233,24 @@ where
     fn default() -> Self {
         Self {
             records: Default::default(),
-            config_filename: DEFAULT_FILENAME.to_string(),
             max_records: 20,
         }
     }
 }
 
-impl<C: Config + Ord + Persist> Persist for History<HistoricalConfig<C>> {
+impl<C: Config + Persist + FileSystemConfig> Persist for History<HistoricalConfig<C>>
+where
+    HistoricalConfig<C>: FileSystemConfig,
+{
     fn persist(&self) -> anyhow::Result<()> {
-        debug!("Persisting history!");
+        debug!("Persisting history! {:?}", self.records);
         let mut iter = self.records.clone().into_sorted_vec().into_iter().rev();
         if let Some(latest) = iter.next() {
-            debug!("Persisting latest config!");
+            debug!("Persisting latest config! {:?}", latest);
             latest.deref().persist()?;
             for v in iter {
-                debug!("Persisting historical config!");
+                debug!("Persisting historical config! {:?}", v);
+                //<HistoricalConfig<C> as Persist>::persist(&v)?;
                 v.persist()?;
             }
         }

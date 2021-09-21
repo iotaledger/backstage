@@ -4,6 +4,7 @@
 use super::{
     bail,
     file::*,
+    persist::Persist,
     LoadableConfig,
     SerializableConfig,
 };
@@ -13,9 +14,15 @@ use serde::{
     Deserializer,
     Serialize,
 };
-use std::convert::{
-    TryFrom,
-    TryInto,
+use std::{
+    convert::{
+        TryFrom,
+        TryInto,
+    },
+    ops::{
+        Deref,
+        DerefMut,
+    },
 };
 
 /// A versioned configuration
@@ -25,23 +32,25 @@ pub struct VersionedConfig<C, const V: usize> {
     config: C,
 }
 
-impl<C: FileSystemConfig + DeserializeOwned, const V: usize> VersionedConfig<C, V>
+impl<C: FileSystemConfig + DeserializeOwned, const V: usize> LoadableConfig for VersionedConfig<C, V>
 where
-    VersionedValue<<C as FileSystemConfig>::ConfigType, V>: DeserializeOwned,
+    VersionedValue<C, V>: DeserializeOwned,
     <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
     for<'de> <<C as FileSystemConfig>::ConfigType as ValueType>::Value: Deserializer<'de>,
     for<'de> <<<C as FileSystemConfig>::ConfigType as ValueType>::Value as Deserializer<'de>>::Error:
         Into<anyhow::Error>,
 {
     /// Load a versioned configuration from a file. Will fail if the file does not exist or the actual version does not
     /// match the requested one.
-    pub fn load() -> anyhow::Result<Self> {
+    fn load() -> anyhow::Result<Self> {
         VersionedValue::load()?.verify_version()?.try_into()
     }
 
     /// Load a versioned configuration from a file. Will fail if the file does not exist or the actual version does not
     /// match the requested one. If the file does not exist, a default config will be saved to the disk.
-    pub fn load_or_save_default() -> anyhow::Result<Self>
+    fn load_or_save_default() -> anyhow::Result<Self>
     where
         Self: Default + SerializableConfig,
     {
@@ -50,8 +59,8 @@ where
             Err(e) => {
                 Self::default().save()?;
                 bail!(
-                        "Config file was not found! Saving a default config file. Please edit it and restart the application! (Error: {})", e,
-                    );
+                    "Config file was not found! Saving a default config file. Please edit it and restart the application! (Error: {})", e,
+                );
             }
         }
     }
@@ -66,21 +75,46 @@ impl<C: Default, const V: usize> Default for VersionedConfig<C, V> {
     }
 }
 
+impl<C, const V: usize> Deref for VersionedConfig<C, V> {
+    type Target = C;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
+impl<C, const V: usize> DerefMut for VersionedConfig<C, V> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.config
+    }
+}
+
+impl<C: FileSystemConfig + Serialize, const V: usize> Persist for VersionedConfig<C, V> {
+    fn persist(&self) -> anyhow::Result<()> {
+        self.save()
+    }
+}
+
 // Could be made into proc macro
 impl<C: FileSystemConfig, const V: usize> FileSystemConfig for VersionedConfig<C, V> {
     type ConfigType = <C as FileSystemConfig>::ConfigType;
+    const CONFIG_DIR: &'static str = C::CONFIG_DIR;
+    const FILENAME: &'static str = C::FILENAME;
 }
 impl<C, const V: usize> DefaultFileSave for VersionedConfig<C, V> {}
 
-impl<C: FileSystemConfig + DeserializeOwned, CT: ValueType, const V: usize> TryFrom<VersionedValue<CT, V>>
-    for VersionedConfig<C, V>
+impl<C: FileSystemConfig + DeserializeOwned, const V: usize> TryFrom<VersionedValue<C, V>> for VersionedConfig<C, V>
 where
-    for<'de> CT::Value: Deserializer<'de>,
-    for<'de> <CT::Value as Deserializer<'de>>::Error: Into<anyhow::Error>,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+    for<'de> <<C as FileSystemConfig>::ConfigType as ValueType>::Value: Deserializer<'de>,
+    for<'de> <<<C as FileSystemConfig>::ConfigType as ValueType>::Value as Deserializer<'de>>::Error:
+        Into<anyhow::Error>,
 {
     type Error = anyhow::Error;
 
-    fn try_from(VersionedValue { version, config }: VersionedValue<CT, V>) -> anyhow::Result<VersionedConfig<C, V>> {
+    fn try_from(VersionedValue { version, config }: VersionedValue<C, V>) -> anyhow::Result<VersionedConfig<C, V>> {
         Ok(Self {
             version,
             config: C::deserialize(config).map_err(|e| anyhow::anyhow!(e))?,
@@ -92,12 +126,24 @@ where
 /// a config file independent of its inner structure so the version can
 /// be validated.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct VersionedValue<CT: ValueType, const V: usize> {
+pub struct VersionedValue<C, const V: usize>
+where
+    C: FileSystemConfig,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+{
     version: usize,
-    config: CT::Value,
+    config: <<C as FileSystemConfig>::ConfigType as ValueType>::Value,
 }
 
-impl<CT: ValueType, const V: usize> VersionedValue<CT, V> {
+impl<C, const V: usize> VersionedValue<C, V>
+where
+    C: FileSystemConfig,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+{
     fn verify_version(self) -> anyhow::Result<Self> {
         anyhow::ensure!(
             self.version == V,
@@ -109,7 +155,22 @@ impl<CT: ValueType, const V: usize> VersionedValue<CT, V> {
     }
 }
 
-impl<CT: ConfigFileType + ValueType, const V: usize> FileSystemConfig for VersionedValue<CT, V> {
-    type ConfigType = CT;
+impl<C, const V: usize> FileSystemConfig for VersionedValue<C, V>
+where
+    C: FileSystemConfig,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+{
+    type ConfigType = <C as FileSystemConfig>::ConfigType;
+    const CONFIG_DIR: &'static str = C::CONFIG_DIR;
+    const FILENAME: &'static str = C::FILENAME;
 }
-impl<CT: ValueType, const V: usize> DefaultFileLoad for VersionedValue<CT, V> {}
+impl<C, const V: usize> DefaultFileLoad for VersionedValue<C, V>
+where
+    C: FileSystemConfig,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+{
+}

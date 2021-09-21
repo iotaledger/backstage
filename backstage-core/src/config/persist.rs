@@ -1,7 +1,10 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
+use super::{
+    file::FileSystemConfig,
+    *,
+};
 
 /// Specifies that the implementor should be able to persist itself
 pub trait Persist {
@@ -10,33 +13,47 @@ pub trait Persist {
 }
 
 /// A handle which will persist when dropped
-pub struct PersistHandle<C: 'static + Config + Persist + Ord> {
-    guard: tokio::sync::RwLockWriteGuard<'static, History<HistoricalConfig<C>>>,
+pub struct PersistHandle<'a, C: 'a + Config + Persist + FileSystemConfig>
+where
+    HistoricalConfig<C>: FileSystemConfig,
+{
+    guard: tokio::sync::RwLockWriteGuard<'a, History<HistoricalConfig<C>>>,
 }
 
-impl<C: Config + Persist + Ord> From<tokio::sync::RwLockWriteGuard<'static, History<HistoricalConfig<C>>>>
-    for PersistHandle<C>
+impl<'a, C: Config + Persist + FileSystemConfig> From<tokio::sync::RwLockWriteGuard<'a, History<HistoricalConfig<C>>>>
+    for PersistHandle<'a, C>
+where
+    HistoricalConfig<C>: FileSystemConfig,
 {
-    fn from(guard: tokio::sync::RwLockWriteGuard<'static, History<HistoricalConfig<C>>>) -> Self {
+    fn from(guard: tokio::sync::RwLockWriteGuard<'a, History<HistoricalConfig<C>>>) -> Self {
         Self { guard }
     }
 }
 
-impl<C: Config + Persist + Ord> Deref for PersistHandle<C> {
-    type Target = tokio::sync::RwLockWriteGuard<'static, History<HistoricalConfig<C>>>;
+impl<'a, C: Config + Persist + FileSystemConfig> Deref for PersistHandle<'a, C>
+where
+    HistoricalConfig<C>: FileSystemConfig,
+{
+    type Target = tokio::sync::RwLockWriteGuard<'a, History<HistoricalConfig<C>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.guard
     }
 }
 
-impl<C: Config + Persist + Ord> DerefMut for PersistHandle<C> {
+impl<'a, C: Config + Persist + FileSystemConfig> DerefMut for PersistHandle<'a, C>
+where
+    HistoricalConfig<C>: FileSystemConfig,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
 }
 
-impl<C: Config + Persist + Ord> std::ops::Drop for PersistHandle<C> {
+impl<'a, C: Config + Persist + FileSystemConfig> std::ops::Drop for PersistHandle<'a, C>
+where
+    HistoricalConfig<C>: FileSystemConfig,
+{
     fn drop(&mut self) {
         if let Err(e) = self.persist() {
             error!("{}", e);

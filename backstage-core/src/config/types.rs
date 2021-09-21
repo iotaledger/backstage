@@ -8,6 +8,7 @@ use super::{
 
 #[cfg(feature = "ron_config")]
 /// RON file config
+#[derive(Debug)]
 pub struct RONConfig;
 #[cfg(feature = "ron_config")]
 impl ConfigFileType for RONConfig {
@@ -30,6 +31,7 @@ impl ValueType for RONConfig {
 
 #[cfg(feature = "json_config")]
 /// JSON file config
+#[derive(Debug)]
 pub struct JSONConfig;
 #[cfg(feature = "json_config")]
 impl ConfigFileType for JSONConfig {
@@ -52,6 +54,7 @@ impl ValueType for JSONConfig {
 
 #[cfg(feature = "toml_config")]
 /// TOML file config
+#[derive(Debug)]
 pub struct TOMLConfig;
 #[cfg(feature = "toml_config")]
 impl ConfigFileType for TOMLConfig {

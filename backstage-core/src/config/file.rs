@@ -32,12 +32,10 @@ where
     T: FileSystemConfig + DefaultFileSave + Serialize,
 {
     fn save(&self) -> anyhow::Result<()> {
-        let path = T::dir();
-        debug!("Saving config to {}", path.to_string_lossy());
-        if let Some(dir) = path.parent() {
-            if !dir.exists() {
-                std::fs::create_dir_all(dir)?;
-            }
+        let dir = T::dir();
+        debug!("Saving config to {}", dir.to_string_lossy());
+        if !dir.exists() {
+            std::fs::create_dir_all(dir)?;
         }
         T::write_file()?.write_config(self)
     }
@@ -55,13 +53,13 @@ where
     }
 }
 
-impl<C: FileSystemConfig + LoadableConfig + DeserializeOwned> ConfigReader<C> for File {
+impl<C: FileSystemConfig + DeserializeOwned> ConfigReader<C> for File {
     fn read_config(mut self) -> anyhow::Result<C> {
         C::ConfigType::deserialize(&mut self)
     }
 }
 
-impl<C: FileSystemConfig + SerializableConfig + Serialize> ConfigWriter<C> for File {
+impl<C: FileSystemConfig + Serialize> ConfigWriter<C> for File {
     fn write_config(&mut self, config: &C) -> anyhow::Result<()> {
         C::ConfigType::serialize(config, self)
     }

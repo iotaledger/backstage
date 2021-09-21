@@ -1,8 +1,6 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::marker::PhantomData;
-
 use super::{
     file::{
         ConfigFileType,
@@ -15,15 +13,22 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use std::marker::PhantomData;
 
 const CURRENT_VERSION: usize = 3;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize)]
 struct MyConfig<CT> {
     pub name: String,
     #[serde(skip)]
     _config_type: PhantomData<fn(CT) -> CT>,
 }
+impl<CT> PartialEq for MyConfig<CT> {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl<CT> Eq for MyConfig<CT> {}
 
 impl<CT> Default for MyConfig<CT> {
     fn default() -> Self {
@@ -69,4 +74,24 @@ fn test_load_json() {
     if let Err(_) = VersionedConfig::<MyConfig<JSONConfig>, CURRENT_VERSION>::load_or_save_default() {
         VersionedConfig::<MyConfig<JSONConfig>, CURRENT_VERSION>::load().unwrap();
     }
+}
+
+#[tokio::test]
+#[cfg(feature = "ron_config")]
+async fn test_load_historic() {
+    use super::persist::PersistHandle;
+    use tokio::sync::RwLock;
+
+    let history = History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>, CURRENT_VERSION>>>::load(20)
+        .or_else(|_| History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>, CURRENT_VERSION>>>::load(20))
+        .unwrap();
+    let rw_lock = RwLock::new(history);
+    let mut history_handle: PersistHandle<_> = rw_lock.write().await.into();
+    let mut latest = history_handle.latest().clone();
+    latest.name = "update1".to_string();
+    history_handle.update(latest.clone());
+    latest.name = "update2".to_string();
+    history_handle.update(latest.clone());
+    latest.name = "update3".to_string();
+    history_handle.update(latest);
 }

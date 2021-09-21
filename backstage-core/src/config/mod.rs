@@ -104,7 +104,7 @@ pub trait LoadableConfig {
 }
 
 /// Defines a type which can be read into a config
-pub trait ConfigReader<C: LoadableConfig> {
+pub trait ConfigReader<C> {
     /// Read the config
     fn read_config(self) -> anyhow::Result<C>;
 }
@@ -131,7 +131,7 @@ impl<C: LoadableConfig + DeserializeOwned> ConfigReader<C> for toml::Value {
 }
 
 /// Defines a type which can be written to using a config
-pub trait ConfigWriter<C: SerializableConfig> {
+pub trait ConfigWriter<C> {
     /// Write the config
     fn write_config(&mut self, config: &C) -> anyhow::Result<()>;
 }
