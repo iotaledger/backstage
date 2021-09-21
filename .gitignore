@@ -4,3 +4,4 @@ Cargo.lock
 examples/target
 .vscode
 **/config.*
+**/historical_config

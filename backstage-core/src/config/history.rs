@@ -69,11 +69,11 @@ impl<C: Config> Wrapper for HistoricalConfig<C> {
 
 impl<C: Config + FileSystemConfig> FileSystemConfig for HistoricalConfig<C> {
     type ConfigType = C::ConfigType;
-    const CONFIG_DIR: &'static str = "./historical_config";
+    const CONFIG_DIR: &'static str = "historical_config";
     const FILENAME: &'static str = C::FILENAME;
 
     fn dir() -> PathBuf {
-        PathBuf::from(Self::CONFIG_DIR)
+        C::dir().join(Self::CONFIG_DIR)
     }
 }
 
