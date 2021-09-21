@@ -199,21 +199,16 @@ where
     pub async fn start<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
-        child: Child,
+        mut child: Child,
     ) -> ActorResult<<Child::Channel as Channel>::Handle>
     where
         Child: Actor<<A::Channel as Channel>::Handle> + ChannelBuilder<Child::Channel>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
         Self: Send,
     {
-        let (h, init_signal) = self.spawn(directory, child).await?;
-        if let Ok(Ok((scope_id, service))) = self.abortable(init_signal.initialized()).await {
-            self.upsert_microservice(scope_id, service);
-            Ok(h)
-        } else {
-            let msg = format!("Aborted inside start method while awaiting child to get initialized");
-            Err(ActorError::aborted_msg(msg))
-        }
+        // try to create the actor's channel
+        let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
+        self.start_with_channel(directory, child, channel).await
     }
     /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
     pub async fn spawn<Dir: Into<Option<String>>, Child>(
@@ -230,6 +225,44 @@ where
     {
         // try to create the actor's channel
         let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
+        self.spawn_with_channel(directory, child, channel).await
+    }
+    /// Spawn the provided child and await till it's initialized
+    pub async fn start_with_channel<Dir: Into<Option<String>>, Child>(
+        &mut self,
+        directory: Dir,
+        child: Child,
+        channel: Child::Channel,
+    ) -> ActorResult<<Child::Channel as Channel>::Handle>
+    where
+        Child: Actor<<A::Channel as Channel>::Handle>,
+        <A::Channel as Channel>::Handle: SupHandle<Child>,
+        Self: Send,
+    {
+        let (h, init_signal) = self.spawn_with_channel(directory, child, channel).await?;
+        if let Ok(Ok((scope_id, service))) = self.abortable(init_signal.initialized()).await {
+            self.upsert_microservice(scope_id, service);
+            Ok(h)
+        } else {
+            let msg = format!("Aborted inside start method while awaiting child to get initialized");
+            Err(ActorError::aborted_msg(msg))
+        }
+    }
+    /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
+    pub async fn spawn_with_channel<Dir: Into<Option<String>>, Child>(
+        &mut self,
+        directory: Dir,
+        mut child: Child,
+        channel: Child::Channel,
+    ) -> ActorResult<(<Child::Channel as Channel>::Handle, InitializedRx)>
+    where
+        <A::Channel as Channel>::Handle: Clone,
+        Child: Actor<<A::Channel as Channel>::Handle>,
+        Dir: Into<Option<String>>,
+        <A::Channel as Channel>::Handle: SupHandle<Child>,
+    {
+        // try to create the actor's channel
+        // let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
         let parent_id = self.scope_id;
         let mut scopes_index;
         let mut child_scope_id;
@@ -310,6 +343,7 @@ where
         self.children_joins.insert(child_scope_id, join_handle);
         Ok((handle, InitializedRx(child_scope_id, rx_oneshot)))
     }
+
     /// Insert/Update microservice.
     /// Note: it will remove the children handles/joins if the provided service is stopped
     pub fn upsert_microservice(&mut self, scope_id: ScopeId, service: Service) {
