@@ -40,7 +40,6 @@ toml = { version = "0.5", optional = true }
 glob = { version = "0.3", optional = true }
 
 [dev-dependencies]
-#tokio = { version = "1.11", features = ["macros", "rt-multi-thread", "signal"] }
 env_logger = "0.9"
 url = "2.2"
 

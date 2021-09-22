@@ -57,7 +57,7 @@ where
     /// The actor's children handles
     pub(crate) children_handles: std::collections::HashMap<ScopeId, Box<dyn Shutdown>>,
     /// The actor's children joins
-    pub(crate) children_joins: std::collections::HashMap<ScopeId, tokio::task::JoinHandle<()>>,
+    pub(crate) children_joins: std::collections::HashMap<ScopeId, tokio::task::JoinHandle<ActorResult<()>>>,
     /// The actor abort_registration copy
     pub(crate) abort_registration: AbortRegistration,
     /// Registered prometheus metrics
@@ -445,7 +445,10 @@ where
         }
     }
     /// Shutdown child using its scope_id
-    pub async fn shutdown_child(&mut self, child_scope_id: &ScopeId) -> Option<tokio::task::JoinHandle<()>> {
+    pub async fn shutdown_child(
+        &mut self,
+        child_scope_id: &ScopeId,
+    ) -> Option<tokio::task::JoinHandle<ActorResult<()>>> {
         if let Some(h) = self.children_handles.remove(child_scope_id) {
             h.shutdown().await;
             self.children_joins.remove(child_scope_id)
@@ -456,7 +459,7 @@ where
     /// Shutdown all the children of a given type within this actor context
     pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(
         &mut self,
-    ) -> HashMap<ScopeId, tokio::task::JoinHandle<()>>
+    ) -> HashMap<ScopeId, tokio::task::JoinHandle<ActorResult<()>>>
     where
         <A::Channel as Channel>::Handle: SupHandle<T>,
     {
@@ -1017,11 +1020,11 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
 pub struct Runtime<H> {
     #[allow(unused)]
     scope_id: ScopeId,
-    join_handle: tokio::task::JoinHandle<()>,
+    join_handle: tokio::task::JoinHandle<ActorResult<()>>,
     handle: H,
     initialized_rx: Option<InitializedRx>,
     server: Option<Box<dyn Shutdown>>,
-    server_join_handle: Option<tokio::task::JoinHandle<()>>,
+    server_join_handle: Option<tokio::task::JoinHandle<ActorResult<()>>>,
 }
 
 impl<H> Runtime<H>
@@ -1168,10 +1171,11 @@ where
             let mut rt = child_context;
             let f = child.init(&mut rt);
             match f.await {
-                Err(reason) => {
+                Err(err) => {
                     // breakdown the child
-                    let f = rt.breakdown(child, Err(reason));
+                    let f = rt.breakdown(child, Err(err.clone()));
                     f.await;
+                    Err(err)
                 }
                 Ok(deps) => {
                     if rt.service().is_initializing() {
@@ -1179,8 +1183,9 @@ where
                     }
                     let f = child.run(&mut rt, deps);
                     let r = f.await;
-                    let f = rt.breakdown(child, r);
-                    f.await
+                    let f = rt.breakdown(child, r.clone());
+                    f.await;
+                    r
                 }
             }
         };
@@ -1245,6 +1250,7 @@ where
                     // breakdown the child
                     let f = rt.breakdown(child, Err(reason));
                     f.await;
+                    Err(reason)
                 }
                 Ok(deps) => {
                     if rt.service().is_initializing() {
@@ -1253,7 +1259,8 @@ where
                     let f = child.run(&mut rt, deps);
                     let r = f.await;
                     let f = rt.breakdown(child, r);
-                    f.await
+                    f.await;
+                    r
                 }
             }
         };
@@ -1267,8 +1274,8 @@ where
         self.initialized_rx.take()
     }
     /// Block on the runtime till it shutdown gracefully
-    pub async fn block_on(mut self) -> Result<(), tokio::task::JoinError> {
-        let r = self.join_handle.await;
+    pub async fn block_on(mut self) -> ActorResult<()> {
+        let r = self.join_handle.await.expect("to join the root actor successfully");
         if let Some(ws_server_handle) = self.server.take() {
             ws_server_handle.shutdown().await;
             self.server_join_handle.expect("websocket join handle").await.ok();
@@ -1278,15 +1285,20 @@ where
 }
 
 /// The actor wrapped future
-async fn actor_fut_with_signal<A: Actor<S>, S: SupHandle<A>>(mut actor: A, mut rt: Rt<A, S>, check_init: InitSignalTx) {
+async fn actor_fut_with_signal<A: Actor<S>, S: SupHandle<A>>(
+    mut actor: A,
+    mut rt: Rt<A, S>,
+    check_init: InitSignalTx,
+) -> ActorResult<()> {
     let f = actor.init(&mut rt);
     match f.await {
-        Err(reason) => {
+        Err(err) => {
             // inform oneshot receiver
-            check_init.send(Err(reason.clone())).ok();
+            check_init.send(Err(err.clone())).ok();
             // breakdown the child
-            let f = rt.breakdown(actor, Err(reason));
+            let f = rt.breakdown(actor, Err(err.clone()));
             f.await;
+            Err(err)
         }
         Ok(deps) => {
             if rt.service().is_initializing() {
@@ -1297,8 +1309,9 @@ async fn actor_fut_with_signal<A: Actor<S>, S: SupHandle<A>>(mut actor: A, mut r
             check_init.send(Ok(service)).ok();
             let f = actor.run(&mut rt, deps);
             let r = f.await;
-            let f = rt.breakdown(actor, r);
-            f.await
+            let f = rt.breakdown(actor, r.clone());
+            f.await;
+            r
         }
     }
 }
