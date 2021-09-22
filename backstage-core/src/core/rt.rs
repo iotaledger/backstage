@@ -1246,11 +1246,11 @@ where
             let mut rt = child_context;
             let f = child.init(&mut rt);
             match f.await {
-                Err(reason) => {
+                Err(err) => {
                     // breakdown the child
-                    let f = rt.breakdown(child, Err(reason));
+                    let f = rt.breakdown(child, Err(err.clone()));
                     f.await;
-                    Err(reason)
+                    Err(err)
                 }
                 Ok(deps) => {
                     if rt.service().is_initializing() {
@@ -1258,7 +1258,7 @@ where
                     }
                     let f = child.run(&mut rt, deps);
                     let r = f.await;
-                    let f = rt.breakdown(child, r);
+                    let f = rt.breakdown(child, r.clone());
                     f.await;
                     r
                 }
