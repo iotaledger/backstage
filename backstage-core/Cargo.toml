@@ -16,7 +16,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"
 futures = "0.3"
-tokio = { version = "1.11", features = ["sync", "time", "rt"] }
+tokio = { version = "1.11", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 lazy_static = "1.4"
 anyhow = "1.0"
 anymap = "0.12"
@@ -40,7 +40,7 @@ toml = { version = "0.5", optional = true }
 glob = { version = "0.3", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.11", features = ["macros", "rt-multi-thread", "signal"] }
+#tokio = { version = "1.11", features = ["macros", "rt-multi-thread", "signal"] }
 env_logger = "0.9"
 url = "2.2"
 
