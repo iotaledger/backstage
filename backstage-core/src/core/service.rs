@@ -30,6 +30,8 @@ pub enum ServiceStatus {
     Maintenance = 5,
     /// The service is not running, should be handled accordingly by active dependent services
     Stopped = 6,
+    /// The service is idle.
+    Idle = 7,
 }
 
 impl std::fmt::Display for ServiceStatus {
@@ -42,6 +44,7 @@ impl std::fmt::Display for ServiceStatus {
                 ServiceStatus::Initializing => "Initializing",
                 ServiceStatus::Degraded => "Degraded",
                 ServiceStatus::Running => "Running",
+                ServiceStatus::Idle => "Idle",
                 ServiceStatus::Stopping => "Stopping",
                 ServiceStatus::Maintenance => "Maintenance",
                 ServiceStatus::Stopped => "Stopped",
@@ -162,6 +165,10 @@ impl Service {
     /// Check if the service is running
     pub fn is_running(&self) -> bool {
         self.status == ServiceStatus::Running
+    }
+    /// Check if the service is idle
+    pub fn is_idle(&self) -> bool {
+        self.status == ServiceStatus::Idle
     }
     /// Check if the service is starting
     pub fn is_starting(&self) -> bool {
