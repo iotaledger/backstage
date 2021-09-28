@@ -99,7 +99,7 @@ where
         let first = First;
         // start first
         rt.start(Some("first".into()), first).await?;
-        // 
+        //
         // - build Second
         let second = Second;
         // start second
@@ -126,7 +126,7 @@ where
                     );
                     rt.upsert_microservice(scope_id, service);
                 }
-                BackstageEvent::Exit(scope_id, service, child) => {
+                BackstageEvent::Exit(scope_id, service, _child) => {
                     log::info!(
                         "Microservice: {}, dir: {:?}, status: {}",
                         service.actor_type_name(),

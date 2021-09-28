@@ -252,7 +252,7 @@ where
     pub async fn spawn_with_channel<Dir: Into<Option<String>>, Child>(
         &mut self,
         directory: Dir,
-        mut child: Child,
+        child: Child,
         channel: Child::Channel,
     ) -> ActorResult<(<Child::Channel as Channel>::Handle, InitializedRx)>
     where

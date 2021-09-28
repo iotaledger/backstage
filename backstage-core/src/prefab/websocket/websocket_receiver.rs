@@ -5,6 +5,7 @@ use super::{
     Error,
     Event,
     Interface,
+    JsonResponder,
     Response,
     WebsocketSenderEvent,
 };
@@ -121,15 +122,32 @@ where
                                     self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
                                 }
                             }
-                            Event::Call(_message_to_route_with_responder) => {
-                                // todo
-                                todo!()
+                            Event::Call(message_to_route) => {
+                                if let Some(scope_id) = targeted_scope_id_opt.take() {
+                                    let json_message = message_to_route.clone();
+                                    // create responder
+                                    let ws_handle = self.sender_handle.clone();
+                                    let responder = JsonResponder::trait_obj(ws_handle);
+                                    if let Err(e) = rt.send(scope_id, (json_message, responder)).await {
+                                        let err = format!("{}", e);
+                                        let r = Error::Call(interface.actor_path, message_to_route, err);
+                                        self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                    };
+                                } else {
+                                    let r = Error::Call(
+                                        interface.actor_path,
+                                        message_to_route,
+                                        "Unreachable ActorPath".into(),
+                                    );
+                                    self.sender_handle.send(WebsocketSenderEvent::Result(Err(r))).ok();
+                                }
                             }
                         }
                     } else {
                         break;
                     };
                 }
+
                 Message::Close(_) => {
                     break;
                 }

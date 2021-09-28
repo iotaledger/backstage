@@ -3,30 +3,46 @@
 
 use backstage::core::*;
 #[cfg(feature = "websocket_server")]
-use backstage::prefab::websocket::JsonMessage;
+use backstage::prefab::websocket::{
+    GenericResponder,
+    JsonMessage,
+    Responder,
+};
 
-struct HelloWorld;
+struct Echo;
+
+enum EchoEvent {
+    ClientMsg(String, Responder),
+}
 
 #[async_trait::async_trait]
-impl<S> Actor<S> for HelloWorld
+impl<S> Actor<S> for Echo
 where
     S: SupHandle<Self>,
 {
     type Data = ();
-    type Channel = AbortableUnboundedChannel<String>;
+    type Channel = AbortableUnboundedChannel<EchoEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
-        rt.add_route::<JsonMessage>().await.ok();
-        log::info!("HelloWorld: {}", rt.service().status());
+        rt.add_route::<(JsonMessage, Responder)>().await.ok();
+        log::info!("Echo: {}", rt.service().status());
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
-        log::info!("HelloWorld: {}", rt.service().status());
-        while let Some(event) = rt.inbox_mut().next().await {
-            log::info!("HelloWorld: Received {}", event);
+        log::info!("Echo: {}", rt.service().status());
+        while let Some(EchoEvent::ClientMsg(msg, responder)) = rt.inbox_mut().next().await {
+            log::info!("EchoEvent: Received {}", msg);
+            responder.inner_reply(msg).await.ok();
         }
         rt.stop().await;
-        log::info!("HelloWorld: {}", rt.service().status());
+        log::info!("Echo: {}", rt.service().status());
         Ok(())
+    }
+}
+
+impl std::convert::TryFrom<(JsonMessage, Responder)> for EchoEvent {
+    type Error = std::convert::Infallible;
+    fn try_from(value: (JsonMessage, Responder)) -> Result<Self, Self::Error> {
+        Ok(EchoEvent::ClientMsg(value.0 .0, value.1))
     }
 }
 
@@ -37,11 +53,11 @@ async fn main() {
         let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
         env_logger::Builder::from_env(env).init();
     }
-    let hello_world = HelloWorld;
+    let hello_world = Echo;
     let server_addr = "127.0.0.1:9000"
         .parse::<std::net::SocketAddr>()
         .expect("parsable socket addr");
-    let runtime = Runtime::new(Some("HelloWorld".into()), hello_world)
+    let runtime = Runtime::new(Some("echo".into()), hello_world)
         .await
         .expect("Runtime to run")
         .websocket_server(server_addr, None)
@@ -58,7 +74,7 @@ async fn ws_client() {
         .await
         .unwrap();
     let actor_path = ActorPath::new();
-    let request = Interface::new(actor_path.clone(), Event::cast("Print this".into()));
+    let request = Interface::new(actor_path.clone(), Event::Call("Call message".into()));
     stream.send(request.to_message()).await.unwrap();
     while let Some(Ok(msg)) = stream.next().await {
         log::info!("Response from websocket: {}", msg);

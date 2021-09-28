@@ -24,7 +24,9 @@ pub enum ActorRequest {
 #[derive(Debug)]
 /// The Actor Error
 pub struct ActorError {
+    /// the actor's shutdown reason message/error
     pub reason: anyhow::Error,
+    /// the actor's request
     pub request: ActorRequest,
 }
 

@@ -15,12 +15,22 @@ pub(crate) use websocket_sender::{
     WebsocketSenderEvent,
 };
 
-#[derive(serde::Deserialize, serde::Serialize, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
 /// The route message, wrapper around Message::Text inner string
-pub struct RouteMessage(pub String);
-impl From<RouteMessage> for String {
-    fn from(v: RouteMessage) -> Self {
+pub struct JsonMessage(pub String);
+impl From<JsonMessage> for String {
+    fn from(v: JsonMessage) -> Self {
         v.0
+    }
+}
+impl Into<JsonMessage> for String {
+    fn into(self: Self) -> JsonMessage {
+        JsonMessage(self)
+    }
+}
+impl<'a> Into<JsonMessage> for &'a str {
+    fn into(self: Self) -> JsonMessage {
+        JsonMessage(self.to_string())
     }
 }
 // Deserializable event
@@ -30,9 +40,9 @@ pub enum Event {
     /// shutdown the actor
     Shutdown,
     /// Cast event T using the pid's router, without responder.
-    Cast(RouteMessage),
+    Cast(JsonMessage),
     /// Send event T using the pid's router.
-    Call(RouteMessage),
+    Call(JsonMessage),
     /// Request the service tree
     RequestServiceTree,
 }
@@ -44,7 +54,7 @@ impl Event {
     }
     /// Create cast event
     pub fn cast(message: String) -> Self {
-        Self::Cast(RouteMessage(message))
+        Self::Cast(JsonMessage(message))
     }
     /// Create request service tree event
     pub fn service() -> Self {
@@ -52,29 +62,29 @@ impl Event {
     }
 }
 // Serializable response
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug)]
 /// The expected client's response for a given event request
 pub enum Response {
     /// Success shutdown signal
     Shutdown(ActorPath),
     /// Successful cast
-    Sent(RouteMessage),
+    Sent(JsonMessage),
     /// Successful Response from a call
-    Response(RouteMessage),
+    Response(JsonMessage),
     /// Requested service tree
     ServiceTree(Service),
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
 /// The expected client's error for a given event request
 pub enum Error {
     /// Failed to shutdown the actor under the ActorPath
     /// (path, error string)
     Shutdown(ActorPath, String),
-    /// Failed to cast RouteMessge to ActorPath.
-    Cast(ActorPath, RouteMessage, String),
-    /// Failed to call RouteMessge to ActorPath.
-    Call(ActorPath, RouteMessage, String),
+    /// Failed to cast JsonMessage to ActorPath.
+    Cast(ActorPath, JsonMessage, String),
+    /// Failed to call JsonMessage to ActorPath.
+    Call(ActorPath, JsonMessage, String),
     /// Unable to fetch the service
     ServiceTree(String),
 }
@@ -82,12 +92,13 @@ pub enum Error {
 /// Wrapper around the final expected result
 pub type ResponseResult = Result<Response, Error>;
 
-#[derive(serde::Deserialize, serde::Serialize, Default, Clone)] // todo impl better ser/de
+#[derive(serde::Deserialize, serde::Serialize, Default, Clone, Debug)] // todo impl better ser/de
 /// The actor directory path
 pub struct ActorPath {
     root: ScopeId,
     path: Vec<String>,
 }
+
 impl ActorPath {
     /// Create new actor path, with root = 0 as the default scope_id
     pub fn new() -> Self {
@@ -263,5 +274,122 @@ impl<S: SupHandle<Self>> Actor<S> for Websocket {
             root_handle.shutdown().await
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+/// Generic responder to be implemented on the serializeable
+pub trait GenericResponder {
+    /// reply to the client
+    async fn inner_reply<T: serde::Serialize + erased_serde::Serialize + Send>(
+        &self,
+        response: T,
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<'a, T: ?Sized> GenericResponder for Box<T>
+where
+    T: GenericResponder + Sized,
+    Self: Send + Sync,
+{
+    async fn inner_reply<Re: serde::Serialize + Send>(&self, response: Re) -> anyhow::Result<()> {
+        let f = (**self).inner_reply(response);
+        f.await
+    }
+}
+
+#[async_trait::async_trait]
+/// Erased responder which enable invoking inner generic fn on trait object
+pub trait ErasedResponder: Send + Sync {
+    /// Erased private fn
+    async fn _reply(&self, response: &mut (dyn erased_serde::Serialize + Send)) -> anyhow::Result<()>;
+}
+
+/// Responder as trait object
+pub type Responder = Box<dyn ErasedResponder>;
+
+#[async_trait::async_trait]
+impl GenericResponder for dyn ErasedResponder {
+    async fn inner_reply<T: serde::Serialize + Send>(&self, mut response: T) -> anyhow::Result<()> {
+        let f = self._reply(&mut response);
+        f.await
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: Send + Sync> ErasedResponder for T
+where
+    Self: GenericResponder,
+{
+    async fn _reply(&self, response: &mut (dyn erased_serde::Serialize + Send)) -> anyhow::Result<()> {
+        self.inner_reply(response).await
+    }
+}
+
+#[async_trait::async_trait]
+impl GenericResponder for JsonResponder {
+    async fn inner_reply<T: erased_serde::Serialize + serde::Serialize + Send>(
+        &self,
+        response: T,
+    ) -> anyhow::Result<()> {
+        // todo send shutdown event if any error occour
+        let json = serde_json::to_string(&response).map_err(anyhow::Error::new)?;
+        let ws_sender_event = WebsocketSenderEvent::Result(Ok(Response::Response(JsonMessage(json))));
+        self.handle.send(ws_sender_event).map_err(anyhow::Error::new)?;
+        Ok(())
+    }
+}
+
+/// Websocket Json responder (used for call requests)
+// todo impl drop (and send error if the responder is not been use)
+pub struct JsonResponder {
+    handle: UnboundedHandle<WebsocketSenderEvent>,
+}
+
+impl JsonResponder {
+    pub(crate) fn new(handle: UnboundedHandle<WebsocketSenderEvent>) -> Self {
+        Self { handle }
+    }
+    pub(crate) fn boxed(handle: UnboundedHandle<WebsocketSenderEvent>) -> Box<Self> {
+        Box::new(Self::new(handle))
+    }
+    pub(crate) fn trait_obj(handle: UnboundedHandle<WebsocketSenderEvent>) -> Responder {
+        Self::boxed(handle)
+    }
+}
+
+struct CallerObj<T> {
+    responder: Responder,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> From<Responder> for CallerObj<T> {
+    fn from(responder: Responder) -> Self {
+        Self {
+            responder,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+/// Caller responder trait, extends enables non-serializeable or static (oneshot, etc) responder type
+pub trait Caller<T> {
+    /// reply
+    async fn reply(self: Box<Self>, message: T) -> anyhow::Result<()>;
+}
+
+#[async_trait::async_trait]
+impl<'de, T: Send + serde::Serialize + 'static> Caller<T> for CallerObj<T> {
+    async fn reply(self: Box<Self>, message: T) -> anyhow::Result<()> {
+        self.responder.inner_reply(message).await
+    }
+}
+
+impl<'de, T: Send + erased_serde::Serialize + serde::Serialize + 'static> From<Responder> for Box<dyn Caller<T>> {
+    fn from(responder: Responder) -> Self {
+        let caller_obj: CallerObj<T> = responder.into();
+        Box::new(caller_obj)
     }
 }
