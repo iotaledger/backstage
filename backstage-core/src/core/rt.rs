@@ -33,10 +33,7 @@ use crate::prefab::websocket::Websocket;
 use prometheus::core::Collector;
 use std::collections::HashMap;
 /// The actor's local context
-pub struct Rt<A: Actor<S>, S: SupHandle<A>>
-where
-    Self: Send,
-{
+pub struct Rt<A: Actor<S>, S: Send> {
     /// The level depth of the context, it's the scope depth from the root
     pub(crate) depth: usize,
     /// The service of the actor
@@ -158,9 +155,10 @@ impl LocateScopeId {
     }
 }
 
-impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S>
+impl<A: Actor<S>, S> Rt<A, S>
 where
-    Self: Send + Sync,
+    Self: Send,
+    S: Send,
 {
     /// Start traversing from the child with the provided dir name
     pub fn child<D: Into<String>>(&self, dir_name: D) -> LocateScopeId {
@@ -202,7 +200,7 @@ where
         mut child: Child,
     ) -> ActorResult<<Child::Channel as Channel>::Handle>
     where
-        Child: Actor<<A::Channel as Channel>::Handle> + ChannelBuilder<Child::Channel>,
+        Child: 'static + Actor<<A::Channel as Channel>::Handle> + ChannelBuilder<Child::Channel>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
         Self: Send,
     {
@@ -218,7 +216,8 @@ where
     ) -> ActorResult<(<Child::Channel as Channel>::Handle, InitializedRx)>
     where
         <A::Channel as Channel>::Handle: Clone,
-        Child: ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
+        Child: 'static
+            + ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
             + Actor<<A::Channel as Channel>::Handle>,
         Dir: Into<Option<String>>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
@@ -235,7 +234,7 @@ where
         channel: Child::Channel,
     ) -> ActorResult<<Child::Channel as Channel>::Handle>
     where
-        Child: Actor<<A::Channel as Channel>::Handle>,
+        Child: 'static + Actor<<A::Channel as Channel>::Handle>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
         Self: Send,
     {
@@ -257,7 +256,7 @@ where
     ) -> ActorResult<(<Child::Channel as Channel>::Handle, InitializedRx)>
     where
         <A::Channel as Channel>::Handle: Clone,
-        Child: Actor<<A::Channel as Channel>::Handle>,
+        Child: 'static + Actor<<A::Channel as Channel>::Handle>,
         Dir: Into<Option<String>>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
@@ -359,15 +358,6 @@ where
         self.children_joins.remove(&scope_id);
         self.service.microservices.remove(&scope_id)
     }
-    /// Update the service status, and report to the supervisor and subscribers (if any)
-    pub async fn update_status(&mut self, service_status: ServiceStatus) {
-        self.service.update_status(service_status);
-        let service = self.service.clone();
-        // report to supervisor
-        self.sup_handle.report(self.scope_id, service.clone()).await;
-        // publish the service to subscribers
-        self.publish(service).await;
-    }
     /// Returns mutable reference to the actor's inbox
     pub fn inbox_mut(&mut self) -> &mut <A::Channel as Channel>::Inbox {
         &mut self.inbox
@@ -433,11 +423,7 @@ where
     pub fn microservices_any(&self, is: fn(&Service) -> bool) -> bool {
         self.service.microservices.iter().any(|(_, s)| is(s))
     }
-    /// Stop the microservices and update status to stopping
-    pub async fn stop(&mut self) {
-        self.shutdown_children().await;
-        self.update_status(ServiceStatus::Stopping).await;
-    }
+
     /// Shutdown all the children within this actor context
     pub async fn shutdown_children(&mut self) {
         for (_, c) in self.children_handles.drain() {
@@ -457,7 +443,7 @@ where
         }
     }
     /// Shutdown all the children of a given type within this actor context
-    pub async fn shutdown_children_type<T: Actor<<A::Channel as Channel>::Handle>>(
+    pub async fn shutdown_children_type<T: 'static + Actor<<A::Channel as Channel>::Handle>>(
         &mut self,
     ) -> HashMap<ScopeId, tokio::task::JoinHandle<ActorResult<()>>>
     where
@@ -476,6 +462,55 @@ where
         }
         joins
     }
+
+    /// Add route for T
+    pub async fn add_route<T: Send + 'static>(&self) -> anyhow::Result<()>
+    where
+        <A::Channel as Channel>::Handle: Route<T>,
+    {
+        let route: Box<dyn Route<T>> = Box::new(self.handle.clone());
+        let mut lock = SCOPES[self.scopes_index].write().await;
+        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
+        my_scope.router.insert(route);
+        Ok(())
+    }
+    /// Remove route of T
+    pub async fn remove_route<T: Send + 'static>(&self) -> anyhow::Result<()> {
+        let mut lock = SCOPES[self.scopes_index].write().await;
+        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
+        my_scope.router.remove::<Box<dyn Route<T>>>();
+        Ok(())
+    }
+    /// Try to send message T, to the provided scope_i
+    pub async fn send<T: Send + 'static>(&self, scope_id: ScopeId, message: T) -> anyhow::Result<()>
+    where
+        Self: Send + Sync,
+    {
+        let scopes_index = scope_id % *BACKSTAGE_PARTITIONS;
+        let lock = SCOPES[scopes_index].read().await;
+        if let Some(scope) = lock.get(&scope_id) {
+            if let Some(route) = scope.router.get::<Box<dyn Route<T>>>() {
+                if let Some(message) = route.try_send_msg(message).await? {
+                    let cloned_route = route.clone();
+                    drop(lock);
+                    cloned_route.send_msg(message).await?;
+                    Ok(())
+                } else {
+                    Ok(())
+                }
+            } else {
+                anyhow::bail!("No route available")
+            }
+        } else {
+            anyhow::bail!("No scope available")
+        }
+    }
+}
+
+impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S>
+where
+    Self: Send,
+{
     /// Defines how to breakdown the context and it should aknowledge shutdown to its supervisor
     async fn breakdown(mut self, actor: A, r: ActorResult<()>)
     where
@@ -540,47 +575,21 @@ where
         // aknshutdown to supervisor
         self.sup_handle.eol(self.scope_id, service, actor, r).await;
     }
-    /// Add route for T
-    pub async fn add_route<T: Send + 'static>(&self) -> anyhow::Result<()>
-    where
-        <A::Channel as Channel>::Handle: Route<T>,
-    {
-        let route: Box<dyn Route<T>> = Box::new(self.handle.clone());
-        let mut lock = SCOPES[self.scopes_index].write().await;
-        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
-        my_scope.router.insert(route);
-        Ok(())
+
+    /// Update the service status, and report to the supervisor and subscribers (if any)
+    pub async fn update_status(&mut self, service_status: ServiceStatus) {
+        self.service.update_status(service_status);
+        let service = self.service.clone();
+        // report to supervisor
+        self.sup_handle.report(self.scope_id, service.clone()).await;
+        // publish the service to subscribers
+        self.publish(service).await;
     }
-    /// Remove route of T
-    pub async fn remove_route<T: Send + 'static>(&self) -> anyhow::Result<()> {
-        let mut lock = SCOPES[self.scopes_index].write().await;
-        let my_scope = lock.get_mut(&self.scope_id).expect("expected self scope to exist");
-        my_scope.router.remove::<Box<dyn Route<T>>>();
-        Ok(())
-    }
-    /// Try to send message T, to the provided scope_i
-    pub async fn send<T: Send + 'static>(&self, scope_id: ScopeId, message: T) -> anyhow::Result<()>
-    where
-        Self: Send + Sync,
-    {
-        let scopes_index = scope_id % *BACKSTAGE_PARTITIONS;
-        let lock = SCOPES[scopes_index].read().await;
-        if let Some(scope) = lock.get(&scope_id) {
-            if let Some(route) = scope.router.get::<Box<dyn Route<T>>>() {
-                if let Some(message) = route.try_send_msg(message).await? {
-                    let cloned_route = route.clone();
-                    drop(lock);
-                    cloned_route.send_msg(message).await?;
-                    Ok(())
-                } else {
-                    Ok(())
-                }
-            } else {
-                anyhow::bail!("No route available")
-            }
-        } else {
-            anyhow::bail!("No scope available")
-        }
+
+    /// Stop the microservices and update status to stopping
+    pub async fn stop(&mut self) {
+        self.shutdown_children().await;
+        self.update_status(ServiceStatus::Stopping).await;
     }
 }
 
@@ -1034,7 +1043,7 @@ where
     /// Create and spawn runtime with null supervisor handle
     pub async fn new<T, A>(root_dir: T, child: A) -> ActorResult<Self>
     where
-        A: ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor>,
+        A: 'static + ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor>,
         T: Into<Option<String>>,
         <A as Actor<NullSupervisor>>::Channel: Channel<Handle = H>,
         H: Shutdown + Clone,
@@ -1048,7 +1057,7 @@ where
     /// Create new runtime with provided supervisor handle
     pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> ActorResult<Self>
     where
-        A: ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
+        A: 'static + ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
         <A as Actor<S>>::Channel: Channel<Handle = H>,
         S: SupHandle<A>,

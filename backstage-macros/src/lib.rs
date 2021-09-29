@@ -235,7 +235,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #variants
         }
 
-        impl backstage::core::ShutdownEvent for #ident {
+        impl ShutdownEvent for #ident {
             fn shutdown_event() -> Self {
                 Self::#shutdown_var
             }
@@ -283,7 +283,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {(#(#fields),*)}
     };
     let report = quote! {
-        impl<T> backstage::core::ReportEvent<T> for #ident {
+        impl<T> ReportEvent<T> for #ident {
             fn report_event(scope_id: ScopeId, service: Service) -> Self {
                 Self::#report_var #fields
             }
@@ -375,7 +375,7 @@ pub fn supervise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {}
     };
     let eol = quote! {
-        impl<T> backstage::core::EolEvent<T> for #ident #bounds {
+        impl<T> EolEvent<T> for #ident #bounds {
             fn eol_event(scope_id: ScopeId, service: Service, actor: T, res: ActorResult<()>) -> Self {
                 Self::#eol_var #fields
             }

@@ -1,7 +1,12 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use backstage::core::*;
+use backstage::{
+    core::*,
+    prefab::rocket::*,
+};
+use futures::TryFutureExt;
+use rocket::get;
 
 ////////////////// Incrementer ///////////
 use std::sync::{
@@ -81,36 +86,49 @@ where
     }
 }
 
-// The root custome actor, equivalent to a launcher;
+// The root custom actor, equivalent to a launcher;
 struct Backstage;
+
+#[supervise]
 enum BackstageEvent {
+    #[shutdown]
     Shutdown,
+    #[report]
     Microservice(ScopeId, Service),
 }
 
-///// All of these should be implemented using proc_macro or some macro. start //////
-impl ShutdownEvent for BackstageEvent {
-    fn shutdown_event() -> Self {
-        Self::Shutdown
-    }
+fn construct_rocket(
+    rt: &mut Rt<RocketServer<UnboundedHandle<BackstageEvent>>, UnboundedHandle<BackstageEvent>>,
+) -> impl futures::Future<Output = anyhow::Result<rocket::Rocket<rocket::Ignite>>> {
+    rocket::build()
+        .mount("/api", rocket::routes![info])
+        .attach(CORS)
+        .attach(RequestTimer::default())
+        .register("/", rocket::catchers![internal_error, not_found])
+        .ignite()
+        .map_err(|e| anyhow::anyhow!(e))
 }
-impl<T> ReportEvent<T> for BackstageEvent {
-    fn report_event(scope_id: ScopeId, service: Service) -> Self {
-        Self::Microservice(scope_id, service)
-    }
+
+async fn construct_rocket_async(
+    rt: &mut Rt<RocketServer<UnboundedHandle<BackstageEvent>>, UnboundedHandle<BackstageEvent>>,
+) -> anyhow::Result<rocket::Rocket<rocket::Ignite>> {
+    rocket::build()
+        .mount("/api", rocket::routes![info])
+        .attach(CORS)
+        .attach(RequestTimer::default())
+        .register("/", rocket::catchers![internal_error, not_found])
+        .ignite()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
 }
-impl<T> EolEvent<T> for BackstageEvent {
-    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
-        Self::Microservice(scope_id, service)
-    }
+
+#[get("/info")]
+async fn info() -> &'static str {
+    "Got info endpoint!"
 }
-///// All of these should be implemented using proc_macro or some macro end ///////
 
 #[async_trait::async_trait]
-impl<S> Actor<S> for Backstage
-where
-    S: SupHandle<Self>,
-{
+impl<S: SupHandle<Self>> Actor<S> for Backstage {
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
@@ -133,6 +151,12 @@ where
             log::error!("{:?}", e);
             ActorError::exit_msg(format!("{:?}", e))
         })?;
+        rt.spawn(Some("rocket".into()), RocketServer::new(construct_rocket_async))
+            .await
+            .map_err(|e| {
+                log::error!("{:?}", e);
+                ActorError::exit_msg(format!("{:?}", e))
+            })?;
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult<()> {

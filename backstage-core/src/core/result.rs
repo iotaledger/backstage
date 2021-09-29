@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    error::Error,
     fmt,
     time::Duration,
 };
+use thiserror::Error;
+
 /// The returned result by the actor
 pub type ActorResult<T> = std::result::Result<T, ActorError>;
 
@@ -21,40 +22,67 @@ pub enum ActorRequest {
     Restart(Option<Duration>),
 }
 
-#[derive(Debug)]
-/// The Actor Error
+/// An actor's error which contains an optional request for the supervisor
+#[derive(Error, Debug)]
+#[error("Source: {source}, request: {request:?}")]
 pub struct ActorError {
-    /// the actor's shutdown reason message/error
-    pub reason: anyhow::Error,
-    /// the actor's request
-    pub request: ActorRequest,
+    pub source: anyhow::Error,
+    pub request: Option<ActorRequest>,
 }
 
-impl Clone for ActorError {
-    fn clone(&self) -> Self {
-        let reason = self.reason.to_string();
-        let request = self.request.clone();
+impl Default for ActorError {
+    fn default() -> Self {
         Self {
-            reason: anyhow::Error::msg(reason),
-            request,
+            source: anyhow::anyhow!("An unknown error occurred!"),
+            request: None,
         }
     }
 }
 
-impl fmt::Display for ActorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "actor errored: {} with request {:?}", &self.reason, &self.request)
+pub trait ActorResultExt {
+    type Error;
+    fn err_request(self, request: ActorRequest) -> ActorResult<Self::Error>
+    where
+        Self: Sized;
+}
+
+impl<T> ActorResultExt for anyhow::Result<T> {
+    type Error = T;
+    fn err_request(self, request: ActorRequest) -> ActorResult<T>
+    where
+        Self: Sized,
+    {
+        match self {
+            Err(source) => Err(ActorError {
+                source,
+                request: request.into(),
+            }),
+            Ok(t) => Ok(t),
+        }
     }
 }
 
-impl Error for ActorError {}
+impl From<anyhow::Error> for ActorError {
+    fn from(source: anyhow::Error) -> Self {
+        Self { source, request: None }
+    }
+}
+
+impl Clone for ActorError {
+    fn clone(&self) -> Self {
+        Self {
+            source: anyhow::anyhow!(self.source.to_string()),
+            request: self.request.clone(),
+        }
+    }
+}
 
 impl ActorError {
     /// Create exit error from anyhow error
     pub fn exit<E: Into<anyhow::Error>>(error: E) -> Self {
         Self {
-            reason: error.into(),
-            request: ActorRequest::Exit,
+            source: error.into(),
+            request: ActorRequest::Exit.into(),
         }
     }
     /// Create exit error from message
@@ -63,15 +91,15 @@ impl ActorError {
         E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
-            reason: anyhow::Error::msg(msg),
-            request: ActorRequest::Exit,
+            source: anyhow::Error::msg(msg),
+            request: ActorRequest::Exit.into(),
         }
     }
     /// Create Aborted error from anyhow::error, note: this soft error
     pub fn aborted<E: Into<anyhow::Error>>(error: E) -> Self {
         Self {
-            reason: error.into(),
-            request: ActorRequest::Aborted,
+            source: error.into(),
+            request: ActorRequest::Aborted.into(),
         }
     }
     /// Create Aborted error from message, note: this soft error
@@ -80,15 +108,15 @@ impl ActorError {
         E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
-            reason: anyhow::Error::msg(msg),
-            request: ActorRequest::Aborted,
+            source: anyhow::Error::msg(msg),
+            request: ActorRequest::Aborted.into(),
         }
     }
     /// Create restart error, it means the actor is asking the supervisor for restart/reschedule if possible
     pub fn restart<E: Into<anyhow::Error>, D: Into<Option<Duration>>>(error: E, after: D) -> Self {
         Self {
-            reason: error.into(),
-            request: ActorRequest::Restart(after.into()),
+            source: error.into(),
+            request: ActorRequest::Restart(after.into()).into(),
         }
     }
     /// Create restart error, it means the actor is asking the supervisor for restart/reschedule if possible
@@ -97,8 +125,8 @@ impl ActorError {
         E: fmt::Display + fmt::Debug + Send + Sync + 'static,
     {
         Self {
-            reason: anyhow::Error::msg(msg),
-            request: ActorRequest::Restart(after.into()),
+            source: anyhow::Error::msg(msg),
+            request: ActorRequest::Restart(after.into()).into(),
         }
     }
 }
