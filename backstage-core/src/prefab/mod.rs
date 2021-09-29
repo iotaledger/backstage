@@ -12,5 +12,5 @@ pub mod hyper;
 /// The websocket server
 pub mod websocket;
 
-#[cfg(feature = "rocket_server")]
+#[cfg(feature = "rocket")]
 pub mod rocket;

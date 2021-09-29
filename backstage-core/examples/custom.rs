@@ -1,12 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use backstage::{
-    core::*,
-    prefab::rocket::*,
-};
-use futures::TryFutureExt;
-use rocket::get;
+use backstage::core::*;
 
 ////////////////// Incrementer ///////////
 use std::sync::{
@@ -86,34 +81,36 @@ where
     }
 }
 
-// The root custom actor, equivalent to a launcher;
+// The root custome actor, equivalent to a launcher;
 struct Backstage;
-
-#[supervise]
 enum BackstageEvent {
-    #[shutdown]
     Shutdown,
-    #[report]
     Microservice(ScopeId, Service),
 }
 
-fn construct_rocket(
-    rt: &mut Rt<RocketServer<UnboundedHandle<BackstageEvent>>, UnboundedHandle<BackstageEvent>>,
-) -> rocket::Rocket<rocket::Build> {
-    rocket::build()
-        .mount("/api", rocket::routes![info])
-        .attach(CORS)
-        .attach(RequestTimer::default())
-        .register("/", rocket::catchers![internal_error, not_found])
+///// All of these should be implemented using proc_macro or some macro. start //////
+impl ShutdownEvent for BackstageEvent {
+    fn shutdown_event() -> Self {
+        Self::Shutdown
+    }
 }
-
-#[get("/info")]
-async fn info() -> &'static str {
-    "Got info endpoint!"
+impl<T> ReportEvent<T> for BackstageEvent {
+    fn report_event(scope_id: ScopeId, service: Service) -> Self {
+        Self::Microservice(scope_id, service)
+    }
 }
+impl<T> EolEvent<T> for BackstageEvent {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+///// All of these should be implemented using proc_macro or some macro end ///////
 
 #[async_trait::async_trait]
-impl<S: SupHandle<Self>> Actor<S> for Backstage {
+impl<S> Actor<S> for Backstage
+where
+    S: SupHandle<Self>,
+{
     type Data = ();
     type Channel = UnboundedChannel<BackstageEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
@@ -128,7 +125,7 @@ impl<S: SupHandle<Self>> Actor<S> for Backstage {
         })?;
         // await incrementer till it gets initialized
         i.initialized().await?;
-        // 
+        //
         // - build Decrementer
         let decrementer = Decrementer;
         // spawn decrementer
@@ -136,12 +133,6 @@ impl<S: SupHandle<Self>> Actor<S> for Backstage {
             log::error!("{:?}", e);
             ActorError::exit_msg(format!("{:?}", e))
         })?;
-        rt.spawn(Some("rocket".into()), RocketServer::new(construct_rocket))
-            .await
-            .map_err(|e| {
-                log::error!("{:?}", e);
-                ActorError::exit_msg(format!("{:?}", e))
-            })?;
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _deps: Self::Data) -> ActorResult<()> {

@@ -2,10 +2,12 @@ use std::time::SystemTime;
 
 use crate::{
     core::{
-        AbortableUnboundedChannel,
+        SupHandle,
         Actor,
         ActorResult,
         Rt,
+        ActorError,
+        ChannelBuilder,
     },
     spawn_task,
 };
@@ -33,45 +35,46 @@ use rocket::{
     Rocket,
 };
 
-pub struct RocketServer<S: 'static + Send> {
-    contructor: fn(&mut Rt<RocketServer<S>, S>) -> Rocket<Build>,
+/// Rocket server
+pub struct RocketServer {
+    rocket: Option<::rocket::Rocket<Ignite>>,
 }
 
-impl<S: 'static + Send> RocketServer<S> {
-    pub fn new(contructor: fn(&mut Rt<RocketServer<S>, S>) -> Rocket<Build>) -> RocketServer<S> {
-        RocketServer { contructor }
-    }
 
-    async fn ignite(&self, rt: &mut Rt<RocketServer<S>, S>) -> anyhow::Result<Rocket<Ignite>> {
-        (self.contructor)(rt).ignite().await.map_err(|e| anyhow::anyhow!(e))
+impl RocketServer {
+    /// Create new rocket server
+    pub fn new(rocket: ::rocket::Rocket<Ignite>) -> RocketServer {
+        RocketServer {rocket: Some(rocket)}
     }
 }
-
-pub enum RocketServerEvent {
-    Shutdown,
+#[async_trait]
+impl ChannelBuilder<::rocket::Rocket<Ignite>> for RocketServer {
+    async fn build_channel<S>(&mut self) -> ActorResult<::rocket::Rocket<Ignite>> {
+        if let Some(rocket) = self.rocket.take() {
+            Ok(rocket)
+        } else {
+            log::error!("No provided rocket server to build");
+            return Err(ActorError::exit_msg("No provided rocket server to build"));
+        }
+    }
 }
 
 #[async_trait]
-impl<S: 'static + Send> Actor<S> for RocketServer<S> {
-    type Data = rocket::Shutdown;
-    type Channel = AbortableUnboundedChannel<RocketServerEvent>;
+impl<S: SupHandle<Self>> Actor<S> for RocketServer {
+    type Data = ();
+    type Channel = Rocket<Ignite>;
 
-    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
-        let server = self.ignite(rt).await?;
-        let shutdown = server.shutdown();
-        spawn_task("Rocket Server", server.launch());
-        Ok(shutdown)
+    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
+        Ok(())
     }
 
-    async fn run(&mut self, rt: &mut Rt<Self, S>, shutdown_handle: Self::Data) -> ActorResult<()> {
-        while let Some(event) = rt.inbox_mut().next().await {
-            match event {
-                RocketServerEvent::Shutdown => {
-                    shutdown_handle.notify();
-                    break;
-                }
-            }
-        }
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _: Self::Data) -> ActorResult<()> {
+        if let Some(rocket) = rt.inbox_mut().rocket() {
+            log::info!("{:?} is {}", rt.service().directory(), rt.service().status());
+            rocket.launch().await.map_err(ActorError::exit)?;
+        } else {
+            unreachable!("the inbox must have server")
+        };
         Ok(())
     }
 }

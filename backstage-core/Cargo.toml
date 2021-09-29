@@ -56,7 +56,6 @@ config = [ "glob" ]
 ron_config = [ "config", "ron" ]
 json_config = [ "config" ]
 toml_config = [ "config", "toml" ]
-rocket_server = [ "rocket" ]
 
 [[example]]
 name = "hyper"
@@ -65,6 +64,10 @@ required-features = ["hyper"]
 [[example]]
 name = "hyper_prefab"
 required-features = ["prefabs", "hyper"]
+
+[[example]]
+name = "rocket_prefab"
+required-features = ["prefabs", "rocket"]
 
 [[example]]
 name = "hello_world"
