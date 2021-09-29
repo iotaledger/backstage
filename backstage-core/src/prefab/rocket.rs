@@ -10,11 +10,7 @@ use crate::{
     spawn_task,
 };
 use async_trait::async_trait;
-use futures::{
-    future::BoxFuture,
-    Future,
-    StreamExt,
-};
+use futures::StreamExt;
 use prometheus::{
     HistogramOpts,
     HistogramVec,
@@ -29,6 +25,7 @@ use rocket::{
         Info,
         Kind,
     },
+    Build,
     Data,
     Ignite,
     Request,
@@ -37,22 +34,16 @@ use rocket::{
 };
 
 pub struct RocketServer<S: 'static + Send> {
-    contructor: Box<
-        dyn for<'a> Fn(&'a mut Rt<RocketServer<S>, S>) -> BoxFuture<'a, anyhow::Result<Rocket<Ignite>>> + Send + Sync,
-    >,
+    contructor: fn(&mut Rt<RocketServer<S>, S>) -> Rocket<Build>,
 }
 
 impl<S: 'static + Send> RocketServer<S> {
-    pub fn new<F: 'static + Send + Future<Output = anyhow::Result<Rocket<Ignite>>>>(
-        contructor: fn(&mut Rt<RocketServer<S>, S>) -> F,
-    ) -> RocketServer<S> {
-        RocketServer {
-            contructor: Box::new(move |rt| Box::pin(contructor(rt))),
-        }
+    pub fn new(contructor: fn(&mut Rt<RocketServer<S>, S>) -> Rocket<Build>) -> RocketServer<S> {
+        RocketServer { contructor }
     }
 
-    async fn construct(&self, rt: &mut Rt<RocketServer<S>, S>) -> anyhow::Result<Rocket<Ignite>> {
-        (self.contructor)(rt).await
+    async fn ignite(&self, rt: &mut Rt<RocketServer<S>, S>) -> anyhow::Result<Rocket<Ignite>> {
+        (self.contructor)(rt).ignite().await.map_err(|e| anyhow::anyhow!(e))
     }
 }
 
@@ -66,7 +57,7 @@ impl<S: 'static + Send> Actor<S> for RocketServer<S> {
     type Channel = AbortableUnboundedChannel<RocketServerEvent>;
 
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
-        let server = self.construct(rt).await?;
+        let server = self.ignite(rt).await?;
         let shutdown = server.shutdown();
         spawn_task("Rocket Server", server.launch());
         Ok(shutdown)

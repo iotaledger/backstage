@@ -99,27 +99,12 @@ enum BackstageEvent {
 
 fn construct_rocket(
     rt: &mut Rt<RocketServer<UnboundedHandle<BackstageEvent>>, UnboundedHandle<BackstageEvent>>,
-) -> impl futures::Future<Output = anyhow::Result<rocket::Rocket<rocket::Ignite>>> {
+) -> rocket::Rocket<rocket::Build> {
     rocket::build()
         .mount("/api", rocket::routes![info])
         .attach(CORS)
         .attach(RequestTimer::default())
         .register("/", rocket::catchers![internal_error, not_found])
-        .ignite()
-        .map_err(|e| anyhow::anyhow!(e))
-}
-
-async fn construct_rocket_async(
-    rt: &mut Rt<RocketServer<UnboundedHandle<BackstageEvent>>, UnboundedHandle<BackstageEvent>>,
-) -> anyhow::Result<rocket::Rocket<rocket::Ignite>> {
-    rocket::build()
-        .mount("/api", rocket::routes![info])
-        .attach(CORS)
-        .attach(RequestTimer::default())
-        .register("/", rocket::catchers![internal_error, not_found])
-        .ignite()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[get("/info")]
@@ -151,7 +136,7 @@ impl<S: SupHandle<Self>> Actor<S> for Backstage {
             log::error!("{:?}", e);
             ActorError::exit_msg(format!("{:?}", e))
         })?;
-        rt.spawn(Some("rocket".into()), RocketServer::new(construct_rocket_async))
+        rt.spawn(Some("rocket".into()), RocketServer::new(construct_rocket))
             .await
             .map_err(|e| {
                 log::error!("{:?}", e);
