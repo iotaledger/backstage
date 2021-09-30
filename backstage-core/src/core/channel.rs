@@ -1402,14 +1402,13 @@ where
     }
 }
 
-
+#[cfg(feature = "rocket")]
 mod rocket {
     use ::rocket::Ignite;
 
     use super::*;
-    
-    impl Channel for ::rocket::Rocket<Ignite>
-    {
+
+    impl Channel for ::rocket::Rocket<Ignite> {
         type Event = ();
         type Handle = RocketHandle;
         type Inbox = RocketInbox;
@@ -1443,7 +1442,11 @@ mod rocket {
     impl RocketHandle {
         /// Create new Rocket channel's handle
         pub fn new(rocket_shutdown: ::rocket::Shutdown, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
-            Self { abort_handle, rocket_shutdown, scope_id }
+            Self {
+                abort_handle,
+                rocket_shutdown,
+                scope_id,
+            }
         }
     }
 
@@ -1463,13 +1466,15 @@ mod rocket {
     }
 
     impl RocketInbox {
-        /// Create new Rocket channel's ibox
+        /// Create new Rocket channel's inbox
         pub fn new(server: ::rocket::Rocket<::rocket::Ignite>) -> Self {
             Self { server: Some(server) }
         }
-        pub fn rocket(&mut self) -> Option<::rocket::Rocket<::rocket::Ignite>>  {
+        pub fn rocket(&mut self) -> Option<::rocket::Rocket<::rocket::Ignite>> {
             self.server.take()
         }
     }
-
 }
+
+#[cfg(feature = "rocket")]
+pub use self::rocket::*;
