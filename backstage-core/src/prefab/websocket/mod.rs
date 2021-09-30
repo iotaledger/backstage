@@ -231,10 +231,7 @@ impl<S: SupHandle<Self>> Actor<S> for Websocket {
         rt.start(None, listener).await?;
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()>
-    where
-        S: SupHandle<Self>,
-    {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 WebsocketEvent::Shutdown => {

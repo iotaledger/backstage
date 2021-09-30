@@ -1401,3 +1401,80 @@ where
         (abortable_handle, abortable_inbox, abort_registration, None, None)
     }
 }
+
+#[cfg(feature = "rocket")]
+mod rocket {
+    use ::rocket::Ignite;
+
+    use super::*;
+
+    impl Channel for ::rocket::Rocket<Ignite> {
+        type Event = ();
+        type Handle = RocketHandle;
+        type Inbox = RocketInbox;
+        type Metric = prometheus::IntGauge;
+        fn channel<T>(
+            self,
+            scope_id: ScopeId,
+        ) -> (
+            Self::Handle,
+            Self::Inbox,
+            AbortRegistration,
+            Option<prometheus::IntGauge>,
+            Option<Box<dyn Route<()>>>,
+        ) {
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            let rocket_shutdown = self.shutdown();
+            let rocket_handle = RocketHandle::new(rocket_shutdown, abort_handle, scope_id);
+            let rocket_inbox = RocketInbox::new(self);
+            (rocket_handle, rocket_inbox, abort_registration, None, None)
+        }
+    }
+
+    #[derive(Clone)]
+    /// Rocket channel's handle
+    pub struct RocketHandle {
+        abort_handle: AbortHandle,
+        rocket_shutdown: ::rocket::Shutdown,
+        scope_id: ScopeId,
+    }
+
+    impl RocketHandle {
+        /// Create new Rocket channel's handle
+        pub fn new(rocket_shutdown: ::rocket::Shutdown, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+            Self {
+                abort_handle,
+                rocket_shutdown,
+                scope_id,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Shutdown for RocketHandle {
+        async fn shutdown(&self) {
+            self.rocket_shutdown.clone().notify();
+            self.abort_handle.abort();
+        }
+        fn scope_id(&self) -> ScopeId {
+            self.scope_id
+        }
+    }
+
+    pub struct RocketInbox {
+        server: Option<::rocket::Rocket<::rocket::Ignite>>,
+    }
+
+    impl RocketInbox {
+        /// Create new Rocket channel's inbox
+        pub fn new(server: ::rocket::Rocket<::rocket::Ignite>) -> Self {
+            Self { server: Some(server) }
+        }
+        pub fn rocket(&mut self) -> Option<::rocket::Rocket<::rocket::Ignite>> {
+            self.server.take()
+        }
+    }
+}
+
+#[cfg(feature = "rocket")]
+pub use self::rocket::*;

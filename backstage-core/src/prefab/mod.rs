@@ -11,3 +11,6 @@ pub mod hyper;
 #[cfg(feature = "tungstenite")]
 /// The websocket server
 pub mod websocket;
+
+#[cfg(feature = "rocket")]
+pub mod rocket;

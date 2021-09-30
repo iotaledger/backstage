@@ -11,7 +11,10 @@ use async_trait::async_trait;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor<S: SupHandle<Self>>: Sized + Send + 'static {
+pub trait Actor<S>: Sized + Send
+where
+    S: Send,
+{
     /// Allows specifying an actor's startup dependencies and data.
     type Data: Send + 'static;
     /// The type of channel this actor will use to receive events

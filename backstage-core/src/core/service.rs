@@ -107,7 +107,7 @@ impl<'a> Iterator for ServiceScopesIterator<'a> {
 
 impl Service {
     /// Create a new Service
-    pub fn new<A: Actor<S>, S: SupHandle<A>>(directory: Option<String>) -> Self {
+    pub fn new<A: 'static + Actor<S>, S: SupHandle<A>>(directory: Option<String>) -> Self {
         Self {
             actor_type_id: std::any::TypeId::of::<A>(),
             actor_type_name: A::type_name(),
