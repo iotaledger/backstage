@@ -1031,7 +1031,6 @@ pub struct Runtime<H> {
     scope_id: ScopeId,
     join_handle: tokio::task::JoinHandle<ActorResult<()>>,
     handle: H,
-    initialized_rx: Option<InitializedRx>,
     server: Option<Box<dyn Shutdown>>,
     server_join_handle: Option<tokio::task::JoinHandle<ActorResult<()>>>,
 }
@@ -1109,11 +1108,11 @@ where
         let wrapped_fut = actor_fut_with_signal(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
         crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
+        rx_oneshot.await.ok();
         Ok(Self {
             scope_id: 0,
             handle,
             join_handle,
-            initialized_rx: Some(InitializedRx(child_scope_id, rx_oneshot)),
             server: None,
             server_join_handle: None,
         })
@@ -1277,10 +1276,6 @@ where
         self.server_join_handle.replace(join_handle);
         self.server.replace(Box::new(handle.clone()));
         Ok(self)
-    }
-    /// Returns the InitializedRx of the root actor, it's helper method.
-    pub fn take_initialized_rx(&mut self) -> Option<InitializedRx> {
-        self.initialized_rx.take()
     }
     /// Block on the runtime till it shutdown gracefully
     pub async fn block_on(mut self) -> ActorResult<()> {
