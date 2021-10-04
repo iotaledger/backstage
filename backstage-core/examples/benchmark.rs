@@ -103,19 +103,10 @@ where
     type Channel = AbortableUnboundedChannel<LauncherEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         let total_spawned_actors: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
-
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-        rt.spawn(None, Spawner).await?;
-
-        total_spawned_actors.fetch_add(10, std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..10 {
+            rt.spawn(None, Spawner).await?;
+            total_spawned_actors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
