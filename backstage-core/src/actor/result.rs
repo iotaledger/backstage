@@ -11,59 +11,90 @@ use std::{
 };
 use thiserror::Error;
 
-/// Potential actor errors
-#[derive(Error, Debug)]
-pub enum ActorError {
-    /// Indicates that the data provided to the actor was bad
-    #[error("Invalid data was given to the actor: {0}!")]
-    InvalidData(String),
-    /// Indicates that a runtime error occurred
-    #[error("The actor experienced a runtime error!")]
-    RuntimeError(ActorRequest),
-    /// Anything else that can go wrong
-    #[error("Actor Error: {source}")]
-    Other {
-        /// The source of this error
-        source: anyhow::Error,
-        /// Indicates how the supervisor should handle this error
-        request: ActorRequest,
-    },
+/// The returned result by the actor
+pub type ActorResult<T> = std::result::Result<T, ActorError>;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Actor shutdown error reason.
+pub enum ActorRequest {
+    /// Actor wants to restart after this run
+    Restart(Option<Duration>),
+    /// Actor is done and can be removed from the service
+    Finish,
+    /// Something unrecoverable happened and we should actually
+    /// shut down everything and notify the user
+    Panic,
 }
 
-impl ActorError {
-    /// Get the request from the error
-    pub fn request(&self) -> &ActorRequest {
+/// An actor's error which contains an optional request for the supervisor
+#[derive(Error, Debug)]
+#[error("Source: {source}, request: {request:?}")]
+pub struct ActorError {
+    pub source: anyhow::Error,
+    pub request: Option<ActorRequest>,
+}
+
+impl Default for ActorError {
+    fn default() -> Self {
+        Self {
+            source: anyhow::anyhow!("An unknown error occurred!"),
+            request: None,
+        }
+    }
+}
+
+pub trait ActorResultExt {
+    type Error;
+    fn err_request(self, request: ActorRequest) -> ActorResult<Self::Error>
+    where
+        Self: Sized;
+}
+
+impl<T> ActorResultExt for anyhow::Result<T> {
+    type Error = T;
+    fn err_request(self, request: ActorRequest) -> ActorResult<T>
+    where
+        Self: Sized,
+    {
         match self {
-            ActorError::InvalidData(_) => &ActorRequest::Panic,
-            ActorError::RuntimeError(r) => r,
-            ActorError::Other { source: _, request: r } => r,
+            Err(source) => Err(ActorError {
+                source,
+                request: request.into(),
+            }),
+            Ok(t) => Ok(t),
+        }
+    }
+}
+
+impl From<anyhow::Error> for ActorError {
+    fn from(source: anyhow::Error) -> Self {
+        Self { source, request: None }
+    }
+}
+
+impl Clone for ActorError {
+    fn clone(&self) -> Self {
+        Self {
+            source: anyhow::anyhow!(self.source.to_string()),
+            request: self.request.clone(),
         }
     }
 }
 
 impl From<std::borrow::Cow<'static, str>> for ActorError {
     fn from(cow: std::borrow::Cow<'static, str>) -> Self {
-        ActorError::Other {
+        ActorError {
             source: anyhow!(cow),
-            request: ActorRequest::Panic,
+            request: ActorRequest::Panic.into(),
         }
     }
 }
 
 impl From<()> for ActorError {
     fn from(_: ()) -> Self {
-        ActorError::Other {
+        ActorError {
             source: anyhow!("Error!"),
-            request: ActorRequest::Finish,
-        }
-    }
-}
-
-impl From<anyhow::Error> for ActorError {
-    fn from(e: anyhow::Error) -> Self {
-        ActorError::Other {
-            source: e,
-            request: ActorRequest::Panic,
+            request: ActorRequest::Finish.into(),
         }
     }
 }
@@ -72,20 +103,6 @@ impl<S: Actor> From<InitError<S>> for ActorError {
     fn from(e: InitError<S>) -> Self {
         e.1.into()
     }
-}
-
-/// Possible requests an actor can make to its supervisor
-#[derive(Debug, Clone)]
-pub enum ActorRequest {
-    /// Actor wants to restart after this run
-    Restart,
-    /// Actor wants to schedule a restart sometime in the future
-    Reschedule(Duration),
-    /// Actor is done and can be removed from the service
-    Finish,
-    /// Something unrecoverable happened and we should actually
-    /// shut down everything and notify the user
-    Panic,
 }
 
 /// Synchronous error from initializing an actor.

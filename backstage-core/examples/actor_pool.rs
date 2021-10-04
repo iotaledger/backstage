@@ -8,20 +8,7 @@ use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::{marker::PhantomData, sync::Arc, time::Duration};
-use thiserror::Error;
 use tokio::sync::RwLock;
-
-#[derive(Error, Debug)]
-pub enum HelloWorldError {
-    #[error("Something went wrong")]
-    SomeError,
-}
-
-impl Into<ActorError> for HelloWorldError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
@@ -175,15 +162,16 @@ impl Actor for Launcher {
                     }
                     Err(e) => {
                         info!("{} {} has shutdown unexpectedly!", e.state.name, e.state.num);
-                        match e.error.request() {
-                            ActorRequest::Restart => {
-                                info!("Restarting {} {}", e.state.name, e.state.num);
-                                let i = e.state.num as i32;
-                                rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i, e.state).await?;
+                        if let Some(req) = e.error.request {
+                            match req {
+                                ActorRequest::Restart(_) => {
+                                    info!("Restarting {} {}", e.state.name, e.state.num);
+                                    let i = e.state.num as i32;
+                                    rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i, e.state).await?;
+                                }
+                                ActorRequest::Finish => (),
+                                ActorRequest::Panic => panic!("Received request to panic....so I did"),
                             }
-                            ActorRequest::Reschedule(_) => todo!(),
-                            ActorRequest::Finish => (),
-                            ActorRequest::Panic => panic!("Received request to panic....so I did"),
                         }
                     }
                 },

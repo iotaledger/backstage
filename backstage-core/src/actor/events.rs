@@ -5,7 +5,7 @@ use super::{Actor, ActorError, EventDriven, Service};
 use std::{borrow::Cow, marker::PhantomData};
 
 /// A report that an actor finished running successfully
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SuccessReport<T> {
     /// The actor's state when it finished running
     pub state: T,
@@ -20,7 +20,7 @@ impl<T> SuccessReport<T> {
 }
 
 /// A report that an actor finished running with an error
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ErrorReport<T> {
     /// The actor's state when it finished running
     pub state: T,
@@ -37,7 +37,7 @@ impl<T> ErrorReport<T> {
 }
 
 /// A status change notification
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StatusChange<T> {
     /// The actor's previous state
     pub prev_status: Cow<'static, str>,

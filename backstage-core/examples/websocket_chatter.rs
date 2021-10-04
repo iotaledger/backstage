@@ -8,7 +8,6 @@ use futures::{FutureExt, SinkExt, StreamExt};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::{convert::TryFrom, marker::PhantomData, sync::Arc, time::Duration};
-use thiserror::Error;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -18,23 +17,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HelloWorldEvent {
     Print(String),
-}
-
-// The possible errors that a HelloWorld actor can have
-#[derive(Error, Debug)]
-pub enum HelloWorldError {
-    #[error("Something went wrong")]
-    SomeError,
-}
-
-// In order for an actor to make use of a custom error type,
-// it should be convertable to an `ActorError` with an
-// associated `ActorRequest` specifying how the supervisor
-// should handle the error.
-impl Into<ActorError> for HelloWorldError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
-    }
 }
 
 // This is an example of a manual builder implementation.
@@ -120,17 +102,6 @@ impl Actor for HelloWorld {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum HowdyEvent {
     Print(String),
-}
-#[derive(Error, Debug)]
-pub enum HowdyError {
-    #[error("Something went wrong")]
-    SomeError,
-}
-
-impl Into<ActorError> for HowdyError {
-    fn into(self) -> ActorError {
-        ActorError::RuntimeError(ActorRequest::Finish)
-    }
 }
 
 #[build]

@@ -3,9 +3,9 @@
 
 use super::*;
 use crate::actor::{
-    ActorError, ActorPool, ActorRequest, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven,
-    InitError, KeyedActorPool, Service, ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange,
-    SuccessReport, SupervisorEvent,
+    ActorError, ActorPool, BasicActorPool, CustomStatus, Dependencies, ErrorReport, EventDriven, InitError,
+    KeyedActorPool, Service, ServiceTree, ShutdownHandle, ShutdownStream, Status, StatusChange, SuccessReport,
+    SupervisorEvent,
 };
 use futures::{
     future::{AbortRegistration, Aborted},
@@ -399,19 +399,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
-        if self.actor_event_handle::<A>().await.is_some() {
-            let service = self.service().await;
-            let name = actor.name();
-            return Err((
-                actor,
-                anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                    name,
-                    self.scope_id,
-                    service.name()
-                ),
-            )
-                .into());
+        if let Some(handle) = self.actor_event_handle::<A>().await {
+            if handle.scope_id == self.scope_id {
+                let service = self.service().await;
+                let name = actor.name();
+                return Err((
+                    actor,
+                    anyhow::anyhow!(
+                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        name,
+                        self.scope_id,
+                        service.name()
+                    ),
+                )
+                    .into());
+            }
         }
         let supervisor_handle = supervisor_handle.into();
         self.common_init(actor, supervisor_handle, SpawnType::Actor).await
@@ -452,19 +454,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
-        if self.actor_event_handle::<A>().await.is_some() {
-            let service = self.service().await;
-            let name = actor.name();
-            return Err((
-                actor,
-                anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                    name,
-                    self.scope_id,
-                    service.name()
-                ),
-            )
-                .into());
+        if let Some(handle) = self.actor_event_handle::<A>().await {
+            if handle.scope_id == self.scope_id {
+                let service = self.service().await;
+                let name = actor.name();
+                return Err((
+                    actor,
+                    anyhow::anyhow!(
+                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        name,
+                        self.scope_id,
+                        service.name()
+                    ),
+                )
+                    .into());
+            }
         }
         let supervisor_handle = supervisor_handle.into();
         self.add_data(Res(state)).await;
@@ -485,19 +489,21 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
         <Sup::Event as SupervisorEvent>::Children: From<PhantomData<A>>,
         I: Into<Option<Act<Sup>>>,
     {
-        if self.actor_event_handle::<A>().await.is_some() {
-            let service = self.service().await;
-            let name = actor.name();
-            return Err((
-                actor,
-                anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
-                    name,
-                    self.scope_id,
-                    service.name()
-                ),
-            )
-                .into());
+        if let Some(handle) = self.actor_event_handle::<A>().await {
+            if handle.scope_id == self.scope_id {
+                let service = self.service().await;
+                let name = actor.name();
+                return Err((
+                    actor,
+                    anyhow::anyhow!(
+                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        name,
+                        self.scope_id,
+                        service.name()
+                    ),
+                )
+                    .into());
+            }
         }
         let supervisor_handle = supervisor_handle.into();
         self.add_data(Res(state)).await;
@@ -668,7 +674,7 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
                             .send(Sup::Event::report_err(ErrorReport::new(
                                 actor.into(),
                                 service,
-                                ActorError::RuntimeError(ActorRequest::Restart),
+                                anyhow::anyhow!("Actor exited with error!").into(),
                             )))
                             .ok();
                         std::panic::resume_unwind(e);
@@ -698,6 +704,19 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new pool of actors of a given type with some metric
+    pub async fn new_pool_with<Sup, I, F, P: ActorPool>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
+    where
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        I: Into<Option<Act<Sup>>>,
+        P: 'static + Send + Sync,
+
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Reg, Sup, P>) -> BoxFuture<'b, anyhow::Result<()>>,
+    {
+        f(&mut self.new_pool(supervisor_handle).await).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
     pub async fn spawn_pool_with<Sup, I, F, P: ActorPool>(&mut self, supervisor_handle: I, f: F) -> anyhow::Result<()>
     where
         Sup: 'static + EventDriven,
@@ -711,6 +730,26 @@ impl<Reg: 'static + RegistryAccess + Send + Sync> RuntimeScope<Reg> {
     }
 
     /// Spawn a new pool of actors of a given type with some metric
+    pub async fn new_pool<Sup, I, P: ActorPool>(&mut self, supervisor_handle: I) -> ScopedActorPool<'_, Reg, Sup, P>
+    where
+        Sup: 'static + EventDriven,
+        Sup::Event: SupervisorEvent,
+        I: Into<Option<Act<Sup>>>,
+        P: 'static + Send + Sync,
+    {
+        let pool = Pool::<P>::default();
+        self.add_data(pool.clone()).await;
+
+        let scoped_pool = ScopedActorPool {
+            scope: self,
+            pool,
+            supervisor_handle: supervisor_handle.into(),
+            initialized: Default::default(),
+        };
+        scoped_pool
+    }
+
+    /// Spawn a new pool (or use an existing one) of actors of a given type with some metric
     pub async fn spawn_pool<Sup, I, P: ActorPool>(&mut self, supervisor_handle: I) -> ScopedActorPool<'_, Reg, Sup, P>
     where
         Sup: 'static + EventDriven,
@@ -1016,6 +1055,19 @@ where
     }
 
     /// Spawn a new pool of actors of a given type with some metric
+    pub async fn new_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + Send + Sync,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<Reg, A, P>) -> BoxFuture<'b, anyhow::Result<()>>,
+    {
+        let handle = self.handle();
+        self.scope.new_pool_with::<A, _, F, P>(handle, f).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
     pub async fn spawn_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
     where
         A: 'static + EventDriven,
@@ -1026,6 +1078,18 @@ where
     {
         let handle = self.handle();
         self.scope.spawn_pool_with::<A, _, F, P>(handle, f).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    pub async fn new_pool<P: ActorPool>(&mut self) -> ScopedActorPool<'_, Reg, A, P>
+    where
+        A: 'static + EventDriven,
+        <A as EventDriven>::Event: SupervisorEvent,
+        <<A as EventDriven>::Event as SupervisorEvent>::Children: From<PhantomData<P::Actor>>,
+        P: 'static + Send + Sync,
+    {
+        let handle = self.handle();
+        self.scope.new_pool::<A, _, P>(handle).await
     }
 
     /// Spawn a new pool of actors of a given type with some metric
