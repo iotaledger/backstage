@@ -28,7 +28,7 @@ lazy_static::lazy_static! {
         if let Ok(p) = std::env::var("BACKSTAGE_PARTITIONS") {
             p.parse().expect("Invalid BACKSTAGE_PARTITIONS env")
         } else {
-            num_cpus::get()
+            num_cpus::get() * 10
         }
     };
     /// Array of Partitioned Scopes
