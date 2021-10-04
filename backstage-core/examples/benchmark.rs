@@ -1,0 +1,205 @@
+// Copyright 2021 IOTA Stiftung
+// SPDX-License-Identifier: Apache-2.0
+
+use backstage::core::{
+    AbortableUnboundedChannel,
+    Actor,
+    ActorResult,
+    EolEvent,
+    ReportEvent,
+    Rt,
+    Runtime,
+    ScopeId,
+    Service,
+    Shutdown,
+    StreamExt,
+    SupHandle,
+};
+use std::sync::{
+    atomic::AtomicU32,
+    Arc,
+};
+
+struct Spawner;
+
+enum SpawnerEvent {
+    Microservice(ScopeId, Service),
+}
+
+impl<T> EolEvent<T> for SpawnerEvent {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+impl<T> ReportEvent<T> for SpawnerEvent {
+    fn report_event(scope_id: ScopeId, service: Service) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> Actor<S> for Spawner
+where
+    S: SupHandle<Self>,
+{
+    type Data = ();
+    type Channel = AbortableUnboundedChannel<SpawnerEvent>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<()> {
+        // stops spawning children at the 11th level
+        if rt.depth() < 11 {
+            let data: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
+            rt.spawn(None, Launcher).await?;
+            data.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            rt.handle().shutdown().await;
+        }
+        Ok(())
+    }
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
+        while let Some(event) = rt.inbox_mut().next().await {
+            match event {
+                SpawnerEvent::Microservice(scope_id, service) => {
+                    if service.is_stopped() {
+                        rt.remove_microservice(scope_id);
+                        if rt.microservices_stopped() {
+                            rt.inbox_mut().close();
+                        }
+                    } else {
+                        rt.upsert_microservice(scope_id, service);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+//////// Our root runtime actor ////////
+struct Launcher;
+
+enum LauncherEvent {
+    Microservice(ScopeId, Service),
+}
+
+impl<T> EolEvent<T> for LauncherEvent {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+impl<T> ReportEvent<T> for LauncherEvent {
+    fn report_event(scope_id: ScopeId, service: Service) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> Actor<S> for Launcher
+where
+    S: SupHandle<Self>,
+{
+    type Data = ();
+    type Channel = AbortableUnboundedChannel<LauncherEvent>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
+        let total_spawned_actors: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
+
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+        rt.spawn(None, Spawner).await?;
+
+        total_spawned_actors.fetch_add(10, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
+        while let Some(event) = rt.inbox_mut().next().await {
+            match event {
+                LauncherEvent::Microservice(scope_id, service) => {
+                    if service.is_stopped() {
+                        rt.remove_microservice(scope_id);
+                    } else {
+                        rt.upsert_microservice(scope_id, service);
+                    }
+                    // stop the runtime test if all children are offline
+                    if rt.microservices_stopped() {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+//////// Our root runtime actor ////////
+struct Root;
+
+enum RootEvent {
+    Microservice(ScopeId, Service),
+}
+
+impl<T> EolEvent<T> for RootEvent {
+    fn eol_event(scope_id: ScopeId, service: Service, _actor: T, _r: ActorResult<()>) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+impl<T> ReportEvent<T> for RootEvent {
+    fn report_event(scope_id: ScopeId, service: Service) -> Self {
+        Self::Microservice(scope_id, service)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S> Actor<S> for Root
+where
+    S: SupHandle<Self>,
+{
+    type Data = Arc<AtomicU32>;
+    type Channel = AbortableUnboundedChannel<LauncherEvent>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
+        let total_spawned_actors = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        rt.add_resource(total_spawned_actors.clone()).await;
+        rt.spawn(None, Launcher).await?;
+        total_spawned_actors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(total_spawned_actors)
+    }
+    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
+        while let Some(event) = rt.inbox_mut().next().await {
+            match event {
+                LauncherEvent::Microservice(scope_id, service) => {
+                    if service.is_stopped() {
+                        rt.remove_microservice(scope_id);
+                    } else {
+                        rt.upsert_microservice(scope_id, service);
+                    }
+                    // stop the runtime test if all children are offline
+                    if rt.microservices_stopped() {
+                        break;
+                    }
+                }
+            }
+        }
+        log::info!(
+            "Total actors spawned: {}",
+            data.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+    let start = std::time::SystemTime::now();
+    let runtime = Runtime::new(None, Root).await.expect("Root to run");
+    runtime.block_on().await.expect("Root to gracefully shutdown");
+    log::info!("Total time: {} ms", start.elapsed().unwrap().as_millis());
+}

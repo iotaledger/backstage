@@ -88,3 +88,6 @@ required-features = ["websocket_server"]
 [[example]]
 name = "gauge"
 required-features = ["backserver"]
+
+[[example]]
+name = "benchmark"
