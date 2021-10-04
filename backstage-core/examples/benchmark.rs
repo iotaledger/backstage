@@ -23,6 +23,7 @@ use std::sync::{
 struct Spawner;
 
 enum SpawnerEvent {
+    Spawn,
     Microservice(ScopeId, Service),
 }
 
@@ -47,18 +48,20 @@ where
     type Channel = AbortableUnboundedChannel<SpawnerEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<()> {
         // stops spawning children at the 11th level
-        if rt.depth() < 11 {
-            let data: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
-            rt.spawn(None, Launcher).await?;
-            data.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        } else {
-            rt.handle().shutdown().await;
-        }
+        let data: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
+        data.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
+                SpawnerEvent::Spawn => {
+                    if rt.depth() < 11 {
+                        rt.spawn(None, Launcher).await?;
+                    } else {
+                        rt.handle().shutdown().await;
+                    }
+                }
                 SpawnerEvent::Microservice(scope_id, service) => {
                     if service.is_stopped() {
                         rt.remove_microservice(scope_id);
@@ -103,10 +106,12 @@ where
     type Channel = AbortableUnboundedChannel<LauncherEvent>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         let total_spawned_actors: Arc<AtomicU32> = rt.lookup(0).await.unwrap();
+        total_spawned_actors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         for _ in 0..10 {
-            rt.spawn(None, Spawner).await?;
-            total_spawned_actors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (handle, _) = rt.spawn(None, Spawner).await?;
+            handle.send(SpawnerEvent::Spawn).ok();
         }
+
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
@@ -159,10 +164,9 @@ where
         let total_spawned_actors = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         rt.add_resource(total_spawned_actors.clone()).await;
         rt.spawn(None, Launcher).await?;
-        total_spawned_actors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(total_spawned_actors)
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, total_spawned_actors: Self::Data) -> ActorResult<()> {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 LauncherEvent::Microservice(scope_id, service) => {
@@ -180,7 +184,7 @@ where
         }
         log::info!(
             "Total actors spawned: {}",
-            data.load(std::sync::atomic::Ordering::Relaxed)
+            total_spawned_actors.load(std::sync::atomic::Ordering::Relaxed)
         );
         Ok(())
     }
@@ -188,6 +192,8 @@ where
 
 #[tokio::main]
 async fn main() {
+    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("BACKSTAGE_PARTITIONS", "20");
     env_logger::init();
     let start = std::time::SystemTime::now();
     let runtime = Runtime::new(None, Root).await.expect("Root to run");
