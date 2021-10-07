@@ -61,20 +61,25 @@ impl ChannelBuilder<::rocket::Rocket<Ignite>> for RocketServer {
 
 #[async_trait]
 impl<S: SupHandle<Self>> Actor<S> for RocketServer {
-    type Data = ();
+    type Data = String;
     type Channel = Rocket<Ignite>;
 
     async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
-        Ok(())
+        let name: String = rt.service().directory().clone().unwrap_or_else(|| "rocket".into());
+        log::info!("{}: {}",name, rt.service().status());
+        Ok(name)
     }
 
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _: Self::Data) -> ActorResult<()> {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, name: Self::Data) -> ActorResult<()> {
         if let Some(rocket) = rt.inbox_mut().rocket() {
-            log::info!("{:?} is {}", rt.service().directory(), rt.service().status());
-            rocket.launch().await.map_err(ActorError::exit)?;
+            log::info!("{} is {}", name, rt.service().status());
+            rocket.launch().await.map_err(|e| {
+                log::error!("{}: {}",name, e);
+                ActorError::exit(e)})?;
         } else {
             unreachable!("the inbox must have server")
         };
+        log::info!("{} gracefully shutdown",name);
         Ok(())
     }
 }

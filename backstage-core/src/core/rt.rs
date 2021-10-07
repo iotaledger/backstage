@@ -261,7 +261,6 @@ where
         <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
         // try to create the actor's channel
-        // let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
         let parent_id = self.scope_id;
         let mut scopes_index;
         let mut child_scope_id;
@@ -818,17 +817,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     }
     /// Lookup for resource T under the provider scope_id
     pub async fn lookup<T: Resource>(&self, resource_scope_id: ScopeId) -> Option<T> {
-        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
-        let mut lock = SCOPES[resource_scopes_index].write().await;
-        if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
-            if let Some(data) = resource_scope.data_and_subscribers.get::<Data<T>>() {
-                data.resource.clone()
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+        Scope::lookup(resource_scope_id).await
     }
     /// Drop the resource, and inform the interested dyn subscribers
     pub async fn drop_resource<T: Resource>(&self) {

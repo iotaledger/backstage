@@ -5,6 +5,8 @@ use super::BackserverEvent;
 use crate::core::{
     ScopeId,
     UnboundedHandle,
+    Scope,
+    Service,
 };
 use hyper::{
     Body,
@@ -79,7 +81,17 @@ impl hyper::service::Service<Request<Body>> for ListenerSvc {
                     res.push_str(&res_custom);
                     mk_response(res)
                 }
-                "/service" => mk_response(format!("todo service")),
+                "/service" => {
+                    let scope_id = self.root_scope_id;
+                    return Box::pin(async move {
+                        if let Some(service) = Scope::lookup::<Service>(scope_id).await {
+                            let res = serde_json::to_string(&service).unwrap_or("Unable to serialize service".into());
+                            mk_response(res)
+                        } else {
+                            mk_response(format!("Service for scope_id: {}, not found", scope_id))
+                        }
+                    })
+                },
                 "/info" => mk_response(format!("backstage info, commit header, version and such.")),
                 "/readme" => mk_response(format!("todo return readme.md")),
                 "/docs" => mk_response(format!("todo return docs or redirect ot docs")),

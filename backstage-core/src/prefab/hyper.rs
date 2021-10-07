@@ -65,18 +65,20 @@ where
     R::Error: std::error::Error + Send + Sync,
     R::Future: Send,
 {
-    type Data = ();
+    type Data = String;
     type Channel = HyperChannel<T>;
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
-        log::info!("Hyper: {}", rt.service().status());
-        Ok(())
+        let name: String = rt.service().directory().clone().unwrap_or_else(|| "hyper".into());
+        log::info!("{}: {}",name, rt.service().status());
+        Ok(name)
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
-        log::info!("Hyper: {}", rt.service().status());
+    async fn run(&mut self, rt: &mut Rt<Self, S>, name: Self::Data) -> ActorResult<()> {
+        log::info!("{}: {}", name, rt.service().status());
         if let Err(err) = rt.inbox_mut().ignite().await {
-            log::error!("Hyper: {}", err);
+            log::error!("{}: {}",name, err);
             return Err(ActorError::exit_msg(err));
         }
+        log::info!("{} gracefully shutdown", name);
         Ok(())
     }
 }

@@ -217,4 +217,18 @@ impl Scope {
             router: anymap::Map::new(),
         }
     }
+    /// Lookup for a resource in a scope data store
+    pub async fn lookup<T: Resource>(resource_scope_id: ScopeId) -> Option<T> {
+        let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
+        let mut lock = SCOPES[resource_scopes_index].write().await;
+        if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
+            if let Some(data) = resource_scope.data_and_subscribers.get::<Data<T>>() {
+                data.resource.clone()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
 }
