@@ -305,6 +305,7 @@ where
             break;
         }
         self.service.microservices.insert(child_scope_id, service.clone());
+        dir.as_ref().and_then(|dir| self.service.inactive.remove(dir));
         if let Some(dir_name) = dir.take() {
             let mut lock = SCOPES[self.scopes_index].write().await;
             let my_scope = lock.get_mut(&self.scope_id).expect("Self scope to exist");
@@ -345,18 +346,26 @@ where
 
     /// Insert/Update microservice.
     /// Note: it will remove the children handles/joins if the provided service is stopped
+    /// and store entry for it in inactive if does have directory
     pub fn upsert_microservice(&mut self, scope_id: ScopeId, service: Service) {
         if service.is_stopped() {
             self.children_handles.remove(&scope_id);
             self.children_joins.remove(&scope_id);
+            service
+                .directory()
+                .as_ref()
+                .and_then(|dir| self.service.inactive.insert(dir.clone(), scope_id));
         }
         self.service.microservices.insert(scope_id, service);
     }
     /// Remove the microservice microservice under the provided scope_id
-    pub fn remove_microservice(&mut self, scope_id: ScopeId) -> Option<Service> {
+    pub fn remove_microservice(&mut self, scope_id: ScopeId) {
         self.children_handles.remove(&scope_id);
         self.children_joins.remove(&scope_id);
-        self.service.microservices.remove(&scope_id)
+        self.service
+            .microservices
+            .remove(&scope_id)
+            .and_then(|ms| ms.directory.and_then(|dir| self.service.inactive.remove(&dir)));
     }
     /// Returns mutable reference to the actor's inbox
     pub fn inbox_mut(&mut self) -> &mut <A::Channel as Channel>::Inbox {

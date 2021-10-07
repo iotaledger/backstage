@@ -32,6 +32,8 @@ pub enum ServiceStatus {
     Stopped = 6,
     /// The service is idle.
     Idle = 7,
+    /// The service is in outage.
+    Outage = 8,
 }
 
 impl std::fmt::Display for ServiceStatus {
@@ -45,6 +47,7 @@ impl std::fmt::Display for ServiceStatus {
                 ServiceStatus::Degraded => "Degraded",
                 ServiceStatus::Running => "Running",
                 ServiceStatus::Idle => "Idle",
+                ServiceStatus::Outage => "Outage",
                 ServiceStatus::Stopping => "Stopping",
                 ServiceStatus::Maintenance => "Maintenance",
                 ServiceStatus::Stopped => "Stopped",
@@ -77,6 +80,8 @@ pub struct Service {
     pub downtime_ms: u64,
     /// Microservices
     pub microservices: std::collections::HashMap<ScopeId, Self>,
+    /// Highlight any stopped service in microservices;
+    pub inactive: std::collections::HashMap<String, ScopeId>,
 }
 /// The microservices scopes ids iterator
 pub struct ServiceScopesIterator<'a> {
@@ -116,6 +121,7 @@ impl Service {
             up_since: SystemTime::now(),
             downtime_ms: 0,
             microservices: std::collections::HashMap::new(),
+            inactive: std::collections::HashMap::new(),
         }
     }
     /// Create scopes iterator for a the provided Child type
@@ -170,6 +176,10 @@ impl Service {
     pub fn is_idle(&self) -> bool {
         self.status == ServiceStatus::Idle
     }
+    /// Check if the service status is outage
+    pub fn is_outage(&self) -> bool {
+        self.status == ServiceStatus::Outage
+    }
     /// Check if the service is starting
     pub fn is_starting(&self) -> bool {
         self.status == ServiceStatus::Starting
@@ -195,8 +205,12 @@ impl Service {
         &self.microservices
     }
     /// Return mutable reference to the microservices HashMap
-    pub fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
+    pub(crate) fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
         &mut self.microservices
+    }
+    /// Return mutable reference to the inactive directories
+    pub(crate) fn inactive_mut(&mut self) -> &mut std::collections::HashMap<String, ScopeId> {
+        &mut self.inactive
     }
 }
 
