@@ -304,7 +304,12 @@ where
             break;
         }
         self.service.microservices.insert(child_scope_id, service.clone());
-        dir.as_ref().and_then(|dir| self.service.inactive.remove(dir));
+        dir.as_ref().and_then(|dir| {
+            self.service
+                .inactive
+                .remove(dir)
+                .and_then(|old_scope_id| self.service.microservices.remove(&old_scope_id))
+        });
         if let Some(dir_name) = dir.take() {
             let mut lock = SCOPES[self.scopes_index].write().await;
             let my_scope = lock.get_mut(&self.scope_id).expect("Self scope to exist");
