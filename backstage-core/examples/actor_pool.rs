@@ -3,11 +3,10 @@
 
 use async_trait::async_trait;
 use backstage::prelude::*;
-use backstage_macros::supervise;
 use futures::FutureExt;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::{marker::PhantomData, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -32,57 +31,62 @@ pub fn build_hello_world(name: String, num: Option<u32>) -> HelloWorld {
 
 #[async_trait]
 impl Actor for HelloWorld {
-    type Dependencies = ();
-    type Event = HelloWorldEvent;
-    type Channel = UnboundedTokioChannel<Self::Event>;
-
-    async fn init<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
-        &mut self,
-        _rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-    ) -> Result<(), ActorError> {
+    async fn init<Sup>(&mut self, rt: &mut ActorContext<Self, Sup>) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        rt.update_status(format!("Running {}", self.num)).await.ok();
         Ok(())
     }
 
-    async fn run<Reg: 'static + RegistryAccess + Send + Sync, Sup: EventDriven>(
-        &mut self,
-        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-        _deps: Self::Dependencies,
-    ) -> Result<(), ActorError>
+    async fn shutdown<Sup>(&mut self, rt: &mut ActorContext<Self, Sup>) -> Result<(), ActorError>
     where
-        Self: Sized,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
+        Self: 'static + Sized + Send + Sync,
     {
-        rt.update_status(format!("Running {}", self.num)).await.ok();
-        while let Some(evt) = rt.next_event().await {
-            match evt {
-                HelloWorldEvent::Print(s) => {
-                    info!("HelloWorld {} printing: {}", self.num, s);
-                    if rand::random() {
-                        panic!("Random panic attack!")
-                    }
-                }
-            }
-        }
         rt.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 }
 
-struct Launcher;
+#[async_trait]
+impl HandleEvent<HelloWorldEvent> for HelloWorld {
+    async fn handle_event<Sup>(
+        &mut self,
+        rt: &mut ActorContext<Self, Sup>,
+        event: HelloWorldEvent,
+    ) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        match event {
+            HelloWorldEvent::Print(s) => {
+                info!("HelloWorld {} printing: {}", self.num, s);
+                if rand::random() {
+                    panic!("Random panic attack!")
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Launcher {
+    count: u8,
+}
 struct LauncherAPI;
 
 impl LauncherAPI {
     pub async fn send_to_hello_world<Reg: 'static + RegistryAccess + Send + Sync>(
         &self,
         event: HelloWorldEvent,
-        rt: &mut RuntimeScope<Reg>,
+        rt: &mut RuntimeScope,
     ) -> anyhow::Result<()> {
-        rt.send_actor_event::<Launcher>(LauncherEvents::HelloWorld(event)).await
+        rt.send_actor_event::<Launcher, _>(LauncherEvents::HelloWorld(event))
+            .await
     }
 }
 
-#[supervise(HelloWorld)]
 #[derive(Debug)]
 pub enum LauncherEvents {
     HelloWorld(HelloWorldEvent),
@@ -91,18 +95,9 @@ pub enum LauncherEvents {
 
 #[async_trait]
 impl Actor for Launcher {
-    type Dependencies = ();
-    type Event = LauncherEvents;
-    type Channel = UnboundedTokioChannel<Self::Event>;
-
-    async fn init<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
-        &mut self,
-        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-    ) -> Result<(), ActorError>
+    async fn init<Sup>(&mut self, rt: &mut ActorContext<Self, Sup>) -> Result<(), ActorError>
     where
-        Self: Sized,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
+        Self: 'static + Sized + Send + Sync,
     {
         rt.update_status(ServiceStatus::Initializing).await.ok();
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
@@ -129,65 +124,96 @@ impl Actor for Launcher {
         // Finalize the pool
         pool.spawn_all().await;
         tokio::task::spawn(ctrl_c(my_handle.into_inner()));
+        rt.update_status(ServiceStatus::Running).await.ok();
         Ok(())
     }
 
-    async fn run<Reg: RegistryAccess + Send + Sync, Sup: EventDriven>(
+    async fn shutdown<Sup>(&mut self, rt: &mut ActorContext<Self, Sup>) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        rt.update_status(ServiceStatus::Stopped).await.ok();
+    }
+
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        std::any::type_name::<Self>().into()
+    }
+}
+
+#[async_trait]
+impl HandleEvent<LauncherEvents> for Launcher {
+    async fn handle_event<Sup>(
         &mut self,
-        rt: &mut ActorScopedRuntime<Self, Reg, Sup>,
-        _deps: Self::Dependencies,
+        rt: &mut ActorContext<Self, Sup>,
+        event: Box<LauncherEvents>,
     ) -> Result<(), ActorError>
     where
-        Self: Sized,
-        Sup::Event: SupervisorEvent,
-        <Sup::Event as SupervisorEvent>::Children: From<PhantomData<Self>>,
+        Self: 'static + Sized + Send + Sync,
     {
-        rt.update_status(ServiceStatus::Running).await.ok();
-        let mut i = 0;
-        while let Some(evt) = rt.next_event().await {
-            match evt {
-                LauncherEvents::HelloWorld(event) => {
-                    info!("Received event for HelloWorld");
-                    if let Some(pool) = rt.pool::<MapPool<HelloWorld, i32>>().await {
-                        pool.send(&i, event).await.expect("Failed to pass along message!");
-                        i += 1;
-                    }
+        match event {
+            LauncherEvents::HelloWorld(event) => {
+                info!("Received event for HelloWorld");
+                if let Some(pool) = rt.pool::<MapPool<HelloWorld, i32>>().await {
+                    pool.send(&self.count, event)
+                        .await
+                        .expect("Failed to pass along message!");
+                    self.count += 1;
                 }
-                LauncherEvents::Shutdown { using_ctrl_c: _ } => {
-                    rt.shutdown_scope(&ROOT_SCOPE).await.ok();
-                }
-                LauncherEvents::ReportExit(res) => match res {
-                    Ok(s) => {
-                        info!("{} {} has shutdown!", s.state.name, s.state.num);
+            }
+            LauncherEvents::Shutdown { using_ctrl_c: _ } => {
+                rt.shutdown_scope(&ROOT_SCOPE).await.ok();
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl HandleEvent<StatusChange<HelloWorld>> for Launcher {
+    async fn handle_event<Sup>(
+        &mut self,
+        rt: &mut ActorContext<Self, Sup>,
+        s: StatusChange<HelloWorld>,
+    ) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        info!(
+            "{} status changed ({} -> {})!",
+            s.service.name(),
+            s.prev_status,
+            s.service.status()
+        );
+        debug!("\n{}", rt.root_service_tree().await.unwrap());
+    }
+}
+
+#[async_trait]
+impl HandleEvent<Result<SuccessReport<HelloWorld>, ErrorReport<HelloWorld>>> for Launcher {
+    async fn handle_event<Sup>(
+        &mut self,
+        rt: &mut ActorContext<Self, Sup>,
+        res: Result<SuccessReport<HelloWorld>, ErrorReport<HelloWorld>>,
+    ) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        match res {
+            Ok(s) => {
+                info!("{} {} has shutdown!", s.state.name, s.state.num);
+            }
+            Err(e) => {
+                info!("{} {} has shutdown unexpectedly!", e.state.name, e.state.num);
+                match e.error.request() {
+                    ActorRequest::Restart(_) => {
+                        info!("Restarting {} {}", e.state.name, e.state.num);
+                        let i = e.state.num as i32;
+                        rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i, e.state).await?;
                     }
-                    Err(e) => {
-                        info!("{} {} has shutdown unexpectedly!", e.state.name, e.state.num);
-                        if let Some(req) = e.error.request {
-                            match req {
-                                ActorRequest::Restart(_) => {
-                                    info!("Restarting {} {}", e.state.name, e.state.num);
-                                    let i = e.state.num as i32;
-                                    rt.spawn_into_pool_keyed::<MapPool<HelloWorld, i32>>(i, e.state).await?;
-                                }
-                                ActorRequest::Finish => (),
-                                ActorRequest::Panic => panic!("Received request to panic....so I did"),
-                            }
-                        }
-                    }
-                },
-                LauncherEvents::StatusChange(s) => {
-                    info!(
-                        "{} status changed ({} -> {})!",
-                        s.service.name(),
-                        s.prev_status,
-                        s.service.status()
-                    );
-                    debug!("\n{}", rt.root_service_tree().await.unwrap());
+                    ActorRequest::Finish => (),
+                    ActorRequest::Panic => panic!("Received request to panic....so I did"),
                 }
             }
         }
-        rt.update_status(ServiceStatus::Stopped).await.ok();
-        Ok(())
     }
 }
 
@@ -216,7 +242,7 @@ async fn startup() -> anyhow::Result<()> {
     RuntimeScope::<ActorRegistry>::launch(|scope| {
         async move {
             scope
-                .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))
+                .spawn_system_unsupervised(Launcher::default(), Arc::new(RwLock::new(LauncherAPI)))
                 .await?;
             scope
                 .spawn_task(|rt| {

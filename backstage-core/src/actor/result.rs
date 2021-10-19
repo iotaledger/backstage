@@ -11,22 +11,6 @@ use std::{
 };
 use thiserror::Error;
 
-/// The returned result by the actor
-pub type ActorResult<T> = std::result::Result<T, ActorError>;
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-/// Actor shutdown error reason.
-pub enum ActorRequest {
-    /// Actor wants to restart after this run
-    Restart(Option<Duration>),
-    /// Actor is done and can be removed from the service
-    Finish,
-    /// Something unrecoverable happened and we should actually
-    /// shut down everything and notify the user
-    Panic,
-}
-
-/// An actor's error which contains an optional request for the supervisor
 #[derive(Error, Debug)]
 #[error("Source: {source}, request: {request:?}")]
 pub struct ActorError {
@@ -34,50 +18,10 @@ pub struct ActorError {
     pub request: Option<ActorRequest>,
 }
 
-impl Default for ActorError {
-    fn default() -> Self {
-        Self {
-            source: anyhow::anyhow!("An unknown error occurred!"),
-            request: None,
-        }
-    }
-}
-
-pub trait ActorResultExt {
-    type Error;
-    fn err_request(self, request: ActorRequest) -> ActorResult<Self::Error>
-    where
-        Self: Sized;
-}
-
-impl<T> ActorResultExt for anyhow::Result<T> {
-    type Error = T;
-    fn err_request(self, request: ActorRequest) -> ActorResult<T>
-    where
-        Self: Sized,
-    {
-        match self {
-            Err(source) => Err(ActorError {
-                source,
-                request: request.into(),
-            }),
-            Ok(t) => Ok(t),
-        }
-    }
-}
-
-impl From<anyhow::Error> for ActorError {
-    fn from(source: anyhow::Error) -> Self {
-        Self { source, request: None }
-    }
-}
-
-impl Clone for ActorError {
-    fn clone(&self) -> Self {
-        Self {
-            source: anyhow::anyhow!(self.source.to_string()),
-            request: self.request.clone(),
-        }
+impl ActorError {
+    /// Get the request from the error
+    pub fn request(&self) -> &Option<ActorRequest> {
+        &self.request
     }
 }
 
@@ -85,7 +29,7 @@ impl From<std::borrow::Cow<'static, str>> for ActorError {
     fn from(cow: std::borrow::Cow<'static, str>) -> Self {
         ActorError {
             source: anyhow!(cow),
-            request: ActorRequest::Panic.into(),
+            request: None,
         }
     }
 }
@@ -94,7 +38,16 @@ impl From<()> for ActorError {
     fn from(_: ()) -> Self {
         ActorError {
             source: anyhow!("Error!"),
-            request: ActorRequest::Finish.into(),
+            request: None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for ActorError {
+    fn from(e: anyhow::Error) -> Self {
+        ActorError {
+            source: e,
+            request: None,
         }
     }
 }
@@ -103,6 +56,18 @@ impl<S: Actor> From<InitError<S>> for ActorError {
     fn from(e: InitError<S>) -> Self {
         e.1.into()
     }
+}
+
+/// Possible requests an actor can make to its supervisor
+#[derive(Debug, Clone)]
+pub enum ActorRequest {
+    /// Actor wants to restart after this run, optionally after a delay
+    Restart(Option<Duration>),
+    /// Actor is done and can be removed from the service
+    Finish,
+    /// Something unrecoverable happened and we should actually
+    /// shut down everything and notify the user
+    Panic,
 }
 
 /// Synchronous error from initializing an actor.

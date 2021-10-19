@@ -139,6 +139,7 @@ impl Actor for Howdy {
         let (counter, hello_world) = rt
             .link_data::<(Res<Arc<RwLock<NecessaryResource>>>, Act<HelloWorld>)>()
             .await?;
+        let counter = rt.query_data::<Res<Arc<RwLock<NecessaryResource>>>>().await.ok();
         rt.update_status(ServiceStatus::Running).await.ok();
         while let Some(evt) = rt.next_event().await {
             match evt {

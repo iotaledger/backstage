@@ -13,20 +13,24 @@ pub trait Channel<C, E: 'static + Send + Sync> {
     /// The sender half of the channel
     type Sender: 'static + Sender<E> + Send + Sync + Clone;
     /// The receiver half of the channel
-    type Receiver: Stream<Item = E> + Unpin + Send + Sync;
+    type Receiver: Receiver<E>;
 
     /// Create a sender and receiver of the appropriate types
     async fn new(config: &C) -> anyhow::Result<(Self::Sender, Self::Receiver)>;
 }
 
 /// Defines half of a channel which sends events
-pub trait Sender<E: 'static + Send + Sync> {
+pub trait Sender<E: 'static + Send + Sync>: dyn_clone::DynClone + Send + Sync {
     /// Send an event over the channel
     fn send(&self, event: E) -> anyhow::Result<()>;
 
     /// Check if the channel is closed
     fn is_closed(&self) -> bool;
 }
+dyn_clone::clone_trait_object!(<E> Sender<E> where E: 'static + Send + Sync);
+
+pub trait Receiver<E: 'static + Send + Sync>: Stream<Item = E> + Unpin + Send + Sync {}
+impl<T, E: 'static + Send + Sync> Receiver<E> for T where T: Stream<Item = E> + Unpin + Send + Sync {}
 
 /// A tokio mpsc channel implementation
 pub struct UnboundedTokioChannel<E>(PhantomData<fn(E) -> E>);
@@ -75,12 +79,12 @@ impl<E: 'static + Send + Sync> Sender<E> for UnboundedTokioSender<E> {
 
 impl<T, E: 'static + Send + Sync> Sender<E> for Option<T>
 where
-    T: Sender<E> + Send + Sync,
+    T: Sender<E> + Clone + Send + Sync,
 {
     fn send(&self, event: E) -> anyhow::Result<()> {
         match self {
             Some(s) => s.send(event),
-            None => Ok(()),
+            None => Err(anyhow::anyhow!("Sender is None!")),
         }
     }
 
@@ -92,19 +96,9 @@ where
     }
 }
 
-#[async_trait]
-impl Channel<(), ()> for () {
-    type Sender = ();
-    type Receiver = tokio_stream::Empty<()>;
-
-    async fn new(_config: &()) -> anyhow::Result<(Self::Sender, Self::Receiver)> {
-        Ok(((), tokio_stream::empty()))
-    }
-}
-
 impl<E: 'static + Send + Sync> Sender<E> for () {
     fn send(&self, _event: E) -> anyhow::Result<()> {
-        Ok(())
+        Err(anyhow::anyhow!("No sender!"))
     }
 
     fn is_closed(&self) -> bool {

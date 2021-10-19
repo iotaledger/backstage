@@ -5,6 +5,7 @@ use crate::actor::{Actor, Channel, Sender, Service, ServiceStatus, ServiceTree, 
 use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use dyn_clone::DynClone;
 use futures::{
     future::{AbortHandle, Abortable, BoxFuture},
     task::AtomicWaker,
@@ -98,7 +99,7 @@ impl<T: 'static + Clone + Send + Sync> DepStatus<T> {
     }
 }
 
-pub(crate) enum RawDepStatus {
+pub enum RawDepStatus {
     /// The dependency is ready to be used
     Ready(Box<dyn CloneAny + Send + Sync>),
     /// The dependency is not ready, here is a flag to await
@@ -173,21 +174,21 @@ impl Scope {
 /// in some synchronizeable structure which can be accessed via interior
 /// mutability.
 #[async_trait]
-pub trait RegistryAccess: Clone {
+pub trait RegistryAccess: DynClone {
     /// Create a new runtime scope using this registry implementation
-    async fn instantiate<S: Into<String> + Send>(
+    async fn instantiate<S: 'static + Into<String> + Send + Sync>(
         name: S,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-    ) -> RuntimeScope<Self>
+    ) -> RuntimeScope
     where
         Self: Send + Sized;
 
     /// Create a new scope with an optional parent scope and name function
-    async fn new_scope<P: Send + Into<Option<ScopeId>>, F: 'static + Send + Sync + FnOnce(ScopeId) -> String>(
+    async fn new_scope(
         &self,
-        parent: P,
-        name_fn: F,
+        parent: Option<ScopeId>,
+        name_fn: Box<dyn 'static + Send + Sync + FnOnce(ScopeId) -> String>,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> anyhow::Result<ScopeId>;
@@ -196,16 +197,25 @@ pub trait RegistryAccess: Clone {
     async fn drop_scope(&self, scope_id: &ScopeId) -> anyhow::Result<()>;
 
     /// Add arbitrary data to this scope
-    async fn add_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId, data: T) -> anyhow::Result<()>;
+    async fn add_data(
+        &self,
+        scope_id: &ScopeId,
+        data_type: TypeId,
+        data: Box<dyn CloneAny + Send + Sync>,
+    ) -> anyhow::Result<()>;
 
     /// Force this scope to depend on some arbitrary data, and shut down if it is ever removed
-    async fn depend_on<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>>;
+    async fn depend_on(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus>;
 
     /// Remove arbitrary data from this scope
-    async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<Option<T>>;
+    async fn remove_data(
+        &self,
+        scope_id: &ScopeId,
+        data_type: TypeId,
+    ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>>;
 
     /// Get arbitrary data from this scope
-    async fn get_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<DepStatus<T>>;
+    async fn get_data(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus>;
 
     /// Get this scope's service
     async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service>;
@@ -219,6 +229,7 @@ pub trait RegistryAccess: Clone {
     /// Request the service tree from this scope
     async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree>;
 }
+dyn_clone::clone_trait_object!(RegistryAccess);
 
 /// The central registry that stores all data for the application.
 /// Data is accessable via scopes organized as a tree structure.
@@ -236,10 +247,10 @@ impl Default for Registry {
 
 impl Registry {
     /// Create a new scope with an optional parent
-    pub(crate) async fn new_scope<P: Into<Option<ScopeId>>, F: FnOnce(ScopeId) -> String>(
+    pub(crate) async fn new_scope(
         &mut self,
-        parent: P,
-        name_fn: F,
+        parent: Option<ScopeId>,
+        name_fn: Box<dyn Send + Sync + FnOnce(ScopeId) -> String>,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> ScopeId {
@@ -253,7 +264,6 @@ impl Registry {
                 }
             }
         };
-        let parent = parent.into();
         let scope = {
             if let Some(parent_lock) = parent.and_then(|ref p| self.scopes.get(p)) {
                 let mut parent_scope = parent_lock.write().await;
@@ -566,7 +576,7 @@ impl DepFlag {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct DepSignal {
+pub struct DepSignal {
     flag: Arc<DepFlag>,
 }
 

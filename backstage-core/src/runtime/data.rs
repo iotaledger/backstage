@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::ScopeId;
-use crate::actor::{ActorPool, Channel, EventDriven, Sender, ShutdownHandle, System};
+use crate::actor::{Actor, ActorPool, Envelope, Sender, ShutdownHandle, System};
 use futures::future::AbortHandle;
 use std::{
     ops::{Deref, DerefMut},
@@ -47,7 +47,10 @@ pub struct Sys<S: System> {
     pub state: Res<S::State>,
 }
 
-impl<S: System> Clone for Sys<S> {
+impl<S: System> Clone for Sys<S>
+where
+    Act<S>: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             actor: self.actor.clone(),
@@ -57,17 +60,17 @@ impl<S: System> Clone for Sys<S> {
 }
 
 /// An actor handle, used to send events
-pub struct Act<A: EventDriven> {
+pub struct Act<A: Actor> {
     pub(crate) scope_id: ScopeId,
-    pub(crate) sender: <A::Channel as Channel<A, A::Event>>::Sender,
+    pub(crate) sender: Box<dyn Sender<Envelope<A>>>,
     pub(crate) shutdown_handle: ShutdownHandle,
     pub(crate) abort_handle: AbortHandle,
 }
 
-impl<A: EventDriven> Act<A> {
+impl<A: 'static + Actor> Act<A> {
     pub(crate) fn new(
         scope_id: ScopeId,
-        sender: <A::Channel as Channel<A, A::Event>>::Sender,
+        sender: Box<dyn Sender<Envelope<A>>>,
         shutdown_handle: ShutdownHandle,
         abort_handle: AbortHandle,
     ) -> Self {
@@ -95,24 +98,21 @@ impl<A: EventDriven> Act<A> {
     }
 }
 
-impl<A: EventDriven> Deref for Act<A> {
-    type Target = <A::Channel as Channel<A, A::Event>>::Sender;
+impl<A: Actor> Deref for Act<A> {
+    type Target = Box<dyn Sender<Envelope<A>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.sender
     }
 }
 
-impl<A: EventDriven> DerefMut for Act<A> {
+impl<A: Actor> DerefMut for Act<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.sender
     }
 }
 
-impl<A: EventDriven> Clone for Act<A>
-where
-    <A::Channel as Channel<A, A::Event>>::Sender: Clone,
-{
+impl<A: 'static + Actor> Clone for Act<A> {
     fn clone(&self) -> Self {
         Self {
             scope_id: self.scope_id,
@@ -123,15 +123,15 @@ where
     }
 }
 
-impl<A: EventDriven> DataWrapper<<A::Channel as Channel<A, A::Event>>::Sender> for Act<A> {
-    fn into_inner(self) -> <A::Channel as Channel<A, A::Event>>::Sender {
+impl<A: Actor> DataWrapper<Box<dyn Sender<Envelope<A>>>> for Act<A> {
+    fn into_inner(self) -> Box<dyn Sender<Envelope<A>>> {
         self.sender
     }
 }
 
 #[async_trait::async_trait]
-impl<A: EventDriven> Sender<A::Event> for Act<A> {
-    fn send(&self, event: A::Event) -> anyhow::Result<()> {
+impl<A: 'static + Actor> Sender<Envelope<A>> for Act<A> {
+    fn send(&self, event: Envelope<A>) -> anyhow::Result<()> {
         self.sender.send(event)
     }
 
@@ -142,15 +142,23 @@ impl<A: EventDriven> Sender<A::Event> for Act<A> {
 
 /// A pool of actors which can be used as a dependency
 #[derive(Default)]
-pub struct Pool<P: ActorPool>(pub Arc<P>);
+pub struct Pool<P: ActorPool>(pub Arc<P>)
+where
+    Act<P::Actor>: Clone;
 
-impl<P: ActorPool> Clone for Pool<P> {
+impl<P: ActorPool> Clone for Pool<P>
+where
+    Act<P::Actor>: Clone,
+{
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<P: ActorPool> Deref for Pool<P> {
+impl<P: ActorPool> Deref for Pool<P>
+where
+    Act<P::Actor>: Clone,
+{
     type Target = Arc<P>;
 
     fn deref(&self) -> &Self::Target {
@@ -158,7 +166,10 @@ impl<P: ActorPool> Deref for Pool<P> {
     }
 }
 
-impl<P: ActorPool> DataWrapper<Arc<P>> for Pool<P> {
+impl<P: ActorPool> DataWrapper<Arc<P>> for Pool<P>
+where
+    Act<P::Actor>: Clone,
+{
     fn into_inner(self) -> Arc<P> {
         self.0
     }

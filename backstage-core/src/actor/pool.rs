@@ -9,7 +9,10 @@ use tokio::sync::RwLock;
 
 /// An actor pool which contains some number of handles
 #[async_trait]
-pub trait ActorPool: Default {
+pub trait ActorPool: Default
+where
+    Act<Self::Actor>: Clone,
+{
     /// The actor type of this pool
     type Actor: Actor;
 
@@ -20,14 +23,18 @@ pub trait ActorPool: Default {
     async fn handles(&self) -> Vec<Act<Self::Actor>>;
 
     /// Send a cloneable event to all handles in this pool
-    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    async fn send_all<E>(&self, event: E) -> anyhow::Result<()>
     where
-        <Self::Actor as Actor>::Event: Clone;
+        E: 'static + Clone + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>;
 }
 
 /// A basic actor pool which allows retrieving handles via its internal method
 #[async_trait]
-pub trait BasicActorPool: ActorPool {
+pub trait BasicActorPool: ActorPool
+where
+    Act<Self::Actor>: Clone,
+{
     /// Push a handle into the pool
     async fn push(&self, handle: Act<Self::Actor>);
 
@@ -35,12 +42,18 @@ pub trait BasicActorPool: ActorPool {
     async fn get(&self) -> Option<Act<Self::Actor>>;
 
     /// Send to a handle in the pool
-    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
+    async fn send<E>(&self, event: E) -> anyhow::Result<()>
+    where
+        E: 'static + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>;
 }
 
 /// A keyed actor pool which can be accessed via some metric
 #[async_trait]
-pub trait KeyedActorPool: ActorPool {
+pub trait KeyedActorPool: ActorPool
+where
+    Act<Self::Actor>: Clone,
+{
     /// The key that identifies each handle in the pool
     type Key: Send + Sync;
 
@@ -54,7 +67,10 @@ pub trait KeyedActorPool: ActorPool {
     async fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = (Self::Key, Act<Self::Actor>)> + 'a>;
 
     /// Send to a handle in the pool with a key
-    async fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>;
+    async fn send<E>(&self, key: &Self::Key, event: E) -> anyhow::Result<()>
+    where
+        E: 'static + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>;
 }
 
 #[cfg(feature = "rand_pool")]
@@ -73,7 +89,10 @@ impl<A: Actor> Default for RandomPool<A> {
 
 #[cfg(feature = "rand_pool")]
 #[async_trait]
-impl<A: Actor> ActorPool for RandomPool<A> {
+impl<A: 'static + Actor + Send + Sync> ActorPool for RandomPool<A>
+where
+    Act<A>: Clone,
+{
     type Actor = A;
 
     async fn verify(&self) -> bool {
@@ -92,12 +111,13 @@ impl<A: Actor> ActorPool for RandomPool<A> {
             .collect()
     }
 
-    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    async fn send_all<E>(&self, event: E) -> anyhow::Result<()>
     where
-        <Self::Actor as Actor>::Event: Clone,
+        E: 'static + Clone + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: HandleEvent<E>,
     {
         for handle in self.handles.read().await.iter().filter(|h| !h.is_closed()) {
-            handle.send(event.clone())?;
+            handle.send(Box::new(event.clone()))?;
         }
         Ok(())
     }
@@ -108,7 +128,10 @@ use rand::Rng;
 
 #[cfg(feature = "rand_pool")]
 #[async_trait]
-impl<A: Actor> BasicActorPool for RandomPool<A> {
+impl<A: 'static + Actor + Send + Sync> BasicActorPool for RandomPool<A>
+where
+    Act<A>: Clone,
+{
     async fn push(&self, handle: Act<Self::Actor>) {
         self.handles.write().await.push(handle);
     }
@@ -126,7 +149,11 @@ impl<A: Actor> BasicActorPool for RandomPool<A> {
         }
     }
 
-    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+    async fn send<E>(&self, event: E) -> anyhow::Result<()>
+    where
+        E: 'static + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>,
+    {
         let handles = self.handles.read().await;
         if let Some(handle) = if handles.len() != 0 {
             let mut rng = rand::thread_rng();
@@ -134,7 +161,7 @@ impl<A: Actor> BasicActorPool for RandomPool<A> {
         } else {
             None
         } {
-            handle.send(event)
+            handle.send(Box::new(event))
         } else {
             anyhow::bail!("No handles to send to!");
         }
@@ -153,7 +180,10 @@ struct LruInner<A: Actor> {
 }
 
 #[async_trait]
-impl<A: Actor> ActorPool for LruPool<A> {
+impl<A: 'static + Actor + Send + Sync> ActorPool for LruPool<A>
+where
+    Act<A>: Clone,
+{
     type Actor = A;
 
     async fn verify(&self) -> bool {
@@ -187,9 +217,10 @@ impl<A: Actor> ActorPool for LruPool<A> {
             .collect()
     }
 
-    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    async fn send_all<E>(&self, event: E) -> anyhow::Result<()>
     where
-        <Self::Actor as Actor>::Event: Clone,
+        E: 'static + Clone + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>,
     {
         for handle in self
             .inner
@@ -200,14 +231,17 @@ impl<A: Actor> ActorPool for LruPool<A> {
             .filter_map(Option::as_ref)
             .filter(|h| !h.is_closed())
         {
-            handle.send(event.clone())?;
+            handle.send(Box::new(event.clone()))?;
         }
         Ok(())
     }
 }
 
 #[async_trait]
-impl<A: Actor> BasicActorPool for LruPool<A> {
+impl<A: 'static + Actor + Send + Sync> BasicActorPool for LruPool<A>
+where
+    Act<A>: Clone,
+{
     async fn push(&self, handle: Act<Self::Actor>) {
         let mut inner = self.inner.write().await;
         let id = inner.id_pool.get_id().expect("Out of space for handles!");
@@ -233,7 +267,11 @@ impl<A: Actor> BasicActorPool for LruPool<A> {
         }
     }
 
-    async fn send(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+    async fn send<E>(&self, event: E) -> anyhow::Result<()>
+    where
+        E: 'static + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>,
+    {
         let mut inner = self.inner.write().await;
         if let Some(handle) = if let Some((id, _)) = inner.lru.pop_lru() {
             let res = inner.handles[id].clone();
@@ -242,7 +280,7 @@ impl<A: Actor> BasicActorPool for LruPool<A> {
         } else {
             None
         } {
-            handle.send(event)
+            handle.send(Box::new(event))
         } else {
             anyhow::bail!("No handles to send to!");
         }
@@ -281,7 +319,10 @@ impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
 }
 
 #[async_trait]
-impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M> {
+impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M>
+where
+    Act<A>: Clone,
+{
     type Actor = A;
 
     async fn verify(&self) -> bool {
@@ -300,19 +341,23 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M> {
             .collect()
     }
 
-    async fn send_all(&self, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()>
+    async fn send_all<E>(&self, event: E) -> anyhow::Result<()>
     where
-        <Self::Actor as Actor>::Event: Clone,
+        E: 'static + Clone + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>,
     {
         for handle in self.map.read().await.values().filter(|h| !h.is_closed()) {
-            handle.send(event.clone())?;
+            handle.send(Box::new(event.clone()))?;
         }
         Ok(())
     }
 }
 
 #[async_trait]
-impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A, M> {
+impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A, M>
+where
+    Act<A>: Clone,
+{
     type Key = M;
 
     async fn push(&self, key: Self::Key, handle: Act<Self::Actor>) {
@@ -338,9 +383,13 @@ impl<A: Actor, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A,
         )
     }
 
-    async fn send(&self, key: &Self::Key, event: <Self::Actor as Actor>::Event) -> anyhow::Result<()> {
+    async fn send<E>(&self, key: &Self::Key, event: E) -> anyhow::Result<()>
+    where
+        E: 'static + Send + Sync + DynEvent<Self::Actor>,
+        Self::Actor: 'static + Send + Sync + HandleEvent<E>,
+    {
         if let Some(handle) = self.map.read().await.get(key) {
-            handle.send(event)
+            handle.send(Box::new(event))
         } else {
             anyhow::bail!("No handle for the given key!");
         }
