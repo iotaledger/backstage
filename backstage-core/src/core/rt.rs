@@ -612,6 +612,7 @@ where
 pub type ResourceRef = String;
 
 /// Pushed event for a dynamic resources
+#[derive(Debug, Clone)]
 pub enum Event<T: Resource> {
     /// Scope under the ScopeId, it published the Resource T under given resource reference (string)
     Published(ScopeId, ResourceRef, T),
@@ -619,6 +620,16 @@ pub enum Event<T: Resource> {
     Dropped(ScopeId, ResourceRef),
 }
 
+impl<T: Resource> Event<T> {
+    /// Check if the resource is included
+    pub fn is_included(&self) -> bool {
+        if let Self::Dropped(_, _) = &self {
+            true
+        } else {
+            false
+        }
+    }
+}
 impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     /// Create backstage context
     pub fn new(
