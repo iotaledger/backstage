@@ -580,7 +580,9 @@ where
         let mut my_scope = lock.remove(&self.scope_id).expect("Self scope to exist on drop");
         drop(lock);
         for (_type_id, cleanup_self) in my_scope.cleanup_data.drain() {
-            cleanup_self.cleanup_self(&mut my_scope.data_and_subscribers).await;
+            cleanup_self
+                .cleanup_self(self.scope_id, &mut my_scope.data_and_subscribers)
+                .await;
         }
         for (_type_id_scope_id, cleanup_from_other) in my_scope.cleanup.drain() {
             cleanup_from_other.cleanup_from_other(self.scope_id).await;
@@ -604,6 +606,17 @@ where
         self.shutdown_children().await;
         self.update_status(ServiceStatus::Stopping).await;
     }
+}
+
+/// Unique Identifier for the resource, provided by the subscriber.
+pub type ResourceRef = String;
+
+/// Pushed event for a dynamic resources
+pub enum Event<T: Resource> {
+    /// Scope under the ScopeId, it published the Resource T under given resource reference (string)
+    Published(ScopeId, ResourceRef, T),
+    /// Pushed when the resource is dropped
+    Dropped(ScopeId, ResourceRef),
 }
 
 impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
@@ -829,7 +842,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         // require further read locks
         let mut should_get_shutdown = Vec::<Box<dyn Shutdown>>::new();
         // dynamic subscribers who should be notified because the resource got dropped
-        let mut should_get_notification = Vec::<Box<dyn Route<Option<T>>>>::new();
+        let mut should_get_notification = Vec::<(ResourceRef, Box<dyn Route<Event<T>>>)>::new();
         let mut lock = SCOPES[self.scopes_index].write().await;
         let my_scope = lock.get_mut(&self.scope_id).expect("self scope to exist");
         if let Some(mut data) = my_scope.data_and_subscribers.remove::<Data<T>>() {
@@ -853,14 +866,15 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                             should_get_shutdown.push(shutdown_handle);
                         };
                     }
-                    Subscriber::DynCopy(boxed_route) => {
-                        should_get_notification.push(boxed_route);
+                    Subscriber::DynCopy(res_ref, boxed_route) => {
+                        should_get_notification.push((res_ref, boxed_route));
                     }
                 }
             }
         }; // else no active subscribers, so nothing to do;
-        for route_opt_resource in should_get_notification.drain(..) {
-            route_opt_resource.send_msg(None).await.ok();
+        for (res_ref, route) in should_get_notification.drain(..) {
+            let dropped = Event::Dropped(self.scope_id, res_ref);
+            route.send_msg(dropped).await.ok();
         }
         for shutdown_handle in should_get_shutdown.drain(..) {
             shutdown_handle.shutdown().await;
@@ -973,18 +987,19 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         }
     }
     /// Depends on dynamic Resource T
-    pub async fn depends_on_dyn<T: Resource>(
+    pub async fn subscribe<T: Resource>(
         &self,
         resource_scope_id: ScopeId,
+        resource_ref: ResourceRef,
     ) -> anyhow::Result<Option<T>, anyhow::Error>
     where
-        <A::Channel as Channel>::Handle: Route<Option<T>>,
+        <A::Channel as Channel>::Handle: Route<Event<T>>,
     {
         let my_scope_id = self.scope_id;
         // add route first
         let mut lock = SCOPES[self.scopes_index].write().await;
         let my_scope = lock.get_mut(&my_scope_id).expect("Self scope to exist");
-        let route: Box<dyn Route<Option<T>>> = Box::new(self.handle.clone());
+        let route: Box<dyn Route<Event<T>>> = Box::new(self.handle.clone());
         my_scope.router.insert(route.clone());
         drop(lock);
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
@@ -994,7 +1009,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             self.add_cleanup_from_other_obj::<T>(resource_scope_id).await;
             // get the resource if it's available
             if let Some(data) = resource_scope.data_and_subscribers.get_mut::<Data<T>>() {
-                let subscriber = Subscriber::<T>::DynCopy(route);
+                let subscriber = Subscriber::<T>::DynCopy(resource_ref, route);
                 data.subscribers.insert(my_scope_id, subscriber);
                 if let Some(resource) = data.resource.clone().take() {
                     drop(lock);
@@ -1004,7 +1019,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                     Ok(None)
                 }
             } else {
-                let subscriber = Subscriber::<T>::DynCopy(route);
+                let subscriber = Subscriber::<T>::DynCopy(resource_ref, route);
                 let cleanup_data = CleanupData::<T>::new();
                 let type_id = std::any::TypeId::of::<T>();
                 let data = Data::<T>::with_subscriber(my_scope_id, subscriber);

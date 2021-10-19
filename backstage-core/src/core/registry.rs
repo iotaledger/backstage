@@ -86,8 +86,8 @@ pub enum Subscriber<T: Resource> {
         Box<dyn Shutdown>,
     ),
     /// Subscriber will receive dynamic copies, pushed by the publisher,
-    /// and None will be pushed if the resource got dropped by the publisher.
-    DynCopy(Box<dyn Route<Option<T>>>),
+    /// and Event::Dropped(..) will be pushed if the resource got dropped by the publisher.
+    DynCopy(super::ResourceRef, Box<dyn Route<super::Event<T>>>),
 }
 
 impl<T: Resource> Subscriber<T> {
@@ -103,8 +103,8 @@ impl<T: Resource> Subscriber<T> {
         Self::LinkedOneCopy(Some(one_shot), shutdown_handle)
     }
     /// Create subscriber for dynamic copies.
-    pub fn dyn_copy(boxed_route: Box<dyn Route<Option<T>>>) -> Self {
-        Self::DynCopy(boxed_route)
+    pub fn dyn_copy(res_ref: super::ResourceRef, boxed_route: Box<dyn Route<super::Event<T>>>) -> Self {
+        Self::DynCopy(res_ref, boxed_route)
     }
 }
 /// Cleanup object for T resource
@@ -145,7 +145,11 @@ impl<T: Resource> CleanupFromOther for Cleanup<T> {
 /// Cleanup resource from self scope
 pub trait CleanupSelf: Send + Sync {
     /// Cleanup the resource from the self scope
-    async fn cleanup_self(self: Box<Self>, data_and_subscribers: &mut anymap::Map<dyn anymap::any::Any + Send + Sync>);
+    async fn cleanup_self(
+        self: Box<Self>,
+        publisher_scope_id: ScopeId,
+        data_and_subscribers: &mut anymap::Map<dyn anymap::any::Any + Send + Sync>,
+    );
 }
 /// Cleanup self data struct
 pub struct CleanupData<T: Resource> {
@@ -161,7 +165,11 @@ impl<T: Resource> CleanupData<T> {
 }
 #[async_trait::async_trait]
 impl<T: Resource> CleanupSelf for CleanupData<T> {
-    async fn cleanup_self(self: Box<Self>, data_and_subscribers: &mut anymap::Map<dyn anymap::any::Any + Send + Sync>) {
+    async fn cleanup_self(
+        self: Box<Self>,
+        publisher_scope_id: ScopeId,
+        data_and_subscribers: &mut anymap::Map<dyn anymap::any::Any + Send + Sync>,
+    ) {
         if let Some(mut data) = data_and_subscribers.remove::<Data<T>>() {
             for (_sub_scope_id, subscriber) in data.subscribers.drain() {
                 match subscriber {
@@ -174,8 +182,9 @@ impl<T: Resource> CleanupSelf for CleanupData<T> {
                         }
                         shutdown_handle.shutdown().await;
                     }
-                    Subscriber::DynCopy(boxed_route) => {
-                        boxed_route.send_msg(None).await.ok();
+                    Subscriber::DynCopy(res_ref, route) => {
+                        let dropped = super::Event::Dropped(publisher_scope_id, res_ref);
+                        route.send_msg(dropped).await.ok();
                     }
                 }
             }
