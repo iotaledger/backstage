@@ -360,13 +360,7 @@ where
         // log::debug!("Spawning task for registry actor");
         tokio::spawn(async move {
             // Call handle events until shutdown
-            while let Some(evt) = cx.inbox().next().await {
-                // Handle the event
-                // log::debug!("Registry received event {:?}", evt);
-                evt.handle(&mut cx, &mut actor, &mut ()).await?;
-            }
-            // log::debug!("Exiting registry actor");
-            Result::<_, ActorError>::Ok(())
+            actor.run(&mut cx, &mut ()).await
         });
         child_scope
     }

@@ -10,7 +10,7 @@ use crate::{
 use async_trait::async_trait;
 use futures::{
     future::{AbortHandle, Abortable},
-    FutureExt,
+    FutureExt, StreamExt,
 };
 use std::{any::Any, borrow::Cow, fmt::Debug, panic::AssertUnwindSafe, pin::Pin};
 /// The all-important Actor trait. This defines an Actor and what it do.
@@ -29,6 +29,17 @@ pub trait Actor: Debug + Send + Sync + Sized {
     async fn init(&mut self, cx: &mut Self::Context) -> Result<Self::Data, ActorError>
     where
         Self: 'static + Sized + Send + Sync;
+
+    async fn run(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        while let Some(evt) = cx.inbox().next().await {
+            // Handle the event
+            evt.handle(cx, self, data).await?;
+        }
+        Ok(())
+    }
 
     async fn shutdown(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
     where

@@ -767,14 +767,7 @@ impl RuntimeScope {
             let res = Abortable::new(
                 AssertUnwindSafe(async {
                     // Call handle events until shutdown
-                    let mut res = Ok(());
-                    while let Some(evt) = cx.inbox().next().await {
-                        // Handle the event
-                        if let Err(e) = evt.handle(&mut cx, &mut actor, &mut data).await {
-                            res = Err(e);
-                            break;
-                        }
-                    }
+                    let mut res = actor.run(&mut cx, &mut data).await;
                     if let Err(e) = actor.shutdown(&mut cx, &mut data).await {
                         res = Err(e);
                     }
