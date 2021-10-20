@@ -1,9 +1,9 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ActorError, Channel, Dependencies, Sender};
+use super::{ActorError, Channel, Dependencies, Report, Sender, StatusChange};
 use crate::{
-    actor::ShutdownStream,
+    actor::{ActorRequest, ServiceStatus, ShutdownStream},
     prelude::{Act, ActorContext},
     runtime::{RegistryAccess, RuntimeScope},
 };
@@ -12,10 +12,12 @@ use futures::{
     future::{AbortHandle, Abortable},
     FutureExt,
 };
-use std::{any::Any, borrow::Cow, panic::AssertUnwindSafe, pin::Pin};
+use std::{any::Any, borrow::Cow, fmt::Debug, panic::AssertUnwindSafe, pin::Pin};
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
-pub trait Actor {
+pub trait Actor: Debug + Send + Sync + Sized {
+    type Data: Debug + Send + Sync;
+    type Context: ActorContext<Self>;
     /// Used to initialize the actor. Any children spawned here will be initialized
     /// before this actor's run method is called so they are guaranteed to be
     /// ready to use depending on their requirements. Dependencies are not
@@ -24,17 +26,16 @@ pub trait Actor {
     /// it can be linked with the runtime, but BEWARE that any dependencies which are
     /// spawned by the parents of this actor will not be available if they are
     /// spawned after this actor and linking them will therefore deadlock the thread.
-    async fn init<H: Send>(&mut self, _rt: &mut ActorContext<Self, H>) -> Result<(), ActorError>
+    async fn init(&mut self, cx: &mut Self::Context) -> Result<Self::Data, ActorError>
     where
-        Self: 'static + Sized + Send + Sync,
-    {
-        Ok(())
-    }
+        Self: 'static + Sized + Send + Sync;
 
-    async fn shutdown<H: Send>(&mut self, _rt: &mut ActorContext<Self, H>) -> Result<(), ActorError>
+    async fn shutdown(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
     where
         Self: 'static + Sized + Send + Sync,
     {
+        log::debug!("{} shutting down!", self.name());
+        cx.update_status(ServiceStatus::Stopped).await.ok();
         Ok(())
     }
 
@@ -83,106 +84,68 @@ pub trait Actor {
     //}
 }
 
-impl Actor for () {}
-impl<A: Actor + ?Sized> Actor for Box<A> {}
-
 pub trait DependsOn {
     type Dependencies: Dependencies;
 }
 
 #[async_trait]
-pub trait HandleEvent<E: Send>: Actor + Sized {
-    async fn handle_event<H: Send>(&mut self, rt: &mut ActorContext<Self, H>, event: Box<E>) -> Result<(), ActorError>;
+pub trait HandleEvent<E: Send + Debug>: Actor + Sized {
+    async fn handle_event(&mut self, cx: &mut Self::Context, event: E, data: &mut Self::Data)
+        -> Result<(), ActorError>;
 }
 
-pub trait Context {
-    type Actor: Actor;
-    fn handle<'a, E: Send>(
-        &'a mut self,
-        event: Box<E>,
+pub trait DynEvent<A: Actor>: Debug {
+    fn handle<'c, 'a>(
+        self: Box<Self>,
+        cx: &'c mut A::Context,
+        act: &'c mut A,
+        data: &'c mut A::Data,
     ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>
     where
-        Self: Sized,
-        Self::Actor: HandleEvent<E>,
-    {
-        Box::pin(async { Ok(()) })
-    }
+        Self: 'a,
+        'c: 'a;
 }
 
-impl<T: Context + ?Sized> Context for &T {
-    type Actor = T::Actor;
-}
-
-impl<A, H> Context for (&mut ActorContext<A, H>, &mut A)
-where
-    A: Actor + Send,
-    H: Send,
-{
-    type Actor = A;
-    fn handle<'a, E: Send>(
-        &'a mut self,
-        event: Box<E>,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>
-    where
-        Self: Sized,
-        Self::Actor: HandleEvent<E>,
-    {
-        let (cx, act) = self;
-        act.handle_event(*cx, event)
-    }
-}
-
-pub trait DynEvent<A> {
-    fn handle<'a, C: 'a + Context<Actor = A>>(
-        self: Box<Self>,
-        cx: C,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>
-    where
-        A: 'a;
-}
-
-pub trait ErasedDynEvent<A> {
-    fn erased_handle<'a>(
-        self: Box<Self>,
-        cx: &'a dyn Context<Actor = A>,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>;
-}
-
-impl<A> DynEvent<A> for dyn ErasedDynEvent<A> + Send + Sync {
-    fn handle<'a, C: 'a + Context<Actor = A>>(
-        self: Box<Self>,
-        cx: C,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>
-    where
-        A: 'a,
-    {
-        self.erased_handle(&cx)
-    }
-}
-
-impl<A, E> ErasedDynEvent<A> for E
-where
-    E: DynEvent<A> + Send,
-    A: HandleEvent<E>,
-{
-    fn erased_handle<'a>(
-        self: Box<Self>,
-        cx: &'a dyn Context<Actor = A>,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>> {
-        self.handle(cx)
-    }
-}
-
-impl<A, E: Send> DynEvent<A> for E
+impl<A, E: Send + Debug> DynEvent<A> for E
 where
     A: HandleEvent<E>,
 {
-    fn handle<'a, C: 'a + Context<Actor = A>>(
+    fn handle<'c, 'a>(
         self: Box<Self>,
-        mut cx: C,
-    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>> {
-        cx.handle(self)
+        cx: &'c mut A::Context,
+        act: &'c mut A,
+        data: &'c mut A::Data,
+    ) -> Pin<Box<dyn core::future::Future<Output = Result<(), ActorError>> + Send + 'a>>
+    where
+        Self: 'a,
+        'c: 'a,
+    {
+        act.handle_event(cx, *self, data)
     }
 }
 
-pub type Envelope<A> = Box<dyn ErasedDynEvent<A> + Send + Sync>;
+pub type Envelope<A> = Box<dyn DynEvent<A> + Send + Sync>;
+
+pub trait EnvelopeSender<A>: Send + Sync
+where
+    A: 'static + Actor,
+{
+    fn send<E: 'static + DynEvent<A> + Send + Sync>(&self, event: E) -> anyhow::Result<()>
+    where
+        Self: Sized;
+
+    fn is_closed(&self) -> bool;
+}
+impl<S, A> EnvelopeSender<A> for S
+where
+    S: Sender<Envelope<A>>,
+    A: 'static + Actor,
+{
+    fn send<E: 'static + DynEvent<A> + Send + Sync>(&self, event: E) -> anyhow::Result<()> {
+        self.send(Box::new(event))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+}

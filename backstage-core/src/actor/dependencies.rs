@@ -92,6 +92,7 @@ impl<R: 'static + Send + Sync + Clone> Dependencies for Res<R> {}
 #[async_trait]
 impl<P: 'static + ActorPool + Send + Sync> Dependencies for Pool<P>
 where
+    P::Actor: Actor,
     Act<P::Actor>: Clone,
 {
     async fn request(scope: &mut RuntimeScope) -> anyhow::Result<Self> {

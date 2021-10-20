@@ -3,9 +3,10 @@
 
 use super::*;
 use crate::actor::{
-    DynEvent, Envelope, HandleEvent, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender,
+    ActorError, Envelope, HandleEvent, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender,
 };
 use anymap::any::CloneAny;
+use futures::StreamExt;
 use std::any::TypeId;
 
 /// A registry shared via an Arc and RwLock
@@ -75,7 +76,7 @@ impl RegistryAccess for ArcedRegistry {
         data_type: TypeId,
         data: Box<dyn CloneAny + Send + Sync>,
     ) -> anyhow::Result<()> {
-        self.registry.read().await.add_data(scope_id, data).await
+        self.registry.read().await.add_data_raw(scope_id, data_type, data).await
     }
 
     async fn depend_on(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
@@ -87,7 +88,7 @@ impl RegistryAccess for ArcedRegistry {
         scope_id: &ScopeId,
         data_type: TypeId,
     ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>> {
-        self.registry.read().await.remove_data(scope_id).await
+        self.registry.read().await.remove_data_raw(scope_id, data_type).await
     }
 
     async fn get_data(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
@@ -145,6 +146,59 @@ enum RequestType {
     ServiceTree(ScopeId),
 }
 
+impl std::fmt::Debug for RequestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NewScope {
+                parent,
+                name_fn: _,
+                shutdown_handle,
+                abort_handle,
+            } => f
+                .debug_struct("NewScope")
+                .field("parent", parent)
+                .field("shutdown_handle", shutdown_handle)
+                .field("abort_handle", abort_handle)
+                .finish(),
+            Self::DropScope(arg0) => f.debug_tuple("DropScope").field(arg0).finish(),
+            Self::AddData {
+                scope_id,
+                data_type,
+                data,
+            } => f
+                .debug_struct("AddData")
+                .field("scope_id", scope_id)
+                .field("data_type", data_type)
+                .field("data", data)
+                .finish(),
+            Self::DependOn { scope_id, data_type } => f
+                .debug_struct("DependOn")
+                .field("scope_id", scope_id)
+                .field("data_type", data_type)
+                .finish(),
+            Self::RemoveData { scope_id, data_type } => f
+                .debug_struct("RemoveData")
+                .field("scope_id", scope_id)
+                .field("data_type", data_type)
+                .finish(),
+            Self::GetData { scope_id, data_type } => f
+                .debug_struct("GetData")
+                .field("scope_id", scope_id)
+                .field("data_type", data_type)
+                .finish(),
+            Self::GetService(arg0) => f.debug_tuple("GetService").field(arg0).finish(),
+            Self::UpdateStatus { scope_id, status } => f
+                .debug_struct("UpdateStatus")
+                .field("scope_id", scope_id)
+                .field("status", status)
+                .finish(),
+            Self::Abort(arg0) => f.debug_tuple("Abort").field(arg0).finish(),
+            Self::ServiceTree(arg0) => f.debug_tuple("ServiceTree").field(arg0).finish(),
+        }
+    }
+}
+
+#[derive(Debug)]
 enum ResponseType {
     NewScope(ScopeId),
     DropScope(anyhow::Result<()>),
@@ -158,6 +212,7 @@ enum ResponseType {
     ServiceTree(anyhow::Result<ServiceTree>),
 }
 
+#[derive(Debug)]
 struct RegistryActorRequest {
     req: RequestType,
     responder: tokio::sync::oneshot::Sender<ResponseType>,
@@ -170,24 +225,40 @@ impl RegistryActorRequest {
     }
 }
 
+#[derive(Debug)]
 struct RegistryActor {
     registry: Registry,
 }
 
 #[async_trait]
-impl Actor for RegistryActor where Self: Send {}
+impl Actor for RegistryActor
+where
+    Self: Send,
+{
+    type Data = ();
+    type Context = UnsupervisedContext<Self>;
+
+    async fn init(&mut self, cx: &mut Self::Context) -> Result<Self::Data, crate::actor::ActorError>
+    where
+        Self: 'static + Sized + Send + Sync,
+    {
+        cx.update_status(ServiceStatus::Running).await?;
+        Ok(())
+    }
+}
 
 #[async_trait]
 impl HandleEvent<RegistryActorRequest> for RegistryActor {
-    async fn handle_event<H: Send>(
+    async fn handle_event(
         &mut self,
-        rt: &mut ActorContext<Self, H>,
-        evt: Box<RegistryActorRequest>,
+        _cx: &mut Self::Context,
+        RegistryActorRequest { req, responder }: RegistryActorRequest,
+        _data: &mut Self::Data,
     ) -> Result<(), crate::actor::ActorError>
     where
         Self: 'static + Sized + Send + Sync,
     {
-        let res = match evt.req {
+        let res = match req {
             RequestType::NewScope {
                 parent,
                 name_fn,
@@ -222,7 +293,7 @@ impl HandleEvent<RegistryActorRequest> for RegistryActor {
                 ResponseType::ServiceTree(self.registry.service_tree(&scope_id).await)
             }
         };
-        evt.responder.send(res).ok();
+        responder.send(res).ok();
         Ok(())
     }
 }
@@ -270,7 +341,7 @@ where
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let actor_registry = ActorRegistry { handle: sender.clone() };
         let (abort_handle, _) = AbortHandle::new_pair();
-        let mut actor_rt = ActorContext::<_, ()> {
+        let mut cx = UnsupervisedContext {
             scope: RuntimeScope {
                 scope_id,
                 parent_id: None,
@@ -279,7 +350,6 @@ where
             },
             handle: Act::new(scope_id, Box::new(sender), shutdown_handle, abort_handle),
             receiver: Box::new(receiver),
-            supervisor_handle: (),
         };
         let child_scope = RuntimeScope {
             scope_id: child_scope_id,
@@ -287,9 +357,16 @@ where
             registry: Box::new(actor_registry),
             join_handles: Default::default(),
         };
+        // log::debug!("Spawning task for registry actor");
         tokio::spawn(async move {
-            // actor.run(&mut actor_rt, ()).await.ok();
-            todo!("Handle events")
+            // Call handle events until shutdown
+            while let Some(evt) = cx.inbox().next().await {
+                // Handle the event
+                // log::debug!("Registry received event {:?}", evt);
+                evt.handle(&mut cx, &mut actor, &mut ()).await?;
+            }
+            // log::debug!("Exiting registry actor");
+            Result::<_, ActorError>::Ok(())
         });
         child_scope
     }

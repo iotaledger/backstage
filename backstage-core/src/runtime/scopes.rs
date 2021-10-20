@@ -3,15 +3,19 @@
 
 use super::*;
 use crate::actor::{
-    ActorError, ActorPool, BasicActorPool, CustomStatus, Dependencies, DependsOn, DynEvent, Envelope, ErrorReport,
-    HandleEvent, InitError, KeyedActorPool, Receiver, Service, ServiceTree, ShutdownHandle, Status, StatusChange,
-    SuccessReport, UnboundedTokioChannel,
+    Actor, ActorError, ActorPool, BasicActorPool, CustomStatus, Dependencies, DynEvent, Envelope, EnvelopeSender,
+    ErrorReport, HandleEvent, InitError, KeyedActorPool, Receiver, Report, Service, ServiceTree, ShutdownHandle,
+    ShutdownStream, Status, StatusChange, SuccessReport, UnboundedTokioChannel,
 };
 use futures::{
     future::{AbortRegistration, Aborted},
     FutureExt, StreamExt,
 };
-use std::panic::AssertUnwindSafe;
+use std::{
+    convert::{TryFrom, TryInto},
+    fmt::Debug,
+    panic::AssertUnwindSafe,
+};
 
 /// A runtime which defines a particular scope and functionality to
 /// create tasks within it.
@@ -20,6 +24,16 @@ pub struct RuntimeScope {
     pub(crate) parent_id: Option<ScopeId>,
     pub(crate) registry: Box<dyn RegistryAccess + Send + Sync>,
     pub(crate) join_handles: Vec<JoinHandle<anyhow::Result<()>>>,
+}
+
+impl std::fmt::Debug for RuntimeScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeScope")
+            .field("scope_id", &self.scope_id)
+            .field("parent_id", &self.parent_id)
+            .field("join_handles", &self.join_handles)
+            .finish()
+    }
 }
 
 impl RuntimeScope {
@@ -114,6 +128,34 @@ impl RuntimeScope {
         }
     }
 
+    async fn create_context<A, Sup, H>(
+        &self,
+        actor: &A,
+        supervisor_handle: Option<H>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<A::Context>
+    where
+        H: 'static,
+        A: 'static + Actor,
+        Sup: 'static,
+        A::Context: TryFrom<AnyContext<A, Sup, H>>,
+        <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
+    {
+        AnyContext::new(
+            self.registry.clone(),
+            actor,
+            self.scope_id,
+            actor.name(),
+            supervisor_handle,
+            abort_handle,
+        )
+        .await
+        .and_then(|cx| {
+            cx.try_into()
+                .map_err(|e: <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error| anyhow::anyhow!(e))
+        })
+    }
+
     pub(crate) async fn child<S: Into<String>, O: Into<Option<S>>>(
         &mut self,
         name: O,
@@ -125,30 +167,6 @@ impl RuntimeScope {
             Some(self.scope_id),
             name,
             shutdown_handle,
-            abort_handle,
-        )
-        .await
-    }
-
-    pub(crate) async fn child_actor<A, H, S, O>(
-        &mut self,
-        actor: &A,
-        name: O,
-        supervisor_handle: H,
-        abort_handle: AbortHandle,
-    ) -> anyhow::Result<ActorContext<A, H>>
-    where
-        A: 'static + Actor + Send + Sync,
-        S: Into<String>,
-        O: Into<Option<S>>,
-        H: 'static,
-    {
-        ActorContext::new(
-            self.registry.clone(),
-            actor,
-            self.scope_id,
-            name,
-            supervisor_handle,
             abort_handle,
         )
         .await
@@ -354,7 +372,7 @@ impl RuntimeScope {
             .await
             .and_then(|handle| (!handle.is_closed()).then(|| handle))
             .ok_or_else(|| anyhow::anyhow!("No channel for this actor!"))?;
-        handle.send(Box::new(event))
+        handle.send(event)
     }
 
     /// Get a shared reference to a system if it exists in this runtime's scope
@@ -451,9 +469,10 @@ impl RuntimeScope {
     }
 
     /// Synchronously initialize an actor and prepare to spawn it
-    pub async fn init_actor_unsupervised<A>(&mut self, actor: A) -> Result<Initialized<Act<A>, A, (), ()>, InitError<A>>
+    pub async fn init_actor_unsupervised<A>(&mut self, actor: A) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
+        A::Context: From<UnsupervisedContext<A>>,
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
@@ -469,7 +488,17 @@ impl RuntimeScope {
             )
                 .into());
         }
-        self.common_init::<A, (), (), _>(actor, (), SpawnType::Actor).await
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx =
+            match UnsupervisedContext::new(self.registry.clone(), &actor, self.scope_id, actor.name(), abort_handle)
+                .await
+            {
+                Ok(cx) => cx,
+                Err(e) => {
+                    return Err((actor, e).into());
+                }
+            };
+        self.common_init(cx.into(), actor, abort_reg, SpawnType::Actor).await
     }
 
     /// Synchronously initialize an actor and prepare to spawn it
@@ -477,11 +506,13 @@ impl RuntimeScope {
         &mut self,
         actor: A,
         supervisor_handle: H,
-    ) -> Result<Initialized<Act<A>, A, Sup, H>, InitError<A>>
+    ) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
+        A::Context: TryFrom<AnyContext<A, Sup, H>>,
+        <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<A>,
     {
         if let Some(handle) = self.actor_event_handle::<A>().await {
             if handle.scope_id == self.scope_id {
@@ -499,18 +530,26 @@ impl RuntimeScope {
                     .into());
             }
         }
-        self.common_init::<A, Sup, H, Act<A>>(actor, supervisor_handle, SpawnType::Actor)
-            .await
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self.create_context(&actor, Some(supervisor_handle), abort_handle).await {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        self.common_init(cx, actor, abort_reg, SpawnType::Actor).await
     }
 
     /// Spawn a new actor with a supervisor handle
     pub async fn spawn_actor<A, Sup, H>(&mut self, actor: A, supervisor_handle: H) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
+        A::Context: TryFrom<AnyContext<A, Sup, H>>,
+        <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<A>,
     {
-        let init = self.init_actor::<A, Sup, H>(actor, supervisor_handle).await?;
+        let init = self.init_actor(actor, supervisor_handle).await?;
         Ok(init.spawn(self).await)
     }
 
@@ -518,8 +557,9 @@ impl RuntimeScope {
     pub async fn spawn_actor_unsupervised<A>(&mut self, actor: A) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
+        A::Context: From<UnsupervisedContext<A>>,
     {
-        let init = self.init_actor_unsupervised::<A>(actor).await?;
+        let init = self.init_actor_unsupervised(actor).await?;
         Ok(init.spawn(self).await)
     }
 
@@ -528,9 +568,10 @@ impl RuntimeScope {
         &mut self,
         actor: A,
         state: A::State,
-    ) -> Result<Initialized<Sys<A>, A, (), ()>, InitError<A>>
+    ) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync,
+        A::Context: From<UnsupervisedContext<A>>,
     {
         if let Some(handle) = self.actor_event_handle::<A>().await {
             if handle.scope_id == self.scope_id {
@@ -549,8 +590,17 @@ impl RuntimeScope {
             }
         }
         self.add_data(Res(state)).await;
-        self.common_init::<A, (), (), Sys<A>>(actor, (), SpawnType::System)
-            .await
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx =
+            match UnsupervisedContext::new(self.registry.clone(), &actor, self.scope_id, actor.name(), abort_handle)
+                .await
+            {
+                Ok(cx) => cx,
+                Err(e) => {
+                    return Err((actor, e).into());
+                }
+            };
+        self.common_init(cx.into(), actor, abort_reg, SpawnType::System).await
     }
 
     /// Synchronously initialize a system and prepare to spawn it
@@ -559,11 +609,13 @@ impl RuntimeScope {
         actor: A,
         state: A::State,
         supervisor_handle: H,
-    ) -> Result<Initialized<Sys<A>, A, Sup, H>, InitError<A>>
+    ) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
+        H: 'static + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<A>,
+        A::Context: TryFrom<AnyContext<A, Sup, H>>,
+        <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
@@ -580,8 +632,14 @@ impl RuntimeScope {
                 .into());
         }
         self.add_data(Res(state)).await;
-        self.common_init::<A, Sup, H, Sys<A>>(actor, supervisor_handle, SpawnType::System)
-            .await
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self.create_context(&actor, Some(supervisor_handle), abort_handle).await {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        self.common_init(cx, actor, abort_reg, SpawnType::System).await
     }
 
     /// Spawn a new system with a supervisor handle
@@ -593,8 +651,10 @@ impl RuntimeScope {
     ) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
+        H: 'static + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<A>,
+        A::Context: TryFrom<AnyContext<A, Sup, H>>,
+        <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
     {
         if let Some(handle) = self.actor_event_handle::<A>().await {
             if handle.scope_id == self.scope_id {
@@ -613,7 +673,14 @@ impl RuntimeScope {
             }
         }
         self.add_data(Res(state)).await;
-        self.common_init_and_spawn::<_, Sup, H, Sys<A>>(actor, supervisor_handle, SpawnType::System)
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self.create_context(&actor, Some(supervisor_handle), abort_handle).await {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        self.common_init_and_spawn(cx, actor, abort_reg, SpawnType::System)
             .await
     }
 
@@ -621,6 +688,7 @@ impl RuntimeScope {
     pub async fn spawn_system_unsupervised<A>(&mut self, actor: A, state: A::State) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + System + Send + Sync,
+        A::Context: From<UnsupervisedContext<A>>,
     {
         if self.actor_event_handle::<A>().await.is_some() {
             let service = self.service().await;
@@ -637,181 +705,164 @@ impl RuntimeScope {
                 .into());
         }
         self.add_data(Res(state)).await;
-        self.common_init_and_spawn::<_, (), (), Sys<A>>(actor, (), SpawnType::System)
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx =
+            match UnsupervisedContext::new(self.registry.clone(), &actor, self.scope_id, actor.name(), abort_handle)
+                .await
+            {
+                Ok(cx) => cx,
+                Err(e) => {
+                    return Err((actor, e).into());
+                }
+            };
+        self.common_init_and_spawn(cx.into(), actor, abort_reg, SpawnType::System)
             .await
     }
 
-    async fn common_init<A, Sup, H, Deps>(
+    async fn common_init<A>(
         &mut self,
+        mut cx: A::Context,
         mut actor: A,
-        supervisor_handle: H,
+        abort_reg: AbortRegistration,
         spawn_type: SpawnType,
-    ) -> Result<Initialized<Deps, A, Sup, H>, InitError<A>>
+    ) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
-        Deps: 'static + Dependencies + Clone + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
     {
-        log::debug!("Spawning {}", actor.name());
-        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-        let mut actor_rt = match self
-            .child_actor(&actor, actor.name(), supervisor_handle, abort_handle.clone())
-            .await
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                return Err((actor, e).into());
-            }
-        };
-        let handle = actor_rt.handle();
+        log::debug!("Initializing {}", actor.name());
+        let handle = cx.handle();
         match spawn_type {
             SpawnType::Actor | SpawnType::System => self.add_data(handle.clone()).await,
-            SpawnType::Pool => actor_rt.add_data(handle.clone()).await,
+            SpawnType::Pool => self.add_data(handle.clone()).await,
         }
-        let res = AssertUnwindSafe(actor.init(&mut actor_rt)).catch_unwind().await;
-        if let Err(e) = Self::handle_init_res::<A, H>(res, &mut actor_rt).await {
-            return Err((actor, e).into());
+        let res = AssertUnwindSafe(actor.init(&mut cx)).catch_unwind().await;
+        match Self::handle_init_res::<A>(res, &mut cx).await {
+            Ok(data) => Ok(InitData {
+                actor,
+                data,
+                cx,
+                abort_reg,
+                spawn_type,
+            }
+            .into()),
+            Err(e) => Err((actor, e).into()),
         }
-        Ok(InitData {
-            actor,
-            actor_rt,
-            abort_reg,
-            spawn_type,
-            _marker: PhantomData,
-        }
-        .into())
     }
 
-    async fn common_spawn<A, Sup, H, Deps>(
+    async fn common_spawn<A>(
         &mut self,
         InitData {
             mut actor,
-            mut actor_rt,
+            mut cx,
+            mut data,
             abort_reg: abort_registration,
             spawn_type,
-            _marker,
-        }: InitData<Deps, A, Sup, H>,
+        }: InitData<A>,
     ) -> Act<A>
     where
         A: 'static + Actor + Send + Sync,
-        H: 'static + Send,
-        Deps: 'static + Dependencies + Clone + Send + Sync,
-        Sup: 'static + MaybeSupervisor<A, H>,
     {
-        let handle = actor_rt.handle();
+        let handle = cx.handle().clone();
         let child_task = tokio::spawn(async move {
             let res = Abortable::new(
                 AssertUnwindSafe(async {
-                    let deps = Deps::link(&mut actor_rt.scope).await?;
                     // Call handle events until shutdown
-                    while let Some(evt) = actor_rt.receiver.next().await {
+                    let mut res = Ok(());
+                    while let Some(evt) = cx.inbox().next().await {
                         // Handle the event
-                        evt.handle((&mut actor_rt, &mut actor)).await?;
-                        todo!("handle events")
+                        if let Err(e) = evt.handle(&mut cx, &mut actor, &mut data).await {
+                            res = Err(e);
+                            break;
+                        }
                     }
-                    actor.shutdown(&mut actor_rt).await
+                    if let Err(e) = actor.shutdown(&mut cx, &mut data).await {
+                        res = Err(e);
+                    }
+                    res
                 })
                 .catch_unwind(),
                 abort_registration,
             )
             .await;
-            Deps::cleanup(&mut actor_rt, spawn_type).await;
-            Self::handle_run_res::<A, Sup, H>(res, &mut actor_rt, actor).await
+            Self::handle_run_res(res, &mut cx, actor).await
         });
         self.join_handles.push(child_task);
         handle
     }
 
-    async fn common_init_and_spawn<A, Sup, H, Deps>(
+    async fn common_init_and_spawn<A>(
         &mut self,
+        cx: A::Context,
         actor: A,
-        supervisor_handle: H,
+        abort_reg: AbortRegistration,
         spawn_type: SpawnType,
     ) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
-        H: 'static + Send,
-        Sup: 'static + MaybeSupervisor<A, H>,
-        Deps: 'static + Dependencies + Clone + Send + Sync,
     {
-        let init = self
-            .common_init::<_, Sup, H, Deps>(actor, supervisor_handle, spawn_type)
-            .await?;
+        let init = self.common_init(cx, actor, abort_reg, spawn_type).await?;
         Ok(init.spawn(self).await)
     }
 
-    pub(crate) async fn handle_init_res<A, H>(
-        res: std::thread::Result<Result<(), ActorError>>,
-        child_scope: &mut ActorContext<A, H>,
-    ) -> anyhow::Result<()>
+    pub(crate) async fn handle_init_res<A>(
+        res: std::thread::Result<Result<A::Data, ActorError>>,
+        cx: &mut dyn ActorContext<A>,
+    ) -> anyhow::Result<A::Data>
     where
         A: Actor,
     {
         match res {
             Ok(res) => match res {
-                Ok(_) => Ok(()),
+                Ok(d) => Ok(d),
                 Err(e) => {
-                    child_scope.abort().await;
-                    child_scope.join().await;
+                    cx.abort().await;
+                    cx.join().await;
                     anyhow::bail!(e)
                 }
             },
             Err(e) => {
-                child_scope.abort().await;
-                child_scope.join().await;
+                cx.abort().await;
+                cx.join().await;
                 std::panic::resume_unwind(e);
             }
         }
     }
 
-    pub(crate) async fn handle_run_res<A, Sup, H>(
+    pub(crate) async fn handle_run_res<A>(
         res: Result<std::thread::Result<Result<(), ActorError>>, Aborted>,
-        child_scope: &mut ActorContext<A, H>,
+        cx: &mut dyn ActorContext<A>,
         actor: A,
     ) -> anyhow::Result<()>
     where
         A: 'static + Actor + Send + Sync,
-        Sup: MaybeSupervisor<A, H>,
     {
-        let service = child_scope.service().await;
-        child_scope.abort().await;
-        child_scope.join().await;
+        let service = cx.service().await;
+        cx.abort().await;
+        cx.join().await;
         match res {
             Ok(res) => match res {
                 Ok(res) => match res {
-                    Ok(_) => Sup::send_report(
-                        child_scope.supervisor_handle(),
-                        Ok(SuccessReport::new(actor.into(), service)),
-                    ),
-
+                    Ok(_) => cx.report_exit(SuccessReport::new(actor, service)).await,
                     Err(e) => {
                         log::error!("{} exited with error: {}", actor.name(), e);
-                        Sup::send_report(
-                            child_scope.supervisor_handle(),
-                            Err(ErrorReport::new(actor.into(), service, e)),
-                        )
-                        .map_err(|e| anyhow::anyhow!(e))
+                        cx.report_exit(ErrorReport::new(actor, service, e)).await
                     }
                 },
                 Err(e) => {
-                    Sup::send_report(
-                        child_scope.supervisor_handle(),
-                        Err(ErrorReport::new(
-                            actor.into(),
-                            service,
-                            anyhow::anyhow!("Actor panicked!").into(),
-                        )),
-                    )
+                    cx.report_exit(ErrorReport::new(
+                        actor,
+                        service,
+                        anyhow::anyhow!("Actor panicked!").into(),
+                    ))
+                    .await
                     .ok();
                     std::panic::resume_unwind(e);
                 }
             },
-            Err(_) => Sup::send_report(
-                child_scope.supervisor_handle(),
-                Ok(SuccessReport::new(actor.into(), service)),
-            )
-            .map_err(|e| anyhow::anyhow!("Aborted!")),
+            Err(_) => cx
+                .report_exit(SuccessReport::new(actor, service))
+                .await
+                .map_err(|_| anyhow::anyhow!("Aborted!")),
         }
     }
 
@@ -819,41 +870,54 @@ impl RuntimeScope {
     pub async fn new_pool_with<P: ActorPool, Sup, H, F>(&mut self, supervisor_handle: H, f: F) -> anyhow::Result<()>
     where
         P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
         for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, Sup, H>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
-        let pool = Pool::<P>::default();
-        self.add_data(pool.clone()).await;
-        let mut scoped_pool = ScopedActorPool {
-            scope: self,
-            pool,
-            supervisor_handle,
-            initialized: Default::default(),
-        };
-        f(&mut scoped_pool).await
+        f(&mut self.new_pool(supervisor_handle).await).await
     }
 
     /// Spawn a new pool of actors of a given type with some metric
     pub async fn spawn_pool_with<P: ActorPool, Sup, H, F>(&mut self, supervisor_handle: H, f: F) -> anyhow::Result<()>
     where
         P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
         for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, Sup, H>) -> BoxFuture<'b, anyhow::Result<()>>,
     {
         f(&mut self.spawn_pool(supervisor_handle).await).await
     }
 
     /// Spawn a new pool of actors of a given type with some metric
+    pub async fn new_pool<P: ActorPool, Sup, H>(&mut self, supervisor_handle: H) -> ScopedActorPool<'_, P, Sup, H>
+    where
+        P: 'static + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
+    {
+        let pool = Pool::<P>::default();
+        self.add_data(pool.clone()).await;
+
+        let scoped_pool = ScopedActorPool {
+            scope: self,
+            pool,
+            supervisor_handle,
+            initialized: Default::default(),
+            _sup: PhantomData,
+        };
+        scoped_pool
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
     pub async fn spawn_pool<P: ActorPool, Sup, H>(&mut self, supervisor_handle: H) -> ScopedActorPool<'_, P, Sup, H>
     where
         P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
     {
         let pool = if let Some(pool) = self.pool::<P>().await {
             pool
@@ -867,6 +931,7 @@ impl RuntimeScope {
             pool,
             supervisor_handle,
             initialized: Default::default(),
+            _sup: PhantomData,
         };
         scoped_pool
     }
@@ -876,20 +941,28 @@ impl RuntimeScope {
         &mut self,
         supervisor_handle: H,
         actor: P::Actor,
-    ) -> Result<Initialized<Act<P::Actor>, P::Actor, Sup, H>, InitError<P::Actor>>
+    ) -> Result<Initialized<P::Actor>, InitError<P::Actor>>
     where
         P: 'static + BasicActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
     {
-        let pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
-        let supervisor_handle = pool.supervisor_handle.clone();
-        let init = pool
-            .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .create_context(&actor, Some(supervisor_handle.clone()), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        let pool = self.spawn_pool::<P, Sup, _>(supervisor_handle.clone()).await;
+        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(handle).await;
         Ok(init)
     }
@@ -902,9 +975,11 @@ impl RuntimeScope {
     ) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         P: 'static + BasicActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
     {
         let mut pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
         pool.spawn(actor).await
@@ -916,20 +991,28 @@ impl RuntimeScope {
         supervisor_handle: H,
         key: P::Key,
         actor: P::Actor,
-    ) -> Result<Initialized<Act<P::Actor>, P::Actor, Sup, H>, InitError<P::Actor>>
+    ) -> Result<Initialized<P::Actor>, InitError<P::Actor>>
     where
         P: 'static + KeyedActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
     {
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .create_context(&actor, Some(supervisor_handle.clone()), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
         let pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
-        let supervisor_handle = pool.supervisor_handle.clone();
-        let init = pool
-            .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
+        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(key, handle).await;
         Ok(init)
     }
@@ -943,9 +1026,11 @@ impl RuntimeScope {
     ) -> Result<Act<P::Actor>, InitError<P::Actor>>
     where
         P: 'static + KeyedActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        H: 'static + Clone + Send,
-        Sup: 'static + MaybeSupervisor<P::Actor, H>,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+        H: 'static + Clone + EnvelopeSender<Sup>,
+        Sup: 'static + Supervisor<P::Actor>,
     {
         let mut pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
         pool.spawn_keyed(key, actor).await
@@ -954,7 +1039,7 @@ impl RuntimeScope {
 
 /// The possible spawn types for actors
 #[allow(missing_docs)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SpawnType {
     Actor,
     System,
@@ -962,36 +1047,31 @@ pub enum SpawnType {
 }
 
 /// Data used to spawn an actor after initializing it
-pub struct InitData<Deps, A, Sup, H>
+#[derive(Debug)]
+pub struct InitData<A>
 where
     A: Actor,
 {
     actor: A,
-    actor_rt: ActorContext<A, H>,
+    data: A::Data,
+    cx: A::Context,
     abort_reg: AbortRegistration,
     spawn_type: SpawnType,
-    _marker: PhantomData<fn(Deps, Sup) -> (Deps, Sup)>,
 }
 
 /// A handle to an initialized actor. If unused, this will cleanup and abort the scope when dropped!
 #[must_use = "An unused, initialized actor may cause unintended behavior!"]
-pub struct Initialized<Deps, A, Sup, H>
+#[derive(Debug)]
+pub struct Initialized<A>
 where
     A: 'static + Actor + Send,
-    H: 'static + Send,
-    Deps: 'static + Dependencies + Clone + Send + Sync,
-    Sup: 'static,
 {
-    data: Option<InitData<Deps, A, Sup, H>>,
+    data: Option<InitData<A>>,
 }
 
-impl<Deps, A, Sup, H> Initialized<Deps, A, Sup, H>
+impl<A> Initialized<A>
 where
     A: 'static + Actor + Send + Sync,
-    Deps: 'static + Dependencies + Clone + Send + Sync,
-    H: 'static + Send,
-    Sup: MaybeSupervisor<A, H>,
-    Sup: 'static,
 {
     /// Spawn the initialized actor with the given scope.
     /// This must be the same scope as the one used to init the actor!
@@ -1000,72 +1080,292 @@ where
     }
 }
 
-impl<Deps, A, Sup, H> From<InitData<Deps, A, Sup, H>> for Initialized<Deps, A, Sup, H>
+impl<A> From<InitData<A>> for Initialized<A>
 where
     A: 'static + Actor + Send,
-    Deps: 'static + Dependencies + Clone + Send + Sync,
-    Sup: 'static,
-    H: 'static + Send,
 {
-    fn from(data: InitData<Deps, A, Sup, H>) -> Self {
+    fn from(data: InitData<A>) -> Self {
         Self { data: Some(data) }
     }
 }
 
-impl<Deps, A, Sup, H> Drop for Initialized<Deps, A, Sup, H>
+impl<A> Drop for Initialized<A>
 where
     A: 'static + Actor + Send,
-    H: 'static + Send,
-    Deps: 'static + Dependencies + Clone + Send + Sync,
-    Sup: 'static,
 {
     fn drop(&mut self) {
         if let Some(mut data) = std::mem::take(&mut self.data) {
             tokio::spawn(async move {
-                Deps::cleanup(&mut data.actor_rt, data.spawn_type).await;
-                data.actor_rt.abort().await;
+                data.cx.abort().await;
             });
         }
     }
 }
 
-pub trait MaybeSupervisor<A, H> {
-    fn send_status_change(handle: &H, status_change: StatusChange<A>) -> anyhow::Result<()> {
-        Ok(())
-    }
-    fn send_report(handle: &H, report: Result<SuccessReport<A>, ErrorReport<A>>) -> anyhow::Result<()> {
-        Ok(())
-    }
-}
-impl<A, Sup, H> MaybeSupervisor<A, H> for Sup
+/// An Actor's context
+#[async_trait]
+pub trait ActorContext<A: Actor>: std::fmt::Debug + Send
 where
-    Sup: 'static + Actor + HandleEvent<StatusChange<A>> + HandleEvent<Result<SuccessReport<A>, ErrorReport<A>>>,
-    H: Sender<Envelope<Sup>>,
-    A: 'static + Send + Sync,
+    Self: DerefMut<Target = RuntimeScope>,
 {
-    fn send_status_change(handle: &H, status_change: StatusChange<A>) -> anyhow::Result<()> {
-        handle.send(Box::new(status_change))
+    /// Initialize a new actor with a supervisor handle
+    async fn init_actor<OtherA>(&mut self, actor: OtherA) -> Result<Initialized<OtherA>, InitError<OtherA>>
+    where
+        OtherA: 'static + Actor + Send + Sync,
+        OtherA::Context: TryFrom<AnyContext<OtherA, A, Act<A>>>,
+        <OtherA::Context as TryFrom<AnyContext<OtherA, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        A: 'static + Supervisor<OtherA> + Send,
+        Self: Sized,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().init_actor(actor, handle).await
     }
 
-    fn send_report(handle: &H, report: Result<SuccessReport<A>, ErrorReport<A>>) -> anyhow::Result<()> {
-        handle.send(Box::new(report))
+    /// Spawn a new actor with a supervisor handle
+    async fn spawn_actor<OtherA>(&mut self, actor: OtherA) -> Result<Act<OtherA>, InitError<OtherA>>
+    where
+        OtherA: 'static + Actor + Send + Sync,
+        OtherA::Context: TryFrom<AnyContext<OtherA, A, Act<A>>>,
+        <OtherA::Context as TryFrom<AnyContext<OtherA, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<OtherA> + Send,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().spawn_actor::<_, A, _>(actor, handle).await
     }
+
+    /// Spawn a new system with a supervisor handle
+    async fn init_system<OtherA>(
+        &mut self,
+        actor: OtherA,
+        state: OtherA::State,
+    ) -> Result<Initialized<OtherA>, InitError<OtherA>>
+    where
+        OtherA: 'static + System + Send + Sync,
+        OtherA::Context: TryFrom<AnyContext<OtherA, A, Act<A>>>,
+        <OtherA::Context as TryFrom<AnyContext<OtherA, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        A: 'static + Supervisor<OtherA> + Send,
+        Self: Sized,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().init_system(actor, state, handle).await
+    }
+
+    /// Spawn a new system with a supervisor handle
+    async fn spawn_system<OtherA>(
+        &mut self,
+        actor: OtherA,
+        state: OtherA::State,
+    ) -> Result<Act<OtherA>, InitError<OtherA>>
+    where
+        OtherA: 'static + System + Send + Sync,
+        OtherA::Context: TryFrom<AnyContext<OtherA, A, Act<A>>>,
+        <OtherA::Context as TryFrom<AnyContext<OtherA, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<OtherA>,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().spawn_system::<_, A, _>(actor, state, handle).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    async fn new_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
+    where
+        P: 'static + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        A: 'static + Supervisor<P::Actor> + Send,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, A, Act<A>>) -> BoxFuture<'b, anyhow::Result<()>>,
+        Self: Sized,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().new_pool_with::<P, A, _, F>(handle, f).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    async fn spawn_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
+    where
+        P: 'static + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        A: 'static + Supervisor<P::Actor> + Send,
+        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, A, Act<A>>) -> BoxFuture<'b, anyhow::Result<()>>,
+        Self: Sized,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().spawn_pool_with::<P, A, _, F>(handle, f).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    async fn new_pool<P: ActorPool>(&mut self) -> ScopedActorPool<'_, P, A, Act<A>>
+    where
+        A: 'static + Supervisor<P::Actor> + Send,
+        P: 'static + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        Self: Sized,
+        A: Supervisor<P::Actor>,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().new_pool::<P, A, _>(handle).await
+    }
+
+    /// Spawn a new pool of actors of a given type with some metric
+    async fn spawn_pool<P: ActorPool>(&mut self) -> ScopedActorPool<'_, P, A, Act<A>>
+    where
+        A: 'static + Supervisor<P::Actor> + Send,
+        P: 'static + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        Self: Sized,
+        A: Supervisor<P::Actor>,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().spawn_pool::<P, A, _>(handle).await
+    }
+
+    /// Initialize an actor into a pool
+    async fn init_into_pool<P: ActorPool>(
+        &mut self,
+        actor: P::Actor,
+    ) -> Result<Initialized<P::Actor>, InitError<P::Actor>>
+    where
+        P: 'static + BasicActorPool + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, A, Act<A>>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<P::Actor> + Send,
+    {
+        let supervisor_handle = self.handle().clone();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .create_context(&actor, Some(supervisor_handle.clone()), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        let pool = self.spawn_pool::<P>().await;
+        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle().clone();
+        pool.pool.push(handle).await;
+        Ok(init)
+    }
+
+    /// Spawn an actor into a pool
+    async fn spawn_into_pool<P: ActorPool>(&mut self, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
+    where
+        P: 'static + BasicActorPool + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, A, Act<A>>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<P::Actor>,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut().spawn_into_pool::<P, A, _>(handle, actor).await
+    }
+
+    /// Initialize an actor into a pool
+    async fn init_into_pool_keyed<P: ActorPool>(
+        &mut self,
+        key: P::Key,
+        actor: P::Actor,
+    ) -> Result<Initialized<P::Actor>, InitError<P::Actor>>
+    where
+        P: 'static + KeyedActorPool + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, A, Act<A>>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<P::Actor> + Send,
+    {
+        let supervisor_handle = self.handle().clone();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .create_context(&actor, Some(supervisor_handle.clone()), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        let pool = self.spawn_pool::<P>().await;
+        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle().clone();
+        pool.pool.push(key, handle).await;
+        Ok(init)
+    }
+
+    /// Spawn an actor into a keyed pool
+    async fn spawn_into_pool_keyed<P: ActorPool>(
+        &mut self,
+        key: P::Key,
+        actor: P::Actor,
+    ) -> Result<Act<P::Actor>, InitError<P::Actor>>
+    where
+        P: 'static + KeyedActorPool + Send + Sync,
+        P::Actor: Actor + Send + Sync,
+        <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, A, Act<A>>>,
+        <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, A, Act<A>>>>::Error: Into<anyhow::Error>,
+        Self: Sized,
+        A: 'static + Supervisor<P::Actor>,
+    {
+        let handle = self.handle().clone();
+        self.deref_mut()
+            .spawn_into_pool_keyed::<P, A, _>(handle, key, actor)
+            .await
+    }
+
+    /// Get this actors's handle
+    fn handle(&self) -> &Act<A>
+    where
+        Act<A>: Clone;
+
+    /// Get the inbox
+    fn inbox(&mut self) -> &mut dyn Receiver<Envelope<A>>;
+
+    /// Shutdown the actor
+    fn shutdown(&self)
+    where
+        A: 'static,
+    {
+        self.handle().shutdown();
+    }
+
+    /// Get the runtime's service
+    async fn service(&mut self) -> Service;
+
+    /// Update this scope's service status
+    async fn update_status<S: Status + Send>(&mut self, status: S) -> anyhow::Result<()>
+    where
+        Self: Sized;
+
+    /// Update this scope's service status
+    async fn report_exit(&mut self, report: Report<A>) -> anyhow::Result<()>;
 }
-impl<A> MaybeSupervisor<A, ()> for () {}
 
-pub struct ActorContext<A, H>
+pub trait Supervisor<A: Debug + Send + Sync>: HandleEvent<StatusChange<A>> + HandleEvent<Report<A>> {}
+impl<Sup, A: Debug + Send + Sync> Supervisor<A> for Sup where Sup: HandleEvent<StatusChange<A>> + HandleEvent<Report<A>> {}
+
+/// A supervised context
+#[derive(Debug)]
+pub struct SupervisedContext<A, Sup, H>
 where
-    A: Actor,
+    A: 'static + Actor,
 {
     pub(crate) scope: RuntimeScope,
     pub(crate) handle: Act<A>,
     pub(crate) receiver: Box<dyn Receiver<Envelope<A>>>,
     pub(crate) supervisor_handle: H,
+    _sup: PhantomData<fn(Sup) -> Sup>,
 }
 
-impl<A, H> ActorContext<A, H>
+impl<A, Sup, H> SupervisedContext<A, Sup, H>
 where
     A: 'static + Actor + Send + Sync,
+    H: 'static + EnvelopeSender<Sup>,
+    Sup: 'static + Actor,
 {
     pub(crate) async fn new<P, S, O>(
         registry: Box<dyn RegistryAccess + Send + Sync>,
@@ -1079,10 +1379,9 @@ where
         P: Into<Option<ScopeId>> + Send,
         S: Into<String>,
         O: Into<Option<S>>,
-        H: 'static,
     {
         let (sender, receiver) = UnboundedTokioChannel::<Envelope<A>>::new(actor).await?;
-        let shutdown_handle = ShutdownHandle::default();
+        let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let scope = RuntimeScope::new_boxed(
             registry,
             parent_scope_id,
@@ -1096,220 +1395,79 @@ where
             scope,
             receiver: Box::new(receiver),
             supervisor_handle,
+            _sup: PhantomData,
         })
     }
+}
 
-    /// Initialize a new actor with a supervisor handle
-    pub async fn init_actor<OtherA>(
-        &mut self,
-        actor: OtherA,
-    ) -> Result<Initialized<Act<OtherA>, OtherA, A, Act<A>>, InitError<OtherA>>
-    where
-        OtherA: 'static + Actor + Send + Sync,
-        A: MaybeSupervisor<OtherA, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.init_actor(actor, handle).await
+impl<A, Sup, H> SupervisedContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    /// Get this actor's supervisor handle
+    pub fn supervisor_handle(&self) -> &H {
+        &self.supervisor_handle
     }
+}
 
-    /// Spawn a new actor with a supervisor handle
-    pub async fn spawn_actor<OtherA>(&mut self, actor: OtherA) -> Result<Act<OtherA>, InitError<OtherA>>
-    where
-        OtherA: 'static + Actor + Send + Sync,
-        A: MaybeSupervisor<OtherA, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_actor::<_, A, _>(actor, handle).await
+impl<A, Sup, H> TryFrom<AnyContext<A, Sup, H>> for SupervisedContext<A, Sup, H>
+where
+    A: 'static + Actor,
+{
+    type Error = anyhow::Error;
+
+    fn try_from(value: AnyContext<A, Sup, H>) -> Result<Self, Self::Error> {
+        match value {
+            AnyContext::Supervised(s) => Ok(s),
+            AnyContext::Unsupervised(_) => anyhow::bail!("Cannot convert Unsupervised type to Supervised!"),
+        }
     }
+}
 
-    /// Spawn a new system with a supervisor handle
-    pub async fn init_system<OtherA>(
-        &mut self,
-        actor: OtherA,
-        state: OtherA::State,
-    ) -> Result<Initialized<Sys<OtherA>, OtherA, A, Act<A>>, InitError<OtherA>>
-    where
-        OtherA: 'static + System + Send + Sync,
-        A: MaybeSupervisor<OtherA, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.init_system(actor, state, handle).await
-    }
-
-    /// Spawn a new system with a supervisor handle
-    pub async fn spawn_system<OtherA>(
-        &mut self,
-        actor: OtherA,
-        state: OtherA::State,
-    ) -> Result<Act<OtherA>, InitError<OtherA>>
-    where
-        OtherA: 'static + System + Send + Sync,
-        A: MaybeSupervisor<OtherA, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_system::<_, A, _>(actor, state, handle).await
-    }
-
-    /// Spawn a new pool of actors of a given type with some metric
-    pub async fn new_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
-    where
-        P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        A: 'static + MaybeSupervisor<P::Actor, Act<A>>,
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, A, Act<A>>) -> BoxFuture<'b, anyhow::Result<()>>,
-    {
-        let handle = self.handle();
-        self.scope.new_pool_with::<P, A, _, F>(handle, f).await
-    }
-
-    /// Spawn a new pool of actors of a given type with some metric
-    pub async fn spawn_pool_with<P: ActorPool, F>(&mut self, f: F) -> anyhow::Result<()>
-    where
-        P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        A: 'static + MaybeSupervisor<P::Actor, Act<A>>,
-
-        for<'b> F: 'static + Send + FnOnce(&'b mut ScopedActorPool<P, A, Act<A>>) -> BoxFuture<'b, anyhow::Result<()>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_pool_with::<P, A, _, F>(handle, f).await
-    }
-
-    /// Spawn a new pool of actors of a given type with some metric
-    pub async fn spawn_pool<P: ActorPool>(&mut self) -> ScopedActorPool<'_, P, A, Act<A>>
-    where
-        A: 'static,
-        P: 'static + Send + Sync,
-        P::Actor: Send + Sync,
-        A: MaybeSupervisor<P::Actor, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_pool::<P, A, _>(handle).await
-    }
-
-    /// Initialize an actor into a pool
-    pub async fn init_into_pool<P: ActorPool>(
-        &mut self,
-        actor: P::Actor,
-    ) -> Result<Initialized<Act<P::Actor>, P::Actor, A, Act<A>>, InitError<P::Actor>>
-    where
-        P: 'static + BasicActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        A: MaybeSupervisor<P::Actor, Act<A>>,
-    {
-        let pool = self.spawn_pool::<P>().await;
-        let supervisor_handle = pool.supervisor_handle.clone();
-        let init = pool
-            .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
-        pool.pool.push(handle).await;
-        Ok(init)
-    }
-
-    /// Spawn an actor into a pool
-    pub async fn spawn_into_pool<P: ActorPool>(&mut self, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
-    where
-        P: 'static + BasicActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        A: MaybeSupervisor<P::Actor, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_into_pool::<P, A, _>(handle, actor).await
-    }
-
-    /// Initialize an actor into a pool
-    pub async fn init_into_pool_keyed<P: ActorPool>(
-        &mut self,
-        key: P::Key,
-        actor: P::Actor,
-    ) -> Result<Initialized<Act<P::Actor>, P::Actor, A, Act<A>>, InitError<P::Actor>>
-    where
-        P: 'static + KeyedActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        A: MaybeSupervisor<P::Actor, Act<A>>,
-    {
-        let pool = self.spawn_pool::<P>().await;
-        let supervisor_handle = pool.supervisor_handle.clone();
-        let init = pool
-            .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
-        pool.pool.push(key, handle).await;
-        Ok(init)
-    }
-
-    /// Spawn an actor into a keyed pool
-    pub async fn spawn_into_pool_keyed<P: ActorPool>(
-        &mut self,
-        key: P::Key,
-        actor: P::Actor,
-    ) -> Result<Act<P::Actor>, InitError<P::Actor>>
-    where
-        P: 'static + KeyedActorPool + Send + Sync,
-        P::Actor: Send + Sync,
-        A: MaybeSupervisor<P::Actor, Act<A>>,
-    {
-        let handle = self.handle();
-        self.scope.spawn_into_pool_keyed::<P, A, _>(handle, key, actor).await
-    }
-
-    // /// Get the next event from the event receiver
-    // pub async fn next_event(&mut self) -> Option<A::Event> {
-    //     self.receiver.next().await
-    // }
-
+#[async_trait]
+impl<A, Sup, H: Debug> ActorContext<A> for SupervisedContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+    H: 'static + EnvelopeSender<Sup>,
+    Sup: 'static + Supervisor<A>,
+{
     /// Get this actors's handle
-    pub fn handle(&self) -> Act<A>
+    fn handle(&self) -> &Act<A>
     where
         Act<A>: Clone,
     {
-        self.handle.clone()
-    }
-
-    fn dependencies(&self) -> &<Self as DependsOn>::Dependencies
-    where
-        Self: DependsOn,
-    {
-        todo!()
-    }
-
-    /// Get this actors's shutdown handle
-    pub fn shutdown_handle(&self) -> ShutdownHandle {
-        self.handle.shutdown_handle.clone()
+        &self.handle
     }
 
     /// Get the runtime's service
-    pub async fn service(&mut self) -> Service {
+    async fn service(&mut self) -> Service {
         self.scope.service().await
     }
 
-    /// Get this actor's supervisor handle
-    pub fn supervisor_handle(&mut self) -> &mut H {
-        &mut self.supervisor_handle
-    }
-
     /// Update this scope's service status
-    pub async fn update_status<S: Status, Sup>(&mut self, status: S) -> anyhow::Result<()>
-    where
-        H: Sender<Envelope<Sup>>,
-        Sup: 'static + HandleEvent<StatusChange<A>>,
-    {
+    async fn update_status<S: Status + Send>(&mut self, status: S) -> anyhow::Result<()> {
         if !self.supervisor_handle.is_closed() {
             let mut service = self.service().await;
             let prev_status = service.status().clone();
             service.update_status(CustomStatus(status.clone()));
             self.supervisor_handle
-                .send(Box::new(StatusChange::new(prev_status, service)))
+                .send(StatusChange::<A>::new(prev_status, service))
                 .ok();
         }
         self.scope.update_status(status).await
     }
+
+    fn inbox(&mut self) -> &mut dyn Receiver<Envelope<A>> {
+        &mut self.receiver
+    }
+
+    async fn report_exit(&mut self, report: Report<A>) -> anyhow::Result<()> {
+        self.supervisor_handle.send(report).ok();
+        Ok(())
+    }
 }
 
-impl<A, H> Deref for ActorContext<A, H>
+impl<A, Sup, H> Deref for SupervisedContext<A, Sup, H>
 where
     A: Actor,
 {
@@ -1320,7 +1478,7 @@ where
     }
 }
 
-impl<A, H> DerefMut for ActorContext<A, H>
+impl<A, Sup, H> DerefMut for SupervisedContext<A, Sup, H>
 where
     A: Actor,
 {
@@ -1328,26 +1486,310 @@ where
         &mut self.scope
     }
 }
+
+#[derive(Debug)]
+pub struct UnsupervisedContext<A>
+where
+    A: 'static + Actor,
+{
+    pub(crate) scope: RuntimeScope,
+    pub(crate) handle: Act<A>,
+    pub(crate) receiver: Box<dyn Receiver<Envelope<A>>>,
+}
+
+impl<A> UnsupervisedContext<A>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    pub(crate) async fn new<P, S, O>(
+        registry: Box<dyn RegistryAccess + Send + Sync>,
+        actor: &A,
+        parent_scope_id: P,
+        name: O,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<Self>
+    where
+        P: Into<Option<ScopeId>> + Send,
+        S: Into<String>,
+        O: Into<Option<S>>,
+    {
+        let (sender, receiver) = UnboundedTokioChannel::<Envelope<A>>::new(actor).await?;
+        let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
+        let scope = RuntimeScope::new_boxed(
+            registry,
+            parent_scope_id,
+            name,
+            Some(shutdown_handle.clone()),
+            Some(abort_handle.clone()),
+        )
+        .await;
+        Ok(Self {
+            handle: Act::new(scope.scope_id, Box::new(sender), shutdown_handle, abort_handle),
+            scope,
+            receiver: Box::new(receiver),
+        })
+    }
+}
+
+impl<A, Sup, H> From<AnyContext<A, Sup, H>> for UnsupervisedContext<A>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    fn from(value: AnyContext<A, Sup, H>) -> Self {
+        match value {
+            AnyContext::Supervised(s) => s.into(),
+            AnyContext::Unsupervised(u) => u,
+        }
+    }
+}
+
+impl<A, Sup, H> From<SupervisedContext<A, Sup, H>> for UnsupervisedContext<A>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    fn from(s: SupervisedContext<A, Sup, H>) -> Self {
+        UnsupervisedContext {
+            scope: s.scope,
+            handle: s.handle,
+            receiver: s.receiver,
+        }
+    }
+}
+
+#[async_trait]
+impl<A> ActorContext<A> for UnsupervisedContext<A>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    /// Get this actors's handle
+    fn handle(&self) -> &Act<A>
+    where
+        Act<A>: Clone,
+    {
+        &self.handle
+    }
+
+    /// Get the runtime's service
+    async fn service(&mut self) -> Service {
+        self.scope.service().await
+    }
+
+    /// Update this scope's service status
+    async fn update_status<S: Status + Send>(&mut self, status: S) -> anyhow::Result<()> {
+        self.scope.update_status(status).await
+    }
+
+    fn inbox(&mut self) -> &mut dyn Receiver<Envelope<A>> {
+        &mut self.receiver
+    }
+
+    async fn report_exit(&mut self, _report: Report<A>) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl<A> Deref for UnsupervisedContext<A>
+where
+    A: Actor,
+{
+    type Target = RuntimeScope;
+
+    fn deref(&self) -> &Self::Target {
+        &self.scope
+    }
+}
+
+impl<A> DerefMut for UnsupervisedContext<A>
+where
+    A: Actor,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.scope
+    }
+}
+
+#[derive(Debug)]
+pub enum AnyContext<A, Sup, H>
+where
+    A: 'static + Actor,
+{
+    Supervised(SupervisedContext<A, Sup, H>),
+    Unsupervised(UnsupervisedContext<A>),
+}
+
+impl<A, Sup, H> AnyContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+    H: 'static,
+    Sup: 'static,
+{
+    pub(crate) async fn new<P, S, O>(
+        registry: Box<dyn RegistryAccess + Send + Sync>,
+        actor: &A,
+        parent_scope_id: P,
+        name: O,
+        supervisor_handle: Option<H>,
+        abort_handle: AbortHandle,
+    ) -> anyhow::Result<Self>
+    where
+        P: Into<Option<ScopeId>> + Send,
+        S: Into<String>,
+        O: Into<Option<S>>,
+    {
+        let (sender, receiver) = UnboundedTokioChannel::<Envelope<A>>::new(actor).await?;
+        let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
+        let scope = RuntimeScope::new_boxed(
+            registry,
+            parent_scope_id,
+            name,
+            Some(shutdown_handle.clone()),
+            Some(abort_handle.clone()),
+        )
+        .await;
+        Ok(match supervisor_handle {
+            Some(supervisor_handle) => AnyContext::Supervised(SupervisedContext {
+                handle: Act::new(scope.scope_id, Box::new(sender), shutdown_handle, abort_handle),
+                scope,
+                receiver: Box::new(receiver),
+                supervisor_handle,
+                _sup: PhantomData,
+            }),
+            None => AnyContext::Unsupervised(UnsupervisedContext {
+                handle: Act::new(scope.scope_id, Box::new(sender), shutdown_handle, abort_handle),
+                scope,
+                receiver: Box::new(receiver),
+            }),
+        })
+    }
+
+    /// Get this actor's supervisor handle
+    pub fn supervisor_handle(&self) -> Option<&H> {
+        match self {
+            AnyContext::Supervised(s) => Some(s.supervisor_handle()),
+            AnyContext::Unsupervised(_) => None,
+        }
+    }
+}
+
+#[async_trait]
+impl<A, Sup, H: Debug> ActorContext<A> for AnyContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+    H: 'static + EnvelopeSender<Sup>,
+    Sup: 'static + Supervisor<A>,
+{
+    /// Get this actors's handle
+    fn handle(&self) -> &Act<A>
+    where
+        Act<A>: Clone,
+    {
+        match self {
+            AnyContext::Supervised(s) => s.handle(),
+            AnyContext::Unsupervised(u) => u.handle(),
+        }
+    }
+
+    /// Get the runtime's service
+    async fn service(&mut self) -> Service {
+        match self {
+            AnyContext::Supervised(s) => s.service(),
+            AnyContext::Unsupervised(u) => u.service(),
+        }
+        .await
+    }
+
+    /// Update this scope's service status
+    async fn update_status<S: Status + Send>(&mut self, status: S) -> anyhow::Result<()> {
+        match self {
+            AnyContext::Supervised(s) => s.scope.update_status(status),
+            AnyContext::Unsupervised(u) => u.scope.update_status(status),
+        }
+        .await
+    }
+
+    fn inbox(&mut self) -> &mut dyn Receiver<Envelope<A>> {
+        match self {
+            AnyContext::Supervised(s) => s.inbox(),
+            AnyContext::Unsupervised(u) => u.inbox(),
+        }
+    }
+
+    async fn report_exit(&mut self, report: Report<A>) -> anyhow::Result<()> {
+        match self {
+            AnyContext::Supervised(s) => s.report_exit(report),
+            AnyContext::Unsupervised(u) => u.report_exit(report),
+        }
+        .await
+    }
+}
+
+impl<A, Sup, H> From<SupervisedContext<A, Sup, H>> for AnyContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    fn from(s: SupervisedContext<A, Sup, H>) -> Self {
+        AnyContext::Supervised(s)
+    }
+}
+
+impl<A, Sup, H> From<UnsupervisedContext<A>> for AnyContext<A, Sup, H>
+where
+    A: 'static + Actor + Send + Sync,
+{
+    fn from(u: UnsupervisedContext<A>) -> Self {
+        AnyContext::Unsupervised(u)
+    }
+}
+
+impl<A, Sup, H> Deref for AnyContext<A, Sup, H>
+where
+    A: Actor,
+{
+    type Target = RuntimeScope;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            AnyContext::Supervised(s) => s.deref(),
+            AnyContext::Unsupervised(u) => u.deref(),
+        }
+    }
+}
+
+impl<A, Sup, H> DerefMut for AnyContext<A, Sup, H>
+where
+    A: Actor,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            AnyContext::Supervised(s) => s.deref_mut(),
+            AnyContext::Unsupervised(u) => u.deref_mut(),
+        }
+    }
+}
 /// A scope for an actor pool, which only allows spawning of the specified actor
+#[derive(Debug)]
 pub struct ScopedActorPool<'a, P, Sup, H>
 where
     P: ActorPool,
-    P::Actor: 'static + Send + Sync,
-    H: 'static + Clone + Send,
-    Sup: 'static + MaybeSupervisor<P::Actor, H>,
+    P::Actor: 'static + Actor + Send + Sync,
+    H: 'static + EnvelopeSender<Sup> + Clone,
+    Sup: 'static + Supervisor<P::Actor>,
 {
     scope: &'a mut RuntimeScope,
     pool: Pool<P>,
     supervisor_handle: H,
-    initialized: Vec<Initialized<Act<P::Actor>, P::Actor, Sup, H>>,
+    initialized: Vec<Initialized<P::Actor>>,
+    _sup: PhantomData<fn(Sup) -> Sup>,
 }
 
 impl<'a, P, Sup, H> ScopedActorPool<'a, P, Sup, H>
 where
     P: BasicActorPool,
-    P::Actor: 'static + Send + Sync,
-    H: 'static + Clone + Send,
-    Sup: 'static + MaybeSupervisor<P::Actor, H>,
+    P::Actor: Actor + Send + Sync,
+    <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+    <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+    H: 'static + EnvelopeSender<Sup> + Clone,
+    Sup: 'static + Supervisor<P::Actor>,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn(&mut self, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
@@ -1355,9 +1797,20 @@ where
         P::Actor: 'static + Send + Sync,
     {
         let supervisor_handle = self.supervisor_handle.clone();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .scope
+            .create_context(&actor, Some(supervisor_handle), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
         let handle = self
             .scope
-            .common_init_and_spawn::<_, Sup, H, Act<P::Actor>>(actor, supervisor_handle, SpawnType::Pool)
+            .common_init_and_spawn(cx, actor, abort_reg, SpawnType::Pool)
             .await?;
         self.pool.push(handle.clone()).await;
         Ok(handle)
@@ -1366,12 +1819,20 @@ where
     /// Initialize actor for this pool
     pub async fn init(&mut self, actor: P::Actor) -> Result<(), InitError<P::Actor>> {
         let supervisor_handle = self.supervisor_handle.clone();
-        let init = self
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
             .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
-        self.pool.push(handle).await;
+            .create_context(&actor, Some(supervisor_handle), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        let init = self.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle();
+        self.pool.push(handle.clone()).await;
         self.initialized.push(init);
         Ok(())
     }
@@ -1380,9 +1841,11 @@ where
 impl<'a, P, Sup, H> ScopedActorPool<'a, P, Sup, H>
 where
     P: KeyedActorPool,
-    P::Actor: 'static + Send + Sync,
-    H: 'static + Clone + Send,
-    Sup: 'static + MaybeSupervisor<P::Actor, H>,
+    P::Actor: Actor + Send + Sync,
+    <P::Actor as Actor>::Context: TryFrom<AnyContext<P::Actor, Sup, H>>,
+    <<P::Actor as Actor>::Context as TryFrom<AnyContext<P::Actor, Sup, H>>>::Error: Into<anyhow::Error>,
+    H: 'static + EnvelopeSender<Sup> + Clone,
+    Sup: 'static + Supervisor<P::Actor>,
 {
     /// Spawn a new actor into this pool
     pub async fn spawn_keyed(&mut self, key: P::Key, actor: P::Actor) -> Result<Act<P::Actor>, InitError<P::Actor>>
@@ -1403,9 +1866,20 @@ where
                 .into());
         }
         let supervisor_handle = self.supervisor_handle.clone();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
+            .scope
+            .create_context(&actor, Some(supervisor_handle), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
         let handle = self
             .scope
-            .common_init_and_spawn::<_, Sup, H, Act<P::Actor>>(actor, supervisor_handle, SpawnType::Pool)
+            .common_init_and_spawn(cx, actor, abort_reg, SpawnType::Pool)
             .await?;
         self.pool.push(key, handle.clone()).await;
         Ok(handle)
@@ -1427,12 +1901,20 @@ where
                 .into());
         }
         let supervisor_handle = self.supervisor_handle.clone();
-        let init = self
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        let cx = match self
             .scope
-            .common_init(actor, supervisor_handle, SpawnType::Pool)
-            .await?;
-        let handle = init.data.as_ref().unwrap().actor_rt.handle();
-        self.pool.push(key, handle).await;
+            .create_context(&actor, Some(supervisor_handle), abort_handle)
+            .await
+        {
+            Ok(cx) => cx,
+            Err(e) => {
+                return Err((actor, e).into());
+            }
+        };
+        let init = self.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let handle = init.data.as_ref().unwrap().cx.handle();
+        self.pool.push(key, handle.clone()).await;
         self.initialized.push(init);
         Ok(())
     }
@@ -1441,9 +1923,9 @@ where
 impl<'a, P, Sup, H> ScopedActorPool<'a, P, Sup, H>
 where
     P: ActorPool,
-    P::Actor: 'static + Send + Sync,
-    H: 'static + Clone + Send,
-    Sup: 'static + MaybeSupervisor<P::Actor, H>,
+    P::Actor: 'static + Actor + Send + Sync,
+    H: 'static + EnvelopeSender<Sup> + Clone,
+    Sup: 'static + Supervisor<P::Actor>,
 {
     /// Finalize any initialized and unspawned actors in this pool by spawning them
     pub async fn spawn_all(&mut self) {

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 /// An actor pool which contains some number of handles
 #[async_trait]
-pub trait ActorPool: Default
+pub trait ActorPool: std::fmt::Debug + Default
 where
     Act<Self::Actor>: Clone,
 {
@@ -75,11 +75,19 @@ where
 
 #[cfg(feature = "rand_pool")]
 /// A pool which randomly returns a handle
-pub struct RandomPool<A: Actor> {
+pub struct RandomPool<A: 'static + Actor> {
     handles: RwLock<Vec<Act<A>>>,
 }
 
-impl<A: Actor> Default for RandomPool<A> {
+impl<A: 'static + Actor> std::fmt::Debug for RandomPool<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RandomPool")
+            .field("handles", &self.handles.try_read().ok())
+            .finish()
+    }
+}
+
+impl<A: 'static + Actor> Default for RandomPool<A> {
     fn default() -> Self {
         Self {
             handles: RwLock::new(Vec::new()),
@@ -117,7 +125,7 @@ where
         Self::Actor: HandleEvent<E>,
     {
         for handle in self.handles.read().await.iter().filter(|h| !h.is_closed()) {
-            handle.send(Box::new(event.clone()))?;
+            handle.send(event.clone())?;
         }
         Ok(())
     }
@@ -161,7 +169,7 @@ where
         } else {
             None
         } {
-            handle.send(Box::new(event))
+            handle.send(event)
         } else {
             anyhow::bail!("No handles to send to!");
         }
@@ -169,11 +177,20 @@ where
 }
 
 /// A pool which returns the least recently used handle
-pub struct LruPool<A: Actor> {
+pub struct LruPool<A: 'static + Actor> {
     inner: RwLock<LruInner<A>>,
 }
 
-struct LruInner<A: Actor> {
+impl<A: 'static + Actor> std::fmt::Debug for LruPool<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LruPool")
+            .field("inner", &self.inner.try_read().ok())
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct LruInner<A: 'static + Actor> {
     handles: Vec<Option<Act<A>>>,
     lru: LruCache<usize, usize>,
     id_pool: IdPool<usize>,
@@ -231,7 +248,7 @@ where
             .filter_map(Option::as_ref)
             .filter(|h| !h.is_closed())
         {
-            handle.send(Box::new(event.clone()))?;
+            handle.send(event.clone())?;
         }
         Ok(())
     }
@@ -280,7 +297,7 @@ where
         } else {
             None
         } {
-            handle.send(Box::new(event))
+            handle.send(event)
         } else {
             anyhow::bail!("No handles to send to!");
         }
@@ -306,11 +323,19 @@ impl<A: Actor> Default for LruInner<A> {
 }
 
 /// A keyed pool which stores handles in a HashMap
-pub struct MapPool<A: Actor, M: Hash + Clone> {
+pub struct MapPool<A: 'static + Actor, M: Hash + Clone> {
     map: RwLock<HashMap<M, Act<A>>>,
 }
 
-impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
+impl<A: 'static + Actor, M: Hash + Clone + std::fmt::Debug> std::fmt::Debug for MapPool<A, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MapPool")
+            .field("map", &self.map.try_read().ok())
+            .finish()
+    }
+}
+
+impl<A: 'static + Actor, M: Hash + Clone> Default for MapPool<A, M> {
     fn default() -> Self {
         Self {
             map: Default::default(),
@@ -319,7 +344,7 @@ impl<A: Actor, M: Hash + Clone> Default for MapPool<A, M> {
 }
 
 #[async_trait]
-impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq> ActorPool for MapPool<A, M>
+impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq + std::fmt::Debug> ActorPool for MapPool<A, M>
 where
     Act<A>: Clone,
 {
@@ -347,14 +372,15 @@ where
         Self::Actor: 'static + Send + Sync + HandleEvent<E>,
     {
         for handle in self.map.read().await.values().filter(|h| !h.is_closed()) {
-            handle.send(Box::new(event.clone()))?;
+            handle.send(event.clone())?;
         }
         Ok(())
     }
 }
 
 #[async_trait]
-impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq> KeyedActorPool for MapPool<A, M>
+impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq + std::fmt::Debug> KeyedActorPool
+    for MapPool<A, M>
 where
     Act<A>: Clone,
 {
@@ -389,7 +415,7 @@ where
         Self::Actor: 'static + Send + Sync + HandleEvent<E>,
     {
         if let Some(handle) = self.map.read().await.get(key) {
-            handle.send(Box::new(event))
+            handle.send(event)
         } else {
             anyhow::bail!("No handle for the given key!");
         }

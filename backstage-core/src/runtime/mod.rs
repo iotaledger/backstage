@@ -99,6 +99,7 @@ impl<T: 'static + Clone + Send + Sync> DepStatus<T> {
     }
 }
 
+#[derive(Debug)]
 pub enum RawDepStatus {
     /// The dependency is ready to be used
     Ready(Box<dyn CloneAny + Send + Sync>),
@@ -116,6 +117,7 @@ impl RawDepStatus {
 }
 
 /// A scope, which marks data as usable for a given task
+#[derive(Debug)]
 pub struct Scope {
     id: ScopeId,
     created_data: HashMap<TypeId, Arc<Box<dyn CloneAny + Send + Sync>>>,
@@ -233,6 +235,7 @@ dyn_clone::clone_trait_object!(RegistryAccess);
 
 /// The central registry that stores all data for the application.
 /// Data is accessable via scopes organized as a tree structure.
+#[derive(Debug)]
 pub struct Registry {
     scopes: HashMap<ScopeId, RwLock<Scope>>,
 }
@@ -479,7 +482,9 @@ impl Registry {
                     // Drop the current lock because we're going to aquire a write lock here
                     drop(scope);
                     let flag = match lock.write().await.dependencies.entry(data_type) {
-                        Entry::Occupied(o) => *unsafe { o.get().clone().downcast_unchecked() },
+                        Entry::Occupied(o) => match unsafe { o.get().downcast_ref_unchecked::<Dependency>() } {
+                            Dependency::Once(f) | Dependency::Linked(f) => f.clone(),
+                        },
                         Entry::Vacant(v) => {
                             let flag = DepSignal::default();
                             v.insert(Box::new(Dependency::Once(flag.clone())));
@@ -549,7 +554,7 @@ impl Registry {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct DepFlag {
     waker: AtomicWaker,
     set: AtomicBool,
@@ -575,7 +580,7 @@ impl DepFlag {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct DepSignal {
     flag: Arc<DepFlag>,
 }

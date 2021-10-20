@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::ScopeId;
-use crate::actor::{Actor, ActorPool, Envelope, Sender, ShutdownHandle, System};
+use crate::actor::{Actor, ActorPool, Envelope, EnvelopeSender, Sender, ShutdownHandle, System};
 use futures::future::AbortHandle;
 use std::{
     ops::{Deref, DerefMut},
@@ -16,7 +16,7 @@ pub trait DataWrapper<T> {
 }
 
 /// A shared resource
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Res<R>(pub R);
 
 impl<R: Deref> Deref for Res<R> {
@@ -123,16 +123,26 @@ impl<A: 'static + Actor> Clone for Act<A> {
     }
 }
 
+impl<A: 'static + Actor> std::fmt::Debug for Act<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(&format!("Act<{}>", std::any::type_name::<A>()))
+            .field("scope_id", &self.scope_id)
+            .finish()
+    }
+}
+
 impl<A: Actor> DataWrapper<Box<dyn Sender<Envelope<A>>>> for Act<A> {
     fn into_inner(self) -> Box<dyn Sender<Envelope<A>>> {
         self.sender
     }
 }
 
-#[async_trait::async_trait]
-impl<A: 'static + Actor> Sender<Envelope<A>> for Act<A> {
-    fn send(&self, event: Envelope<A>) -> anyhow::Result<()> {
-        self.sender.send(event)
+impl<A: 'static + Actor> EnvelopeSender<A> for Act<A> {
+    fn send<E: 'static + crate::actor::DynEvent<A> + Send + Sync>(&self, event: E) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        self.sender.send(Box::new(event))
     }
 
     fn is_closed(&self) -> bool {
@@ -140,8 +150,27 @@ impl<A: 'static + Actor> Sender<Envelope<A>> for Act<A> {
     }
 }
 
+impl<A: 'static + Actor> EnvelopeSender<A> for Option<&Act<A>> {
+    fn send<E: 'static + crate::actor::DynEvent<A> + Send + Sync>(&self, event: E) -> anyhow::Result<()>
+    where
+        Self: Sized,
+    {
+        match self {
+            Some(s) => s.sender.send(Box::new(event)),
+            None => Err(anyhow::anyhow!("Sender is None!")),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Some(s) => s.sender.is_closed(),
+            None => true,
+        }
+    }
+}
+
 /// A pool of actors which can be used as a dependency
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Pool<P: ActorPool>(pub Arc<P>)
 where
     Act<P::Actor>: Clone;

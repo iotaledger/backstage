@@ -20,7 +20,7 @@ pub trait Channel<C, E: 'static + Send + Sync> {
 }
 
 /// Defines half of a channel which sends events
-pub trait Sender<E: 'static + Send + Sync>: dyn_clone::DynClone + Send + Sync {
+pub trait Sender<E: 'static + Send + Sync>: Debug + dyn_clone::DynClone + Send + Sync {
     /// Send an event over the channel
     fn send(&self, event: E) -> anyhow::Result<()>;
 
@@ -29,14 +29,14 @@ pub trait Sender<E: 'static + Send + Sync>: dyn_clone::DynClone + Send + Sync {
 }
 dyn_clone::clone_trait_object!(<E> Sender<E> where E: 'static + Send + Sync);
 
-pub trait Receiver<E: 'static + Send + Sync>: Stream<Item = E> + Unpin + Send + Sync {}
-impl<T, E: 'static + Send + Sync> Receiver<E> for T where T: Stream<Item = E> + Unpin + Send + Sync {}
+pub trait Receiver<E: 'static + Send + Sync>: Stream<Item = E> + Unpin + Debug + Send + Sync {}
+impl<T, E: 'static + Send + Sync> Receiver<E> for T where T: Stream<Item = E> + Unpin + Debug + Send + Sync {}
 
 /// A tokio mpsc channel implementation
 pub struct UnboundedTokioChannel<E>(PhantomData<fn(E) -> E>);
 
 #[async_trait]
-impl<C: 'static + Send + Sync, E: 'static + Send + Sync> Channel<C, E> for UnboundedTokioChannel<E> {
+impl<C: 'static + Send + Sync, E: 'static + Debug + Send + Sync> Channel<C, E> for UnboundedTokioChannel<E> {
     type Sender = UnboundedTokioSender<E>;
     type Receiver = UnboundedReceiverStream<E>;
 
@@ -47,6 +47,7 @@ impl<C: 'static + Send + Sync, E: 'static + Send + Sync> Channel<C, E> for Unbou
 }
 
 /// A tokio mpsc sender implementation
+#[derive(Debug)]
 pub struct UnboundedTokioSender<E>(pub tokio::sync::mpsc::UnboundedSender<E>);
 
 impl<E: 'static + Send + Sync> DataWrapper<tokio::sync::mpsc::UnboundedSender<E>> for UnboundedTokioSender<E> {
@@ -61,13 +62,7 @@ impl<E: 'static + Send + Sync> Clone for UnboundedTokioSender<E> {
     }
 }
 
-impl<E: 'static + Send + Sync + Debug> Debug for UnboundedTokioSender<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.0)
-    }
-}
-
-impl<E: 'static + Send + Sync> Sender<E> for UnboundedTokioSender<E> {
+impl<E: 'static + Debug + Send + Sync> Sender<E> for UnboundedTokioSender<E> {
     fn send(&self, event: E) -> anyhow::Result<()> {
         self.0.send(event).map_err(|e| anyhow::anyhow!(e.to_string()))
     }
@@ -77,9 +72,10 @@ impl<E: 'static + Send + Sync> Sender<E> for UnboundedTokioSender<E> {
     }
 }
 
-impl<T, E: 'static + Send + Sync> Sender<E> for Option<T>
+impl<T, E> Sender<E> for Option<T>
 where
     T: Sender<E> + Clone + Send + Sync,
+    E: 'static + Send + Sync,
 {
     fn send(&self, event: E) -> anyhow::Result<()> {
         match self {
@@ -93,6 +89,34 @@ where
             Some(s) => s.is_closed(),
             None => true,
         }
+    }
+}
+
+impl<T, E> Sender<E> for Box<T>
+where
+    T: Sender<E> + Clone + Send + Sync + ?Sized,
+    E: 'static + Send + Sync,
+{
+    fn send(&self, event: E) -> anyhow::Result<()> {
+        T::send(&*self, event)
+    }
+
+    fn is_closed(&self) -> bool {
+        T::is_closed(&*self)
+    }
+}
+
+impl<T, E> Sender<E> for &T
+where
+    T: Sender<E> + Clone + Send + Sync + ?Sized,
+    E: 'static + Send + Sync,
+{
+    fn send(&self, event: E) -> anyhow::Result<()> {
+        T::send(*self, event)
+    }
+
+    fn is_closed(&self) -> bool {
+        T::is_closed(*self)
     }
 }
 

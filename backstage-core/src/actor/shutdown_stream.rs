@@ -17,7 +17,7 @@ use futures::{
     Future, FutureExt, Stream, StreamExt,
 };
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct ShutdownFlag {
     waker: AtomicWaker,
     set: AtomicBool,
@@ -31,7 +31,7 @@ impl ShutdownFlag {
 }
 
 /// A handle which can be invoked to shutdown an actor
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct ShutdownHandle {
     flag: Arc<ShutdownFlag>,
 }
@@ -68,6 +68,7 @@ impl Future for ShutdownHandle {
 ///
 /// This type wraps a shutdown receiver and a stream to produce a new stream that ends when the
 /// shutdown receiver is triggered or when the stream ends.
+#[derive(Debug)]
 pub struct ShutdownStream<S> {
     shutdown: future::Fuse<ShutdownHandle>,
     stream: stream::Fuse<S>,

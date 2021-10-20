@@ -4,6 +4,8 @@
 use super::{ActorError, Service};
 use std::{borrow::Cow, marker::PhantomData};
 
+pub type Report<T> = Result<SuccessReport<T>, ErrorReport<T>>;
+
 /// A report that an actor finished running successfully
 #[derive(Clone, Debug)]
 pub struct SuccessReport<T> {
@@ -14,8 +16,8 @@ pub struct SuccessReport<T> {
 }
 
 impl<T> SuccessReport<T> {
-    pub(crate) fn new(state: T, service: Service) -> Self {
-        Self { state, service }
+    pub(crate) fn new(state: T, service: Service) -> Result<Self, ErrorReport<T>> {
+        Ok(Self { state, service })
     }
 }
 
@@ -31,8 +33,8 @@ pub struct ErrorReport<T> {
 }
 
 impl<T> ErrorReport<T> {
-    pub(crate) fn new(state: T, service: Service, error: ActorError) -> Self {
-        Self { state, service, error }
+    pub(crate) fn new(state: T, service: Service, error: ActorError) -> Result<SuccessReport<T>, Self> {
+        Err(Self { state, service, error })
     }
 }
 

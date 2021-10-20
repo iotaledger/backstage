@@ -52,7 +52,7 @@ impl From<anyhow::Error> for ActorError {
     }
 }
 
-impl<S: Actor> From<InitError<S>> for ActorError {
+impl<S> From<InitError<S>> for ActorError {
     fn from(e: InitError<S>) -> Self {
         e.1.into()
     }
@@ -94,22 +94,22 @@ impl<S> Deref for InitError<S> {
     }
 }
 
-impl<S: Actor> From<(S, anyhow::Error)> for InitError<S> {
+impl<S> From<(S, anyhow::Error)> for InitError<S> {
     fn from((state, err): (S, anyhow::Error)) -> Self {
         Self(state, err)
     }
 }
 
-impl<S: Actor> Display for InitError<S> {
+impl<S> Display for InitError<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Display::fmt(&self.1, f)
     }
 }
 
-impl<S: Actor> Debug for InitError<S> {
+impl<S> Debug for InitError<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Debug::fmt(&self.1, f)
     }
 }
 
-impl<S: Actor> Error for InitError<S> {}
+impl<S> Error for InitError<S> {}
