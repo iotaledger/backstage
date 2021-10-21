@@ -1694,10 +1694,9 @@ where
     /// Update this scope's service status
     async fn update_status<S: Status + Send>(&mut self, status: S) -> anyhow::Result<()> {
         match self {
-            AnyContext::Supervised(s) => s.scope.update_status(status),
-            AnyContext::Unsupervised(u) => u.scope.update_status(status),
+            AnyContext::Supervised(s) => s.update_status(status).await,
+            AnyContext::Unsupervised(u) => u.scope.update_status(status).await,
         }
-        .await
     }
 
     fn inbox(&mut self) -> &mut dyn Receiver<Envelope<A>> {
