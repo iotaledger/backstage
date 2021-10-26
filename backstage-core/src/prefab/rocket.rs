@@ -2,12 +2,12 @@ use std::time::SystemTime;
 
 use crate::{
     core::{
-        SupHandle,
         Actor,
-        ActorResult,
-        Rt,
         ActorError,
+        ActorResult,
         ChannelBuilder,
+        Rt,
+        SupHandle,
     },
     spawn_task,
 };
@@ -40,11 +40,10 @@ pub struct RocketServer {
     rocket: Option<::rocket::Rocket<Ignite>>,
 }
 
-
 impl RocketServer {
     /// Create new rocket server
     pub fn new(rocket: ::rocket::Rocket<Ignite>) -> RocketServer {
-        RocketServer {rocket: Some(rocket)}
+        RocketServer { rocket: Some(rocket) }
     }
 }
 #[async_trait]
@@ -64,9 +63,9 @@ impl<S: SupHandle<Self>> Actor<S> for RocketServer {
     type Data = String;
     type Channel = Rocket<Ignite>;
 
-    async fn init(&mut self, _rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         let name: String = rt.service().directory().clone().unwrap_or_else(|| "rocket".into());
-        log::info!("{}: {}",name, rt.service().status());
+        log::info!("{}: {}", name, rt.service().status());
         Ok(name)
     }
 
@@ -74,12 +73,13 @@ impl<S: SupHandle<Self>> Actor<S> for RocketServer {
         if let Some(rocket) = rt.inbox_mut().rocket() {
             log::info!("{} is {}", name, rt.service().status());
             rocket.launch().await.map_err(|e| {
-                log::error!("{}: {}",name, e);
-                ActorError::exit(e)})?;
+                log::error!("{}: {}", name, e);
+                ActorError::exit(e)
+            })?;
         } else {
             unreachable!("the inbox must have server")
         };
-        log::info!("{} gracefully shutdown",name);
+        log::info!("{} gracefully shutdown", name);
         Ok(())
     }
 }
