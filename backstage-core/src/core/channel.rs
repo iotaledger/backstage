@@ -1496,7 +1496,7 @@ mod paho_mqtt {
     pub struct MqttChannel {
         stream_capacity: usize,
         async_client: AsyncClient,
-        stream: Receiver<Option<paho_mqtt::Message>>,
+        stream: Receiver<Option<::paho_mqtt::Message>>,
     }
     impl MqttChannel {
         /// Create new channel from a connected async_client, and existing stream
@@ -1599,7 +1599,7 @@ mod paho_mqtt {
         pub async fn reconnect_after<D: Into<std::time::Duration>>(
             &mut self,
             duration: D,
-        ) -> Result<paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
+        ) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
             Abortable::new(tokio::time::sleep(duration.into()), self.abort_registration.clone()).await?;
             self.reconnect().await
         }
@@ -1614,7 +1614,7 @@ mod paho_mqtt {
             &self,
             topic: S,
             qos: i32,
-        ) -> Result<paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted>
+        ) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted>
         where
             S: Into<String>,
         {
@@ -1622,8 +1622,8 @@ mod paho_mqtt {
             Abortable::new(subscribe_fut, self.abort_registration.clone()).await
         }
         /// Return the stream
-        pub fn stream(&mut self) -> &mut Receiver<paho_mqtt::Message> {
-            self.stream
+        pub fn stream(&mut self) -> &mut Receiver<Option<::paho_mqtt::Message>> {
+            &mut self.stream
         }
         // todo add rest helpful method (subscribe_many, with_opt, etc)
     }
