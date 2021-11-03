@@ -1488,7 +1488,7 @@ mod rocket {
 pub use self::rocket::*;
 
 #[cfg(feature = "paho-mqtt")]
-mod paho {
+mod paho_mqtt {
     use super::*;
     use ::paho_mqtt::AsyncClient;
     use futures::channel::mpsc::Receiver;
@@ -1621,6 +1621,13 @@ mod paho {
             let subscribe_fut = async { self.async_client.subscribe(topic, qos).await };
             Abortable::new(subscribe_fut, self.abort_registration.clone()).await
         }
+        /// Return the stream
+        pub fn stream(&mut self) -> &mut Receiver<paho_mqtt::Message> {
+            self.stream
+        }
         // todo add rest helpful method (subscribe_many, with_opt, etc)
     }
 }
+
+#[cfg(feature = "paho-mqtt")]
+pub use self::paho_mqtt::*;
