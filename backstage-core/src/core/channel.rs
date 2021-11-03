@@ -66,6 +66,14 @@ impl AbortHandle {
 pub struct AbortRegistration {
     inner: std::sync::Arc<AbortInner>,
 }
+
+impl AbortRegistration {
+    /// Check if the registeration is aborted
+    pub fn is_aborted(&self) -> bool {
+        self.inner.aborted.load(Ordering::Relaxed)
+    }
+}
+
 pin_project! {
     /// A future/stream which can be remotely short-circuited using an `AbortHandle`.
     #[derive(Debug, Clone)]
@@ -1478,3 +1486,141 @@ mod rocket {
 
 #[cfg(feature = "rocket")]
 pub use self::rocket::*;
+
+#[cfg(feature = "paho-mqtt")]
+mod paho {
+    use super::*;
+    use ::paho_mqtt::AsyncClient;
+    use futures::channel::mpsc::Receiver;
+
+    pub struct MqttChannel {
+        stream_capacity: usize,
+        async_client: AsyncClient,
+        stream: Receiver<Option<paho_mqtt::Message>>,
+    }
+    impl MqttChannel {
+        /// Create new channel from a connected async_client, and existing stream
+        pub fn new(
+            async_client: AsyncClient,
+            stream_capacity: usize,
+            stream: Receiver<Option<::paho_mqtt::Message>>,
+        ) -> Self {
+            Self {
+                stream_capacity,
+                async_client,
+                stream,
+            }
+        }
+    }
+    impl Channel for MqttChannel {
+        type Event = ();
+        type Handle = MqttHandle;
+        type Inbox = MqttInbox;
+        type Metric = prometheus::IntGauge;
+        fn channel<T>(
+            self,
+            scope_id: ScopeId,
+        ) -> (
+            Self::Handle,
+            Self::Inbox,
+            AbortRegistration,
+            Option<prometheus::IntGauge>,
+            Option<Box<dyn Route<()>>>,
+        ) {
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            let async_client = self.async_client;
+            let rocket_inbox = MqttInbox::new(
+                async_client.clone(),
+                self.stream,
+                self.stream_capacity,
+                abort_registration.clone(),
+            );
+            let rocket_handle = MqttHandle::new(async_client, abort_handle, scope_id);
+            (rocket_handle, rocket_inbox, abort_registration, None, None)
+        }
+    }
+
+    #[derive(Clone)]
+    /// Paho mqtt channel's handle
+    pub struct MqttHandle {
+        abort_handle: AbortHandle,
+        async_client: AsyncClient,
+        scope_id: ScopeId,
+    }
+
+    impl MqttHandle {
+        /// Create new Mqtt channel's handle
+        pub fn new(async_client: AsyncClient, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+            Self {
+                abort_handle,
+                async_client,
+                scope_id,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Shutdown for MqttHandle {
+        async fn shutdown(&self) {
+            self.abort_handle.abort();
+            self.async_client.disconnect(None);
+        }
+        fn scope_id(&self) -> ScopeId {
+            self.scope_id
+        }
+    }
+
+    /// Mqtt's channel inbox
+    pub struct MqttInbox {
+        /// The mqtt stream capacity
+        stream_capacity: usize,
+        /// Async client
+        async_client: AsyncClient,
+        stream: futures::channel::mpsc::Receiver<Option<::paho_mqtt::Message>>,
+        abort_registration: AbortRegistration,
+    }
+
+    impl MqttInbox {
+        /// Create Mqtt's channel inbox
+        pub fn new(
+            async_client: AsyncClient,
+            stream: Receiver<Option<::paho_mqtt::Message>>,
+            stream_capacity: usize,
+            abort_registration: AbortRegistration,
+        ) -> Self {
+            Self {
+                stream_capacity,
+                async_client,
+                stream,
+                abort_registration,
+            }
+        }
+        /// Reconnect mqtt after the given duration
+        pub async fn reconnect_after<D: Into<std::time::Duration>>(
+            &mut self,
+            duration: D,
+        ) -> Result<paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
+            Abortable::new(tokio::time::sleep(duration.into()), self.abort_registration.clone()).await?;
+            self.reconnect().await
+        }
+        /// Reconnect mqtt
+        pub async fn reconnect(&mut self) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
+            self.stream = self.async_client.get_stream(self.stream_capacity);
+            let reconnect_fut = async { self.async_client.reconnect().await };
+            Abortable::new(reconnect_fut, self.abort_registration.clone()).await
+        }
+        /// subscribe to the provided topic
+        pub async fn subscribe<S>(
+            &self,
+            topic: S,
+            qos: i32,
+        ) -> Result<paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted>
+        where
+            S: Into<String>,
+        {
+            let subscribe_fut = async { self.async_client.subscribe(topic, qos).await };
+            Abortable::new(subscribe_fut, self.abort_registration.clone()).await
+        }
+        // todo add rest helpful method (subscribe_many, with_opt, etc)
+    }
+}
