@@ -70,7 +70,7 @@ pub struct AbortRegistration {
 impl AbortRegistration {
     /// Check if the registeration is aborted
     pub fn is_aborted(&self) -> bool {
-        self.inner.aborted.load(Ordering::Relaxed)
+        self.inner.aborted.load(Ordering::Acquire)
     }
 }
 
@@ -1493,6 +1493,7 @@ mod paho_mqtt {
     use ::paho_mqtt::AsyncClient;
     use futures::channel::mpsc::Receiver;
 
+    /// Mqtt channel using paho-mqtt lib
     pub struct MqttChannel {
         stream_capacity: usize,
         async_client: AsyncClient,
@@ -1528,14 +1529,13 @@ mod paho_mqtt {
             Option<Box<dyn Route<()>>>,
         ) {
             let (abort_handle, abort_registration) = AbortHandle::new_pair();
-            let async_client = self.async_client;
             let rocket_inbox = MqttInbox::new(
-                async_client.clone(),
+                self.async_client,
                 self.stream,
                 self.stream_capacity,
                 abort_registration.clone(),
             );
-            let rocket_handle = MqttHandle::new(async_client, abort_handle, scope_id);
+            let rocket_handle = MqttHandle::new(abort_handle, scope_id);
             (rocket_handle, rocket_inbox, abort_registration, None, None)
         }
     }
@@ -1544,18 +1544,13 @@ mod paho_mqtt {
     /// Paho mqtt channel's handle
     pub struct MqttHandle {
         abort_handle: AbortHandle,
-        async_client: AsyncClient,
         scope_id: ScopeId,
     }
 
     impl MqttHandle {
         /// Create new Mqtt channel's handle
-        pub fn new(async_client: AsyncClient, abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
-            Self {
-                abort_handle,
-                async_client,
-                scope_id,
-            }
+        pub fn new(abort_handle: AbortHandle, scope_id: ScopeId) -> Self {
+            Self { abort_handle, scope_id }
         }
     }
 
@@ -1563,7 +1558,6 @@ mod paho_mqtt {
     impl Shutdown for MqttHandle {
         async fn shutdown(&self) {
             self.abort_handle.abort();
-            self.async_client.disconnect(None);
         }
         fn scope_id(&self) -> ScopeId {
             self.scope_id
@@ -1576,7 +1570,7 @@ mod paho_mqtt {
         stream_capacity: usize,
         /// Async client
         async_client: AsyncClient,
-        stream: futures::channel::mpsc::Receiver<Option<::paho_mqtt::Message>>,
+        stream: Abortable<futures::channel::mpsc::Receiver<Option<::paho_mqtt::Message>>>,
         abort_registration: AbortRegistration,
     }
 
@@ -1591,7 +1585,7 @@ mod paho_mqtt {
             Self {
                 stream_capacity,
                 async_client,
-                stream,
+                stream: Abortable::new(stream, abort_registration.clone()),
                 abort_registration,
             }
         }
@@ -1599,27 +1593,32 @@ mod paho_mqtt {
         pub async fn reconnect_after<D: Into<std::time::Duration>>(
             &mut self,
             duration: D,
-        ) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
-            Abortable::new(tokio::time::sleep(duration.into()), self.abort_registration.clone()).await?;
+        ) -> ActorResult<::paho_mqtt::Result<::paho_mqtt::ServerResponse>> {
+            Abortable::new(tokio::time::sleep(duration.into()), self.abort_registration.clone())
+                .await
+                .map_err(|e| ActorError::aborted_msg("mqtt aborted while reconnecting"))?;
             self.reconnect().await
         }
         /// Reconnect mqtt
-        pub async fn reconnect(&mut self) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted> {
-            self.stream = self.async_client.get_stream(self.stream_capacity);
+        pub async fn reconnect(&mut self) -> ActorResult<::paho_mqtt::Result<::paho_mqtt::ServerResponse>> {
             let reconnect_fut = async { self.async_client.reconnect().await };
-            Abortable::new(reconnect_fut, self.abort_registration.clone()).await
+            Abortable::new(reconnect_fut, self.abort_registration.clone())
+                .await
+                .map_err(|e| ActorError::aborted_msg("mqtt aborted while reconnecting"))
         }
         /// subscribe to the provided topic
         pub async fn subscribe<S>(
             &self,
             topic: S,
             qos: i32,
-        ) -> Result<::paho_mqtt::Result<::paho_mqtt::ServerResponse>, Aborted>
+        ) -> ActorResult<::paho_mqtt::Result<::paho_mqtt::ServerResponse>>
         where
             S: Into<String>,
         {
             let subscribe_fut = async { self.async_client.subscribe(topic, qos).await };
-            Abortable::new(subscribe_fut, self.abort_registration.clone()).await
+            Abortable::new(subscribe_fut, self.abort_registration.clone())
+                .await
+                .map_err(|e| ActorError::aborted_msg("mqtt aborted while subscribing"))
         }
         /// Return the stream
         pub fn stream(&mut self) -> &mut Receiver<Option<::paho_mqtt::Message>> {
