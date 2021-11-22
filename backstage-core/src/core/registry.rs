@@ -1,16 +1,10 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    Route,
-    Shutdown,
-};
-use std::{
-    any::TypeId,
-    collections::HashMap,
-};
+use super::{Route, Shutdown};
+use rand::distributions::Uniform;
+use std::{any::TypeId, collections::HashMap};
 use tokio::sync::RwLock;
-
 /// The actor level position in the supervision tree
 pub type Depth = usize;
 /// The actor's unique scope id
@@ -31,6 +25,8 @@ lazy_static::lazy_static! {
             num_cpus::get() * 10
         }
     };
+    /// The allowed scope_id range
+    pub static ref SCOPE_ID_RANGE: Uniform<usize> = Uniform::from(100usize..usize::MAX);
     /// Array of Partitioned Scopes
     pub static ref SCOPES: Vec<PartitionedScopes> = {
         let mut scopes = Vec::with_capacity(*BACKSTAGE_PARTITIONS);

@@ -1,15 +1,9 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    Actor,
-    ScopeId,
-};
+use super::{Actor, ScopeId};
 use ptree::TreeItem;
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 /// The possible statuses a service (application) can be
 #[repr(u8)]
@@ -205,10 +199,12 @@ impl Service {
         &self.microservices
     }
     /// Return mutable reference to the microservices HashMap
+    #[allow(unused)]
     pub(crate) fn microservices_mut(&mut self) -> &mut std::collections::HashMap<ScopeId, Service> {
         &mut self.microservices
     }
     /// Return mutable reference to the inactive directories
+    #[allow(unused)]
     pub(crate) fn inactive_mut(&mut self) -> &mut std::collections::HashMap<String, ScopeId> {
         &mut self.inactive
     }

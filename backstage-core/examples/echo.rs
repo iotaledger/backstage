@@ -3,11 +3,7 @@
 
 use backstage::core::*;
 #[cfg(feature = "websocket_server")]
-use backstage::prefab::websocket::{
-    GenericResponder,
-    JsonMessage,
-    Responder,
-};
+use backstage::prefab::websocket::{GenericResponder, JsonMessage, Responder};
 
 struct Echo;
 

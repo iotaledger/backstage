@@ -1,11 +1,9 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    file::*,
-    persist::*,
-    *,
-};
+use super::{file::*, persist::*, versioned::{VersionedConfig, VersionedValue}, *};
+use crate::core::{Actor, Event, StreamExt, ActorError, NullSupervisor, Resource, SupHandle, AbortableUnboundedChannel, ActorResult, Rt};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
 /// A historical record
 #[derive(Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
@@ -186,7 +184,6 @@ where
         self.records.iter()
     }
 }
-
 impl<C: Config + Persist + FileSystemConfig + DeserializeOwned> History<HistoricalConfig<C>> {
     /// Load the historical config from the file system
     pub fn load<M: Into<Option<usize>>>(max_records: M) -> anyhow::Result<Self> {
@@ -254,6 +251,67 @@ where
                 v.persist()?;
             }
         }
+        Ok(())
+    }
+}
+
+/// The history configure actor event
+pub enum HistoryEvent<C: Resource> {
+    /// Topic to receive updated config copies
+    ConfigTopic(Event<C>),
+}
+
+impl<C: Resource> From<Event<C>> for HistoryEvent<C> {
+    fn from(c: Event<C>) -> Self {
+        Self::ConfigTopic(c)
+    }
+}
+
+#[async_trait::async_trait]
+impl<C, S> Actor<S> for History<HistoricalConfig<VersionedConfig<C>>>
+where
+    C: Resource + Serialize + std::cmp::Eq + Actor<NullSupervisor> + Resource + std::fmt::Debug + CurrentVersion + FileSystemConfig + DeserializeOwned + Default,
+    S: SupHandle<Self>,
+    VersionedValue<C>: DeserializeOwned,
+    <C as FileSystemConfig>::ConfigType: ValueType,
+    <<C as FileSystemConfig>::ConfigType as ValueType>::Value:
+        std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+    for<'de> <<C as FileSystemConfig>::ConfigType as ValueType>::Value: Deserializer<'de>,
+    for<'de> <<<C as FileSystemConfig>::ConfigType as ValueType>::Value as Deserializer<'de>>::Error:
+        Into<anyhow::Error>,
+{
+    type Data = ();
+    type Channel = AbortableUnboundedChannel<HistoryEvent<C>>;
+    async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
+        // subscribe to get updated config copies
+        if let Some(config) = rt.subscribe(0, "config".to_string()).await? {
+            if self.latest().config != config {
+                let version_config = VersionedConfig {version: C::CURRENT_VERSION, config};
+                self.update(version_config.clone());
+                self.persist().map_err(|e| ActorError::exit(e))?;
+                log::info!("History configure updated config: {:#?}", version_config);
+            }
+        };
+        log::info!("History configure got initialized");
+        Ok(())
+    }
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _: Self::Data) -> ActorResult<()> {
+        log::info!("History configure is running");
+        while let Some(event) = rt.inbox_mut().next().await {
+            match event {
+                HistoryEvent::ConfigTopic(event) => match event {
+                    Event::Published(_, _, config) => {
+                        let version_config = VersionedConfig {version: C::CURRENT_VERSION, config};
+                        self.update(version_config.clone());
+                        self.persist().map_err(|e| ActorError::exit(e))?;
+                        log::info!("History configure updated config: {:#?}", version_config);
+                    },
+                    // shutdown when the root config is dropped
+                    _ => break,
+                }
+            }
+        }
+        log::info!("History configure stopped");
         Ok(())
     }
 }

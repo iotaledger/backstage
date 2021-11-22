@@ -15,7 +15,9 @@ use serde::{
 };
 use std::marker::PhantomData;
 
-const CURRENT_VERSION: usize = 3;
+impl<CT> CurrentVersion for MyConfig<CT> {
+    const VERSION: usize = 3;
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MyConfig<CT> {
@@ -23,6 +25,7 @@ struct MyConfig<CT> {
     #[serde(skip)]
     _config_type: PhantomData<fn(CT) -> CT>,
 }
+
 impl<CT> PartialEq for MyConfig<CT> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -55,24 +58,24 @@ impl<CT: ConfigFileType> FileSystemConfig for MyConfig<CT> {
 #[cfg(feature = "ron_config")]
 #[test]
 fn test_load_ron() {
-    if let Err(_) = VersionedConfig::<MyConfig<RONConfig>, CURRENT_VERSION>::load_or_save_default() {
-        VersionedConfig::<MyConfig<RONConfig>, CURRENT_VERSION>::load().unwrap();
+    if let Err(_) = VersionedConfig::<MyConfig<RONConfig>>::load_or_save_default() {
+        VersionedConfig::<MyConfig<RONConfig>>::load().unwrap();
     }
 }
 
 #[cfg(feature = "toml_config")]
 #[test]
 fn test_load_toml() {
-    if let Err(_) = VersionedConfig::<MyConfig<TOMLConfig>, CURRENT_VERSION>::load_or_save_default() {
-        VersionedConfig::<MyConfig<TOMLConfig>, CURRENT_VERSION>::load().unwrap();
+    if let Err(_) = VersionedConfig::<MyConfig<TOMLConfig>>::load_or_save_default() {
+        VersionedConfig::<MyConfig<TOMLConfig>>::load().unwrap();
     }
 }
 
 #[cfg(feature = "json_config")]
 #[test]
 fn test_load_json() {
-    if let Err(_) = VersionedConfig::<MyConfig<JSONConfig>, CURRENT_VERSION>::load_or_save_default() {
-        VersionedConfig::<MyConfig<JSONConfig>, CURRENT_VERSION>::load().unwrap();
+    if let Err(_) = VersionedConfig::<MyConfig<JSONConfig>>::load_or_save_default() {
+        VersionedConfig::<MyConfig<JSONConfig>>::load().unwrap();
     }
 }
 
@@ -82,8 +85,8 @@ async fn test_load_historic() {
     use super::persist::PersistHandle;
     use tokio::sync::RwLock;
 
-    let history = History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>, CURRENT_VERSION>>>::load(20)
-        .or_else(|_| History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>, CURRENT_VERSION>>>::load(20))
+    let history = History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>>>>::load(20)
+        .or_else(|_| History::<HistoricalConfig<VersionedConfig<MyConfig<RONConfig>>>>::load(20))
         .unwrap();
     let rw_lock = RwLock::new(history);
     let mut history_handle: PersistHandle<_> = rw_lock.write().await.into();

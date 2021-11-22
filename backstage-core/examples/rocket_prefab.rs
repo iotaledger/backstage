@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #[cfg(feature = "rocket")]
 use backstage::prefab::rocket::*;
+#[cfg(feature = "rocket")]
 use rocket::get;
 
+#[cfg(feature = "rocket")]
 async fn construct_rocket() -> Result<::rocket::Rocket<rocket::Ignite>, rocket::Error> {
     rocket::build()
         .mount("/", rocket::routes![info])

@@ -100,3 +100,21 @@ pub trait FileSystemConfig {
             .map_err(|e| anyhow!(e))
     }
 }
+
+impl<T> FileSystemConfig for T
+where
+    T: crate::core::Actor<crate::core::NullSupervisor>,
+{
+    #[cfg(feature = "ron_config")]
+    #[cfg(not(feature = "toml_config"))]
+    #[cfg(not(feature = "json_config"))]
+    type ConfigType = super::RONConfig;
+    #[cfg(feature = "toml_config")]
+    #[cfg(not(feature = "ron_config"))]
+    #[cfg(not(feature = "json_config"))]
+    type ConfigType = super::TOMLConfig;
+    #[cfg(feature = "json_config")]
+    #[cfg(not(feature = "ron_config"))]
+    #[cfg(not(feature = "toml_config"))]
+    type ConfigType = super::JSONConfig;
+}

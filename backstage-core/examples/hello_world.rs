@@ -5,6 +5,7 @@ use backstage::core::*;
 #[cfg(feature = "websocket_server")]
 use backstage::prefab::websocket::JsonMessage;
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct HelloWorld;
 
 #[async_trait::async_trait]

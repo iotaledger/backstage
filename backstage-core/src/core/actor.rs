@@ -1,12 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{
-    rt::Rt,
-    ActorResult,
-    Channel,
-    SupHandle,
-};
+use super::{rt::Rt, ActorResult, Channel, SupHandle};
 use async_trait::async_trait;
 
 /// The all-important Actor trait. This defines an Actor and what it do.
@@ -15,6 +10,8 @@ pub trait Actor<S>: Sized + Send
 where
     S: Send,
 {
+    /// The version of the actor state
+    const VERSION: usize = 1;
     /// Allows specifying an actor's startup dependencies and data.
     type Data: Send + 'static;
     /// The type of channel this actor will use to receive events
@@ -74,13 +71,7 @@ impl<T: Send> super::Report<T> for NullSupervisor {
 // test
 #[cfg(test)]
 mod tests {
-    use crate::core::{
-        Actor,
-        ActorResult,
-        IntervalChannel,
-        Rt,
-        StreamExt,
-    };
+    use crate::core::{Actor, ActorResult, IntervalChannel, Rt, StreamExt};
 
     struct PrintHelloEveryFewMs;
     #[async_trait::async_trait]

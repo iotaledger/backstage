@@ -2,36 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    AbortRegistration,
-    Abortable,
-    Actor,
-    ActorError,
-    ActorResult,
-    Channel,
-    ChannelBuilder,
-    Cleanup,
-    CleanupData,
-    Data,
-    NullSupervisor,
-    Resource,
-    Route,
-    Scope,
-    ScopeId,
-    Service,
-    ServiceStatus,
-    Shutdown,
-    Subscriber,
-    SupHandle,
-    BACKSTAGE_PARTITIONS,
-    SCOPES,
-    VISIBLE_DATA,
+    AbortRegistration, Abortable, Actor, ActorError, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data,
+    NullSupervisor, Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle,
+    BACKSTAGE_PARTITIONS, SCOPES, SCOPE_ID_RANGE, VISIBLE_DATA,
 };
+#[cfg(feature = "config")]
+use crate::config::*;
+use rand::{distributions::Distribution, thread_rng};
+#[cfg(feature = "config")]
+use serde::{de::DeserializeOwned, Deserializer, Serialize};
 
 #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
 use crate::prefab::websocket::Websocket;
 
 use prometheus::core::Collector;
 use std::collections::HashMap;
+
 /// The actor's local context
 pub struct Rt<A: Actor<S>, S: Send> {
     /// The level depth of the context, it's the scope depth from the root
@@ -274,7 +260,7 @@ where
         let mut service = Service::new::<Child, <A::Channel as Channel>::Handle>(dir.clone());
         loop {
             // generate unique scope_id
-            child_scope_id = rand::random::<ScopeId>();
+            child_scope_id = SCOPE_ID_RANGE.sample(&mut thread_rng());
             // check which scopes partition owns the scope_id
             scopes_index = child_scope_id % *BACKSTAGE_PARTITIONS;
             // access the scope
@@ -1068,6 +1054,38 @@ impl<H> Runtime<H>
 where
     H: Clone + Shutdown,
 {
+    /// Create and spawn runtime using an existing latest config
+    #[cfg(feature = "config")]
+    pub async fn from_config<A>() -> ActorResult<Self>
+    where
+        A: 'static + ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor> + Send + Sync,
+        <A as Actor<NullSupervisor>>::Channel: Channel<Handle = H>,
+        A: FileSystemConfig
+            + DeserializeOwned
+            + std::fmt::Debug
+            + Serialize
+            + std::cmp::Eq
+            + Resource
+            + std::default::Default,
+        H: Shutdown + Clone,
+        VersionedValue<A>: DeserializeOwned,
+        <A as FileSystemConfig>::ConfigType: ValueType,
+        <<A as FileSystemConfig>::ConfigType as ValueType>::Value:
+            std::fmt::Debug + Serialize + DeserializeOwned + Clone + PartialEq,
+        for<'de> <<A as FileSystemConfig>::ConfigType as ValueType>::Value: Deserializer<'de>,
+        for<'de> <<<A as FileSystemConfig>::ConfigType as ValueType>::Value as Deserializer<'de>>::Error:
+            Into<anyhow::Error>,
+    {
+        #[cfg(feature = "console")]
+        console_subscriber::init();
+
+        let root_dir: Option<String> = A::type_name().to_string().into();
+        let history = History::<HistoricalConfig<VersionedConfig<A>>>::load(20).map_err(|e| ActorError::exit(e))?;
+        let child = history.latest().config;
+        let runtime = Self::with_supervisor(root_dir, child, NullSupervisor).await?;
+        Runtime::with_scope_id(3, "config".to_string(), history, NullSupervisor).await?;
+        Ok(runtime)
+    }
     /// Create and spawn runtime with null supervisor handle
     pub async fn new<T, A>(root_dir: T, child: A) -> ActorResult<Self>
     where
@@ -1081,9 +1099,19 @@ where
 
         Self::with_supervisor(root_dir, child, NullSupervisor).await
     }
-
     /// Create new runtime with provided supervisor handle
-    pub async fn with_supervisor<T, A, S>(dir: T, mut child: A, supervisor: S) -> ActorResult<Self>
+    pub async fn with_supervisor<T, A, S>(dir: T, child: A, supervisor: S) -> ActorResult<Self>
+    where
+        A: 'static + ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
+        T: Into<Option<String>>,
+        <A as Actor<S>>::Channel: Channel<Handle = H>,
+        S: SupHandle<A>,
+        H: Shutdown + Clone,
+    {
+        Self::with_scope_id(0, dir, child, supervisor).await
+    }
+    /// Create new runtime with provided supervisor handle
+    async fn with_scope_id<T, A, S>(child_scope_id: ScopeId, dir: T, mut child: A, supervisor: S) -> ActorResult<Self>
     where
         A: 'static + ChannelBuilder<<A as Actor<S>>::Channel> + Actor<S>,
         T: Into<Option<String>>,
@@ -1093,16 +1121,16 @@ where
     {
         // try to create the actor's channel
         let (handle, inbox, abort_registration, mut metric, mut route) =
-            child.build_channel::<S>().await?.channel::<A>(0);
+            child.build_channel::<S>().await?.channel::<A>(child_scope_id);
         // this is the root runtime, so we are going to use 0 as the parent_id
         let shutdown_handle = Box::new(handle.clone());
-        let scopes_index = 0;
-        let child_scope_id = 0;
+        // check which scopes partition owns the scope_id
+        let scopes_index = child_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
         let dir = dir.into();
         let task_name = dir.clone().unwrap_or_default();
         let mut service = Service::new::<A, S>(dir.clone());
-        let mut lock = SCOPES[0].write().await;
+        let mut lock = SCOPES[scopes_index].write().await;
         service.update_status(ServiceStatus::Initializing);
         let mut scope = Scope::new(None, shutdown_handle.clone());
         if let Some(route) = route.take() {
@@ -1136,10 +1164,14 @@ where
         // create child future;
         let wrapped_fut = actor_fut_with_signal(child, child_context, tx_oneshot);
         let join_handle = crate::spawn_task(task_name.as_ref(), wrapped_fut);
-        crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
-        rx_oneshot.await.ok();
+        // only spawn ctrl_c for root with scope_id = 0
+        if child_scope_id == 0 {
+            crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
+        }
+        rx_oneshot.await.expect("oneshot to be alive")?;
+        // todo print banner
         Ok(Self {
-            scope_id: 0,
+            scope_id: child_scope_id,
             handle,
             join_handle,
             server: None,

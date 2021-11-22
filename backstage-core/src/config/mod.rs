@@ -4,35 +4,16 @@
 #![warn(missing_docs)]
 //! Config definitions for backstage use
 
-use anyhow::{
-    anyhow,
-    bail,
-};
+use anyhow::{anyhow, bail};
 use glob::glob;
-use log::{
-    debug,
-    error,
-};
-use serde::{
-    de::DeserializeOwned,
-    Deserialize,
-    Serialize,
-};
+use log::{debug, error};
+use serde::{de::DeserializeOwned, Serialize};
 use std::{
     collections::BinaryHeap,
     fmt::Debug,
-    fs::{
-        File,
-        OpenOptions,
-    },
-    io::{
-        Read,
-        Write,
-    },
-    ops::{
-        Deref,
-        DerefMut,
-    },
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    ops::{Deref, DerefMut},
     path::PathBuf,
 };
 
@@ -44,10 +25,13 @@ pub use history::*;
 
 /// File system loading utilities
 pub mod file;
+pub use file::{FileSystemConfig, ValueType};
 /// Peristence trait and handle implementations
 pub mod persist;
+pub use persist::Persist;
 /// Versioned config wrappers
 pub mod versioned;
+pub use versioned::*;
 
 #[cfg(all(test, any(feature = "ron_config", feature = "json_config", feature = "toml_config")))]
 mod test;

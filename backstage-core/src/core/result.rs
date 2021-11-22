@@ -1,10 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    fmt,
-    time::Duration,
-};
+use std::{fmt, time::Duration};
 use thiserror::Error;
 
 /// The returned result by the actor
@@ -26,7 +23,9 @@ pub enum ActorRequest {
 #[derive(Error, Debug)]
 #[error("Source: {source}, request: {request:?}")]
 pub struct ActorError {
+    /// The error source
     pub source: anyhow::Error,
+    /// The actor request
     pub request: Option<ActorRequest>,
 }
 
@@ -39,8 +38,11 @@ impl Default for ActorError {
     }
 }
 
+/// ActorResult extension trait
 pub trait ActorResultExt {
+    /// The actor error
     type Error;
+    /// The error request
     fn err_request(self, request: ActorRequest) -> ActorResult<Self::Error>
     where
         Self: Sized;

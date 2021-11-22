@@ -92,3 +92,7 @@ required-features = ["backserver"]
 
 [[example]]
 name = "benchmark"
+
+[[example]]
+name = "root"
+required-features = ["prefabs", "config"]
