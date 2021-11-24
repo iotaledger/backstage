@@ -2,23 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use backstage::core::{
-    AbortableUnboundedChannel,
-    Actor,
-    ActorResult,
-    EolEvent,
-    ReportEvent,
-    Rt,
-    Runtime,
-    ScopeId,
-    Service,
-    Shutdown,
-    StreamExt,
-    SupHandle,
+    AbortableUnboundedChannel, Actor, ActorResult, EolEvent, ReportEvent, Rt, Runtime, ScopeId, Service, Shutdown,
+    StreamExt, SupHandle,
 };
-use std::sync::{
-    atomic::AtomicU32,
-    Arc,
-};
+use std::sync::{atomic::AtomicU32, Arc};
 
 struct Spawner;
 
@@ -114,7 +101,7 @@ where
 
         Ok(())
     }
-    async fn run(&mut self, rt: &mut Rt<Self, S>, data: Self::Data) -> ActorResult<()> {
+    async fn run(&mut self, rt: &mut Rt<Self, S>, _data: Self::Data) -> ActorResult<()> {
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 LauncherEvent::Microservice(scope_id, service) => {

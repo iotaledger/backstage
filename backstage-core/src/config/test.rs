@@ -16,7 +16,7 @@ use serde::{
 use std::marker::PhantomData;
 
 impl<CT> CurrentVersion for MyConfig<CT> {
-    const VERSION: usize = 3;
+    const CURRENT_VERSION: usize = 3;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
