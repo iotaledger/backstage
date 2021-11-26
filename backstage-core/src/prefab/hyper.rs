@@ -34,7 +34,7 @@ where
     R::Error: std::error::Error + Send + Sync,
     R::Future: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<HyperChannel<T>> {
+    async fn build_channel(&mut self) -> ActorResult<HyperChannel<T>> {
         if let Some(make_svc) = self.make_svc.take() {
             let server = hyper::Server::try_bind(&self.addr)
                 .map_err(|e| {

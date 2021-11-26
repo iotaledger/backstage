@@ -91,7 +91,7 @@ impl Hyper {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<HyperChannel<MakeSvc>> for Hyper {
-    async fn build_channel<S>(&mut self) -> ActorResult<HyperChannel<MakeSvc>> {
+    async fn build_channel(&mut self) -> ActorResult<HyperChannel<MakeSvc>> {
         let make_svc = MakeSvc { counter: 81818 };
         let server = hyper::Server::try_bind(&self.addr)
             .map_err(|e| {

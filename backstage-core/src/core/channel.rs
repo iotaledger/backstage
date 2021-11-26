@@ -7,26 +7,13 @@ use core::pin::Pin;
 use futures::{
     future::Aborted,
     stream::StreamExt,
-    task::{
-        AtomicWaker,
-        Context,
-        Poll,
-    },
+    task::{AtomicWaker, Context, Poll},
 };
 use pin_project_lite::pin_project;
 use prometheus::core::Collector;
-use std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 pub use tokio::net::TcpListener;
-use tokio::sync::mpsc::{
-    error::TrySendError,
-    Receiver,
-    Sender,
-    UnboundedReceiver,
-    UnboundedSender,
-};
+use tokio::sync::mpsc::{error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::IntervalStream;
 pub use tokio_stream::wrappers::TcpListenerStream;
 
@@ -269,10 +256,7 @@ pub trait Channel: Send + Sized {
 #[async_trait::async_trait]
 pub trait ChannelBuilder<C: Channel> {
     /// Implement how to build the channel for the corresponding actor
-    async fn build_channel<S>(&mut self) -> ActorResult<C>
-    where
-        Self: Actor<S, Channel = C>,
-        S: SupHandle<Self>;
+    async fn build_channel(&mut self) -> ActorResult<C>;
 }
 
 /// Dynamic route as trait object, should be implemented on the actor's handle
@@ -294,6 +278,19 @@ pub struct UnboundedChannel<E> {
     rx: UnboundedReceiver<E>,
 }
 
+impl<E> UnboundedChannel<E> {
+    /// Create new unbounded channel
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        Self {
+            abort_handle,
+            abort_registration,
+            tx,
+            rx,
+        }
+    }
+}
 /// Unbounded inbox of unbounded channel
 #[derive(Debug)]
 pub struct UnboundedInbox<T> {
@@ -403,7 +400,7 @@ impl<E: ShutdownEvent + 'static, T> ChannelBuilder<UnboundedChannel<E>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<UnboundedChannel<E>> {
+    async fn build_channel(&mut self) -> ActorResult<UnboundedChannel<E>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(UnboundedChannel {
@@ -502,6 +499,20 @@ pub struct AbortableUnboundedChannel<E> {
     rx: UnboundedReceiver<E>,
 }
 
+impl<E> AbortableUnboundedChannel<E> {
+    /// Create abortable unbounded channel
+    pub fn new() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        AbortableUnboundedChannel {
+            abort_handle,
+            abort_registration,
+            tx,
+            rx,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl<A: Send + 'static, T: EolEvent<A> + ReportEvent<A>> SupHandle<A> for AbortableUnboundedHandle<T> {
     type Event = T;
@@ -522,7 +533,7 @@ impl<E: Send + 'static, T> ChannelBuilder<AbortableUnboundedChannel<E>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<AbortableUnboundedChannel<E>> {
+    async fn build_channel(&mut self) -> ActorResult<AbortableUnboundedChannel<E>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<E>();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableUnboundedChannel {
@@ -814,7 +825,7 @@ impl<E: ShutdownEvent + 'static, T, const C: usize> ChannelBuilder<BoundedChanne
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<BoundedChannel<E, C>> {
+    async fn build_channel(&mut self) -> ActorResult<BoundedChannel<E, C>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(BoundedChannel {
@@ -934,7 +945,7 @@ impl<E: Send + 'static, T, const C: usize> ChannelBuilder<AbortableBoundedChanne
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<AbortableBoundedChannel<E, C>> {
+    async fn build_channel(&mut self) -> ActorResult<AbortableBoundedChannel<E, C>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<E>(C);
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Ok(AbortableBoundedChannel {
@@ -1135,12 +1146,7 @@ mod hyper {
         }
     }
 
-    use ::hyper::{
-        server::conn::AddrStream,
-        Body,
-        Request,
-        Response,
-    };
+    use ::hyper::{server::conn::AddrStream, Body, Request, Response};
     impl<S, E, R, F> Channel for HyperChannel<S>
     where
         for<'a> S: ::hyper::service::Service<&'a AddrStream, Error = E, Response = R, Future = F> + Send,
@@ -1234,10 +1240,7 @@ mod hyper {
 pub use self::hyper::*;
 
 #[cfg(feature = "tungstenite")]
-pub use tokio_tungstenite::tungstenite::{
-    Error as WsError,
-    Message,
-};
+pub use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;
@@ -1261,7 +1264,7 @@ impl<T, const I: u64> ChannelBuilder<IntervalChannel<I>> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<IntervalChannel<I>> {
+    async fn build_channel(&mut self) -> ActorResult<IntervalChannel<I>> {
         Ok(IntervalChannel::<I>)
     }
 }
@@ -1289,6 +1292,29 @@ impl<const I: u64> Channel for IntervalChannel<I> {
     }
 }
 
+impl Channel for std::time::Duration {
+    type Event = std::time::Instant;
+    type Handle = IntervalHandle;
+    type Inbox = Abortable<IntervalStream>;
+    type Metric = prometheus::IntGauge;
+    fn channel<T>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<prometheus::IntGauge>,
+        Option<Box<dyn Route<Self::Event>>>,
+    ) {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let interval = tokio::time::interval(self);
+        let interval_handle = IntervalHandle::new(abort_handle, scope_id);
+        let abortable_inbox = Abortable::new(IntervalStream::new(interval), abort_registration.clone());
+        (interval_handle, abortable_inbox, abort_registration, None, None)
+    }
+}
+
 #[async_trait::async_trait]
 impl super::Shutdown for IntervalHandle {
     async fn shutdown(&self) {
@@ -1304,7 +1330,7 @@ impl<T> ChannelBuilder<NullChannel> for T
 where
     T: Send,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<NullChannel> {
+    async fn build_channel(&mut self) -> ActorResult<NullChannel> {
         Ok(NullChannel)
     }
 }
@@ -1407,6 +1433,94 @@ where
         let abortable_inbox = Abortable::new(self.0, abort_registration.clone());
         let abortable_handle = IoHandle::new(abort_handle, scope_id);
         (abortable_handle, abortable_inbox, abort_registration, None, None)
+    }
+}
+
+/// Marker struct useful to propagate bounds through the Supervisor generic
+pub struct Marker<T, B> {
+    /// The actual type
+    inner: T,
+    _marker: std::marker::PhantomData<B>,
+}
+
+impl<T, B> Clone for Marker<T, B>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, B> Marker<T, B> {
+    /// Create new marker wrapper
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, B> std::ops::Deref for Marker<T, B> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T, B> std::ops::DerefMut for Marker<T, B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+#[async_trait::async_trait]
+impl<T, C, B: Send + 'static + Sync> ChannelBuilder<Marker<C, B>> for T
+where
+    T: Send + ChannelBuilder<C>,
+    C: Channel,
+{
+    async fn build_channel(&mut self) -> ActorResult<Marker<C, B>> {
+        let channel = <T as ChannelBuilder<C>>::build_channel(&mut self).await?;
+        Ok(Marker::new(channel))
+    }
+}
+
+impl<T, B: Send + Sync + 'static> Channel for Marker<T, B>
+where
+    T: Channel,
+{
+    type Event = T::Event;
+    type Handle = Marker<T::Handle, B>;
+    type Inbox = T::Inbox;
+    type Metric = T::Metric;
+    fn channel<A>(
+        self,
+        scope_id: ScopeId,
+    ) -> (
+        Self::Handle,
+        Self::Inbox,
+        AbortRegistration,
+        Option<T::Metric>,
+        Option<Box<dyn Route<T::Event>>>,
+    ) {
+        let (h, i, a, m, r) = T::channel::<A>(self.inner, scope_id);
+        (Marker::new(h), i, a, m, r)
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: Shutdown + Clone, B: Send + Sync + 'static> Shutdown for Marker<T, B> {
+    async fn shutdown(&self) {
+        self.inner.shutdown().await
+    }
+    fn scope_id(&self) -> ScopeId {
+        self.inner.scope_id()
     }
 }
 

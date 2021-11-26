@@ -191,7 +191,7 @@ where
         Self: Send,
     {
         // try to create the actor's channel
-        let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
+        let channel = child.build_channel().await?;
         self.start_with_channel(directory, child, channel).await
     }
     /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
@@ -209,7 +209,7 @@ where
         <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
         // try to create the actor's channel
-        let channel = child.build_channel::<<A::Channel as Channel>::Handle>().await?;
+        let channel = child.build_channel().await?;
         self.spawn_with_channel(directory, child, channel).await
     }
     /// Spawn the provided child and await till it's initialized
@@ -1121,7 +1121,7 @@ where
     {
         // try to create the actor's channel
         let (handle, inbox, abort_registration, mut metric, mut route) =
-            child.build_channel::<S>().await?.channel::<A>(child_scope_id);
+            child.build_channel().await?.channel::<A>(child_scope_id);
         // this is the root runtime, so we are going to use 0 as the parent_id
         let shutdown_handle = Box::new(handle.clone());
         // check which scopes partition owns the scope_id

@@ -41,7 +41,7 @@ impl<T> ChannelBuilder<IoChannel<T>> for WebsocketReceiver<T>
 where
     T: Send + 'static + Sync + Stream<Item = Result<Message, WsError>>,
 {
-    async fn build_channel<S>(&mut self) -> ActorResult<IoChannel<T>> {
+    async fn build_channel(&mut self) -> ActorResult<IoChannel<T>> {
         if let Some(stream) = self.split_stream.take() {
             Ok(IoChannel(stream))
         } else {

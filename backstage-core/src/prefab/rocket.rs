@@ -48,7 +48,7 @@ impl RocketServer {
 }
 #[async_trait]
 impl ChannelBuilder<::rocket::Rocket<Ignite>> for RocketServer {
-    async fn build_channel<S>(&mut self) -> ActorResult<::rocket::Rocket<Ignite>> {
+    async fn build_channel(&mut self) -> ActorResult<::rocket::Rocket<Ignite>> {
         if let Some(rocket) = self.rocket.take() {
             Ok(rocket)
         } else {

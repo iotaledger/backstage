@@ -18,7 +18,7 @@ impl WebsocketListener {
 
 #[async_trait::async_trait]
 impl ChannelBuilder<TcpListenerStream> for WebsocketListener {
-    async fn build_channel<S>(&mut self) -> ActorResult<TcpListenerStream> {
+    async fn build_channel(&mut self) -> ActorResult<TcpListenerStream> {
         let listener = TcpListener::bind(self.addr).await.map_err(|e| {
             log::error!("{}", e);
             ActorError::exit_msg(e)
