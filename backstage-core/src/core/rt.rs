@@ -257,7 +257,10 @@ where
             self.upsert_microservice(scope_id, service);
             Ok(h)
         } else {
-            let msg = format!("Aborted inside start method while awaiting child to get initialized");
+            let msg = format!(
+                "Aborted inside start method while awaiting child: {:?}, to get initialized",
+                directory
+            );
             Err(ActorError::aborted_msg(msg))
         }
     }
