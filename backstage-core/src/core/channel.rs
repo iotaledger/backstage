@@ -7,13 +7,26 @@ use core::pin::Pin;
 use futures::{
     future::Aborted,
     stream::StreamExt,
-    task::{AtomicWaker, Context, Poll},
+    task::{
+        AtomicWaker,
+        Context,
+        Poll,
+    },
 };
 use pin_project_lite::pin_project;
 use prometheus::core::Collector;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{
+    AtomicBool,
+    Ordering,
+};
 pub use tokio::net::TcpListener;
-use tokio::sync::mpsc::{error::TrySendError, Receiver, Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{
+    error::TrySendError,
+    Receiver,
+    Sender,
+    UnboundedReceiver,
+    UnboundedSender,
+};
 use tokio_stream::wrappers::IntervalStream;
 pub use tokio_stream::wrappers::TcpListenerStream;
 
@@ -1146,7 +1159,12 @@ mod hyper {
         }
     }
 
-    use ::hyper::{server::conn::AddrStream, Body, Request, Response};
+    use ::hyper::{
+        server::conn::AddrStream,
+        Body,
+        Request,
+        Response,
+    };
     impl<S, E, R, F> Channel for HyperChannel<S>
     where
         for<'a> S: ::hyper::service::Service<&'a AddrStream, Error = E, Response = R, Future = F> + Send,
@@ -1240,7 +1258,10 @@ mod hyper {
 pub use self::hyper::*;
 
 #[cfg(feature = "tungstenite")]
-pub use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+pub use tokio_tungstenite::tungstenite::{
+    Error as WsError,
+    Message,
+};
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;

@@ -2,15 +2,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    AbortRegistration, Abortable, Actor, ActorError, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data,
-    NullSupervisor, Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle,
-    BACKSTAGE_PARTITIONS, SCOPES, SCOPE_ID_RANGE, VISIBLE_DATA,
+    AbortRegistration,
+    Abortable,
+    Actor,
+    ActorError,
+    ActorResult,
+    Channel,
+    ChannelBuilder,
+    Cleanup,
+    CleanupData,
+    Data,
+    NullSupervisor,
+    Resource,
+    Route,
+    Scope,
+    ScopeId,
+    Service,
+    ServiceStatus,
+    Shutdown,
+    Subscriber,
+    SupHandle,
+    BACKSTAGE_PARTITIONS,
+    SCOPES,
+    SCOPE_ID_RANGE,
+    VISIBLE_DATA,
 };
 #[cfg(feature = "config")]
 use crate::config::*;
-use rand::{distributions::Distribution, thread_rng};
+use rand::{
+    distributions::Distribution,
+    thread_rng,
+};
 #[cfg(feature = "config")]
-use serde::{de::DeserializeOwned, Deserializer, Serialize};
+use serde::{
+    de::DeserializeOwned,
+    Deserializer,
+    Serialize,
+};
 
 #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
 use crate::prefab::websocket::Websocket;
@@ -1201,7 +1229,7 @@ where
             websocket = websocket.set_ttl(ttl);
         }
         let (handle, inbox, abort_registration, mut metric, mut route) = websocket
-            .build_channel::<NullSupervisor>()
+            .build_channel()
             .await?
             .channel::<Websocket>(websocket_scope_id);
         let shutdown_handle = Box::new(handle.clone());
@@ -1275,10 +1303,8 @@ where
         use crate::prefab::backserver::Backserver;
         let server_scope_id = 1;
         let mut websocket = Backserver::new(addr.clone(), self.scope_id).link_to(Box::new(self.handle.clone()));
-        let (handle, inbox, abort_registration, mut metric, mut route) = websocket
-            .build_channel::<NullSupervisor>()
-            .await?
-            .channel::<Backserver>(server_scope_id);
+        let (handle, inbox, abort_registration, mut metric, mut route) =
+            websocket.build_channel().await?.channel::<Backserver>(server_scope_id);
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = server_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
