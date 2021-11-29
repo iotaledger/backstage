@@ -379,6 +379,22 @@ impl<T> UnboundedHandle<T> {
         }
         r
     }
+    /// Send message to the channel after the duration pass
+    pub fn send_after(
+        &self,
+        message: T,
+        duration: std::time::Duration,
+    ) -> tokio::task::JoinHandle<Result<(), tokio::sync::mpsc::error::SendError<T>>>
+    where
+        T: Send + 'static,
+    {
+        let h = self.clone();
+        let fut = async move {
+            tokio::time::sleep(duration).await;
+            h.send(message)
+        };
+        tokio::spawn(fut)
+    }
     /// Await till the channel unbounded receiver is dropped/closed
     pub async fn closed(&self) {
         self.inner.closed().await
@@ -607,6 +623,17 @@ impl<T> AbortableUnboundedHandle<T> {
     pub fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         self.inner.send(message)
     }
+    /// Send message to the channel after the duration pass
+    pub fn send_after(
+        &self,
+        message: T,
+        duration: std::time::Duration,
+    ) -> tokio::task::JoinHandle<Result<(), tokio::sync::mpsc::error::SendError<T>>>
+    where
+        T: Send + 'static,
+    {
+        self.inner.send_after(message, duration)
+    }
     /// Await till the channel is closed
     pub async fn closed(&self) {
         self.inner.closed().await
@@ -771,6 +798,22 @@ impl<T> BoundedHandle<T> {
             self.metric.inc()
         }
         r
+    }
+    /// Send message to the channel after the duration pass
+    pub fn send_after(
+        &self,
+        message: T,
+        duration: std::time::Duration,
+    ) -> tokio::task::JoinHandle<Result<(), tokio::sync::mpsc::error::SendError<T>>>
+    where
+        T: Send + 'static,
+    {
+        let h = self.clone();
+        let fut = async move {
+            tokio::time::sleep(duration).await;
+            h.send(message).await
+        };
+        tokio::spawn(fut)
     }
     /// Await till the channel is closed
     pub async fn closed(&self) {
@@ -1004,6 +1047,17 @@ impl<T> AbortableBoundedHandle<T> {
     /// Send message to the channel
     pub async fn send(&self, message: T) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
         self.inner.send(message).await
+    }
+    /// Send message to the channel after the duration pass
+    pub fn send_after(
+        &self,
+        message: T,
+        duration: std::time::Duration,
+    ) -> tokio::task::JoinHandle<Result<(), tokio::sync::mpsc::error::SendError<T>>>
+    where
+        T: Send + 'static,
+    {
+        self.inner.send_after(message, duration)
     }
     /// Await till the channel is closed
     pub async fn closed(&self) {
