@@ -258,8 +258,8 @@ where
             Ok(h)
         } else {
             let msg = format!(
-                "Aborted inside start method while awaiting child: {:?}, to get initialized",
-                directory
+                "Aborted inside start method while awaiting child: {}, to get initialized",
+                Child::type_name(),
             );
             Err(ActorError::aborted_msg(msg))
         }
