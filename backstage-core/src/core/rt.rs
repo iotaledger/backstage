@@ -1228,10 +1228,9 @@ where
         if let Some(ttl) = ttl.take() {
             websocket = websocket.set_ttl(ttl);
         }
-        let (handle, inbox, abort_registration, mut metric, mut route) = websocket
-            .build_channel()
-            .await?
-            .channel::<Websocket>(websocket_scope_id);
+        let channel: <Websocket as Actor<NullSupervisor>>::Channel = websocket.build_channel().await?;
+        let (handle, inbox, abort_registration, mut metric, mut route) =
+            channel.channel::<Websocket>(websocket_scope_id);
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = websocket_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
@@ -1303,8 +1302,8 @@ where
         use crate::prefab::backserver::Backserver;
         let server_scope_id = 1;
         let mut websocket = Backserver::new(addr.clone(), self.scope_id).link_to(Box::new(self.handle.clone()));
-        let (handle, inbox, abort_registration, mut metric, mut route) =
-            websocket.build_channel().await?.channel::<Backserver>(server_scope_id);
+        let channel: <Backserver as Actor<NullSupervisor>>::Channel = websocket.build_channel().await?;
+        let (handle, inbox, abort_registration, mut metric, mut route) = channel.channel::<Backserver>(server_scope_id);
         let shutdown_handle = Box::new(handle.clone());
         let scopes_index = server_scope_id % *BACKSTAGE_PARTITIONS;
         // create the service
