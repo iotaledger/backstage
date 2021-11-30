@@ -2,43 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    AbortRegistration,
-    Abortable,
-    Actor,
-    ActorError,
-    ActorResult,
-    Channel,
-    ChannelBuilder,
-    Cleanup,
-    CleanupData,
-    Data,
-    NullSupervisor,
-    Resource,
-    Route,
-    Scope,
-    ScopeId,
-    Service,
-    ServiceStatus,
-    Shutdown,
-    Subscriber,
-    SupHandle,
-    BACKSTAGE_PARTITIONS,
-    SCOPES,
-    SCOPE_ID_RANGE,
-    VISIBLE_DATA,
+    AbortRegistration, Abortable, Actor, ActorError, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data,
+    NullSupervisor, Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle,
+    BACKSTAGE_PARTITIONS, SCOPES, SCOPE_ID_RANGE, VISIBLE_DATA,
 };
 #[cfg(feature = "config")]
 use crate::config::*;
-use rand::{
-    distributions::Distribution,
-    thread_rng,
-};
+use rand::{distributions::Distribution, thread_rng};
 #[cfg(feature = "config")]
-use serde::{
-    de::DeserializeOwned,
-    Deserializer,
-    Serialize,
-};
+use serde::{de::DeserializeOwned, Deserializer, Serialize};
 
 #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
 use crate::prefab::websocket::Websocket;
@@ -867,16 +839,21 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     }
     /// Drop the resource, and inform the interested dyn subscribers
     pub async fn drop_resource<T: Resource>(&self) {
+        drop(self.remove_resource::<T>().await);
+    }
+    /// Remove the resource, and inform the interested dyn subscribers
+    pub async fn remove_resource<T: Resource>(&self) -> Option<T> {
         // require further read locks
         let mut should_get_shutdown = Vec::<Box<dyn Shutdown>>::new();
         // dynamic subscribers who should be notified because the resource got dropped
         let mut should_get_notification = Vec::<(ResourceRef, Box<dyn Route<Event<T>>>)>::new();
         let mut lock = SCOPES[self.scopes_index].write().await;
         let my_scope = lock.get_mut(&self.scope_id).expect("self scope to exist");
+
+        let mut resource = None;
+
         if let Some(mut data) = my_scope.data_and_subscribers.remove::<Data<T>>() {
-            let resource = data.resource.take();
-            // for peace of mind we drop the resource;
-            drop(resource);
+            resource = data.resource.take();
             // iterate the subscribers
             // drain subscribers
             for (_sub_scope_id, subscriber) in data.subscribers.drain() {
@@ -907,6 +884,8 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         for shutdown_handle in should_get_shutdown.drain(..) {
             shutdown_handle.shutdown().await;
         }
+
+        resource
     }
     /// Depends on resource T, it will await/block till the resource is available
     pub async fn depends_on<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
