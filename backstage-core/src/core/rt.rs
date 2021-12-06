@@ -1225,7 +1225,13 @@ where
         if child_scope_id == 0 {
             crate::spawn_task("ctrl_c", ctrl_c(handle.clone()));
         }
-        rx_oneshot.await.expect("oneshot to be alive")?;
+
+        if let Err(e) = rx_oneshot.await.expect("oneshot to be alive") {
+            log::error!("Unable to successfully initialize the root actor");
+            join_handle.await.ok();
+            return Err(e);
+        };
+
         // todo print banner
         Ok(Self {
             scope_id: child_scope_id,
@@ -1412,11 +1418,11 @@ async fn actor_fut_with_signal<A: Actor<S>, S: SupHandle<A>>(
     let f = actor.init(&mut rt);
     match f.await {
         Err(err) => {
-            // inform oneshot receiver
-            check_init.send(Err(err.clone())).ok();
             // breakdown the child
             let f = rt.breakdown(actor, Err(err.clone()));
             f.await;
+            // inform oneshot receiver
+            check_init.send(Err(err.clone())).ok();
             Err(err)
         }
         Ok(deps) => {
