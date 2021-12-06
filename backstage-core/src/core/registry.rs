@@ -136,7 +136,7 @@ pub trait CleanupFromOther: Send + Sync {
 #[async_trait::async_trait]
 impl<T: Resource> CleanupFromOther for Cleanup<T> {
     async fn cleanup_from_other(self: Box<Self>, my_scope_id: ScopeId) {
-        let resource_scopes_index = self.resource_scope_id % num_cpus::get();
+        let resource_scopes_index = self.resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
         if let Some(resource_scope) = lock.get_mut(&self.resource_scope_id) {
             if let Some(data) = resource_scope.data_and_subscribers.get_mut::<Data<T>>() {
