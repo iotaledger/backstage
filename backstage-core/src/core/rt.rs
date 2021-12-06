@@ -2,15 +2,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    AbortRegistration, Abortable, Actor, ActorError, ActorResult, Channel, ChannelBuilder, Cleanup, CleanupData, Data,
-    NullSupervisor, Resource, Route, Scope, ScopeId, Service, ServiceStatus, Shutdown, Subscriber, SupHandle,
-    BACKSTAGE_PARTITIONS, SCOPES, SCOPE_ID_RANGE, VISIBLE_DATA,
+    AbortRegistration,
+    Abortable,
+    Actor,
+    ActorError,
+    ActorResult,
+    Channel,
+    ChannelBuilder,
+    Cleanup,
+    CleanupData,
+    Data,
+    NullSupervisor,
+    Resource,
+    Route,
+    Scope,
+    ScopeId,
+    Service,
+    ServiceStatus,
+    Shutdown,
+    Subscriber,
+    SupHandle,
+    BACKSTAGE_PARTITIONS,
+    SCOPES,
+    SCOPE_ID_RANGE,
+    VISIBLE_DATA,
 };
 #[cfg(feature = "config")]
 use crate::config::*;
-use rand::{distributions::Distribution, thread_rng};
+use rand::{
+    distributions::Distribution,
+    thread_rng,
+};
 #[cfg(feature = "config")]
-use serde::{de::DeserializeOwned, Deserializer, Serialize};
+use serde::{
+    de::DeserializeOwned,
+    Deserializer,
+    Serialize,
+};
 
 #[cfg(all(feature = "prefabs", feature = "tungstenite"))]
 use crate::prefab::websocket::Websocket;
@@ -1008,12 +1036,13 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         let my_scope = lock.get_mut(&my_scope_id).expect("Self scope to exist");
         let route: Box<dyn Route<Event<T>>> = Box::new(self.handle.clone());
         my_scope.router.insert(route.clone());
+        let cleanup = Cleanup::<T>::new(resource_scope_id);
+        let type_id = std::any::TypeId::of::<T>();
+        my_scope.cleanup.insert((type_id, resource_scope_id), Box::new(cleanup));
         drop(lock);
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
         if let Some(resource_scope) = lock.get_mut(&resource_scope_id) {
-            // add cleanup from other obj.
-            self.add_cleanup_from_other_obj::<T>(resource_scope_id).await;
             // get the resource if it's available
             if let Some(data) = resource_scope.data_and_subscribers.get_mut::<Data<T>>() {
                 let subscriber = Subscriber::<T>::DynCopy(resource_ref, route);
@@ -1036,6 +1065,10 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                 Ok(None)
             }
         } else {
+            let mut lock = SCOPES[self.scopes_index].write().await;
+            let my_scope = lock.get_mut(&my_scope_id).expect("Self scope to exist");
+            my_scope.cleanup.remove(&(type_id, resource_scope_id));
+            drop(lock);
             // resource_scope got dropped or it doesn't exist
             anyhow::bail!("Resource scope doesn't exist");
         }
