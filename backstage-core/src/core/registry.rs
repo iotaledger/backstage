@@ -1,9 +1,15 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Route, Shutdown};
+use super::{
+    Route,
+    Shutdown,
+};
 use rand::distributions::Uniform;
-use std::{any::TypeId, collections::HashMap};
+use std::{
+    any::TypeId,
+    collections::HashMap,
+};
 use tokio::sync::RwLock;
 /// The actor level position in the supervision tree
 pub type Depth = usize;
@@ -77,12 +83,14 @@ pub enum Subscriber<T: Resource> {
     OneCopy(tokio::sync::oneshot::Sender<anyhow::Result<T>>),
     /// LinkedOneCopy subscriber will receive one copy of the resource once it's available,
     /// subscriber will get shutdown if the resource is replaced or dropped.
-    LinkedOneCopy(
+    LinkedCopy(
         Option<tokio::sync::oneshot::Sender<anyhow::Result<T>>>,
         Box<dyn Shutdown>,
+        bool,
     ),
     /// Subscriber will receive dynamic copies, pushed by the publisher,
     /// and Event::Dropped(..) will be pushed if the resource got dropped by the publisher.
+    /// Bool flag is used to indicate wheith
     DynCopy(super::ResourceRef, Box<dyn Route<super::Event<T>>>),
 }
 
@@ -92,11 +100,13 @@ impl<T: Resource> Subscriber<T> {
         Self::OneCopy(one_shot)
     }
     /// Create linked subscriber for one copy
-    pub fn linked_one_copy(
+    /// hard_link: true links the subscriber if the publisher published new copy
+    pub fn linked_copy(
         one_shot: tokio::sync::oneshot::Sender<anyhow::Result<T>>,
         shutdown_handle: Box<dyn Shutdown>,
+        hard_link: bool,
     ) -> Self {
-        Self::LinkedOneCopy(Some(one_shot), shutdown_handle)
+        Self::LinkedCopy(Some(one_shot), shutdown_handle, hard_link)
     }
     /// Create subscriber for dynamic copies.
     pub fn dyn_copy(res_ref: super::ResourceRef, boxed_route: Box<dyn Route<super::Event<T>>>) -> Self {
@@ -172,7 +182,7 @@ impl<T: Resource> CleanupSelf for CleanupData<T> {
                     Subscriber::OneCopy(one_sender) => {
                         one_sender.send(Err(anyhow::Error::msg("Cleanup"))).ok();
                     }
-                    Subscriber::LinkedOneCopy(mut one_sender_opt, shutdown_handle) => {
+                    Subscriber::LinkedCopy(mut one_sender_opt, shutdown_handle, _) => {
                         if let Some(one_sender) = one_sender_opt.take() {
                             one_sender.send(Err(anyhow::Error::msg("Cleanup"))).ok();
                         }

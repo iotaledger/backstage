@@ -789,29 +789,44 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             let mut active_subscribers = HashMap::<ScopeId, Subscriber<T>>::new();
             // require further read locks
             let mut should_get_shutdown = Vec::<Box<dyn Shutdown>>::new();
-            let mut should_get_resource = Vec::<ScopeId>::new();
+            let mut should_get_dyn_resource = Vec::<(ScopeId, String, Box<dyn Route<Event<T>>>)>::new();
             // publish copy to existing subscriber(s)
             for (sub_scope_id, subscriber) in data.subscribers.drain() {
                 match subscriber {
                     Subscriber::OneCopy(one_sender) => {
                         one_sender.send(Ok(resource.clone())).ok();
                     }
-                    Subscriber::LinkedOneCopy(mut one_sender_opt, shutdown_handle) => {
+                    Subscriber::LinkedCopy(mut one_sender_opt, shutdown_handle, hard_link) => {
                         if let Some(one_sender) = one_sender_opt.take() {
                             one_sender.send(Ok(resource.clone())).ok();
                             // reinsert into our new subscribers
-                            active_subscribers.insert(sub_scope_id, Subscriber::LinkedOneCopy(None, shutdown_handle));
+                            active_subscribers
+                                .insert(sub_scope_id, Subscriber::LinkedCopy(None, shutdown_handle, hard_link));
                         } else {
-                            // check if the resource already existed, which mean the actor already cloned cloned a copy
-                            if previous.is_some() {
-                                // note: we don't shut it down yet as it might cause deadlock
+                            // check if the resource already existed, which mean the actor already cloned a copy
+                            if previous.is_some() && hard_link {
+                                // note: we don't shut it down yet as it might cause deadlock in very rare race
+                                // condition
                                 should_get_shutdown.push(shutdown_handle);
                             }
                         };
                     }
-                    subscriber => {
-                        should_get_resource.push(sub_scope_id);
-                        active_subscribers.insert(sub_scope_id, subscriber);
+                    Subscriber::DynCopy(resource_ref, route) => {
+                        let event = Event::Published(scope_id, resource_ref.clone(), resource.clone());
+                        match route.try_send_msg(event).await {
+                            Ok(Some(_)) => {
+                                should_get_dyn_resource.push((sub_scope_id, resource_ref.clone(), route.clone()));
+                                active_subscribers.insert(sub_scope_id, Subscriber::DynCopy(resource_ref, route));
+                            }
+                            Ok(None) => {
+                                active_subscribers.insert(sub_scope_id, Subscriber::DynCopy(resource_ref, route));
+                                log::debug!("Message published to subscriber: {}", sub_scope_id);
+                            }
+                            Err(e) => {
+                                // the subscriber is not active anymore
+                                log::error!("{}", e);
+                            }
+                        };
                     }
                 }
             }
@@ -821,35 +836,15 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                 shutdown_handle.shutdown().await;
             }
             // publish the resource to other scopes
-            for sub_id in should_get_resource.pop() {
-                let sub_scopes_index = sub_id % *BACKSTAGE_PARTITIONS;
-                let lock = SCOPES[sub_scopes_index].read().await;
-                if let Some(sub_scope) = lock.get(&sub_id) {
-                    if let Some(route) = sub_scope.router.get::<Box<dyn Route<T>>>() {
-                        match route.try_send_msg(resource.clone()).await {
-                            Ok(Some(message)) => {
-                                let boxed_route = route.clone();
-                                drop(lock);
-                                if let Err(e) = boxed_route.send_msg(message).await {
-                                    log::error!("{}", e);
-                                } else {
-                                    log::debug!("Message published to subscriber: {}", sub_id);
-                                }
-                            }
-                            Ok(None) => {
-                                log::debug!("Message published to subscriber: {}", sub_id);
-                            }
-                            Err(e) => {
-                                log::error!("{}", e);
-                            }
-                        };
-                    } else {
-                        // no route available,
-                        log::error!("Subscriber: {}, doesn't have route", sub_id);
-                    };
-                } else {
-                    // sub dropped its scope, nothing is required
-                    log::warn!("Subscriber: {} scope is dropped", sub_id);
+            for (sub_id, res_ref, route) in should_get_dyn_resource {
+                let event = Event::Published(scope_id, res_ref, resource.clone());
+                match route.send_msg(event).await {
+                    Ok(()) => {
+                        log::debug!("Message published to subscriber: {}", sub_id);
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                    }
                 };
             }
         } else {
@@ -864,10 +859,6 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
     /// Lookup for resource T under the provider scope_id
     pub async fn lookup<T: Resource>(&self, resource_scope_id: ScopeId) -> Option<T> {
         Scope::lookup(resource_scope_id).await
-    }
-    /// Drop the resource, and inform the interested dyn subscribers
-    pub async fn drop_resource<T: Resource>(&self) {
-        drop(self.remove_resource::<T>().await);
     }
     /// Remove the resource, and inform the interested dyn subscribers
     pub async fn remove_resource<T: Resource>(&self) -> Option<T> {
@@ -891,7 +882,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                     Subscriber::OneCopy(one_sender) => {
                         one_sender.send(Err(anyhow::Error::msg("Resource got dropped"))).ok();
                     }
-                    Subscriber::LinkedOneCopy(mut one_sender_opt, shutdown_handle) => {
+                    Subscriber::LinkedCopy(mut one_sender_opt, shutdown_handle, _hard_link) => {
                         if let Some(one_sender) = one_sender_opt.take() {
                             one_sender.send(Err(anyhow::Error::msg("Resource got dropped"))).ok();
                             should_get_shutdown.push(shutdown_handle);
@@ -959,8 +950,13 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
         }
     }
     /// Link to resource, which will await till it's available.
-    /// NOTE: similar to depends_on, but only shutdown self actor of the resource got dropped
-    pub async fn link<T: Resource>(&self, resource_scope_id: ScopeId) -> anyhow::Result<T, anyhow::Error> {
+    /// NOTE: similar to depends_on, but only shutdown self actor if the resource got dropped
+    /// hard_link: if shutdown the subscriber when the publisher publishes a new copy
+    pub async fn link<T: Resource>(
+        &self,
+        resource_scope_id: ScopeId,
+        hard_link: bool,
+    ) -> anyhow::Result<T, anyhow::Error> {
         let my_scope_id = self.scope_id;
         let resource_scopes_index = resource_scope_id % *BACKSTAGE_PARTITIONS;
         let mut lock = SCOPES[resource_scopes_index].write().await;
@@ -969,7 +965,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             if let Some(data) = resource_scope.data_and_subscribers.get_mut::<Data<T>>() {
                 if let Some(resource) = data.resource.clone().take() {
                     let shutdown_handle = Box::new(self.handle.clone());
-                    let subscriber = Subscriber::<T>::LinkedOneCopy(None, shutdown_handle);
+                    let subscriber = Subscriber::<T>::LinkedCopy(None, shutdown_handle, hard_link);
                     data.subscribers.insert(self.scope_id, subscriber);
                     drop(lock);
                     // the self actor might get shutdown before the resource provider,
@@ -979,7 +975,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
                 } else {
                     let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<T>>();
                     let shutdown_handle = Box::new(self.handle.clone());
-                    let subscriber = Subscriber::<T>::LinkedOneCopy(Some(tx), shutdown_handle);
+                    let subscriber = Subscriber::<T>::LinkedCopy(Some(tx), shutdown_handle, hard_link);
                     data.subscribers.insert(my_scope_id, subscriber);
                     drop(lock);
                     let abortable = Abortable::new(rx, self.abort_registration.clone());
@@ -998,7 +994,7 @@ impl<A: Actor<S>, S: SupHandle<A>> Rt<A, S> {
             } else {
                 let (tx, rx) = tokio::sync::oneshot::channel::<anyhow::Result<T>>();
                 let shutdown_handle = Box::new(self.handle.clone());
-                let subscriber = Subscriber::<T>::LinkedOneCopy(Some(tx), shutdown_handle);
+                let subscriber = Subscriber::<T>::LinkedCopy(Some(tx), shutdown_handle, hard_link);
                 let cleanup_data = CleanupData::<T>::new();
                 let type_id = std::any::TypeId::of::<T>();
                 let data = Data::<T>::with_subscriber(my_scope_id, subscriber);
