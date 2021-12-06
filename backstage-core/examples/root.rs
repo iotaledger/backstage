@@ -4,12 +4,12 @@
 use backstage::core::*;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Default, Clone)]
-struct HelloWorld {
+struct Root {
     config_field: String,
 }
 
 #[async_trait::async_trait]
-impl<S> Actor<S> for HelloWorld
+impl<S> Actor<S> for Root
 where
     S: SupHandle<Self>,
 {
@@ -37,6 +37,6 @@ async fn main() {
         let env = env_logger::Env::new().filter_or("RUST_LOG", "info");
         env_logger::Builder::from_env(env).init();
     }
-    let runtime = Runtime::from_config::<HelloWorld>().await.expect("Runtime to run");
+    let runtime = Runtime::from_config::<Root>().await.expect("Runtime to run");
     runtime.block_on().await.expect("Runtime to shutdown gracefully");
 }
