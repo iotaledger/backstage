@@ -219,7 +219,15 @@ where
         Self: Send,
     {
         // try to create the actor's channel
-        let channel = child.build_channel().await?;
+        let channel = Abortable::new(child.build_channel(), self.abort_registration.clone())
+            .await
+            .map_err(|_| {
+                let msg = format!(
+                    "Aborted inside start method while building channel for child: {}",
+                    Child::type_name(),
+                );
+                ActorError::aborted_msg(msg)
+            })??;
         self.start_with_channel(directory, child, channel).await
     }
     /// Spawn the child, and returns its handle and initialized rx to check if it got initialized
@@ -233,11 +241,21 @@ where
         Child: 'static
             + ChannelBuilder<<Child as Actor<<A::Channel as Channel>::Handle>>::Channel>
             + Actor<<A::Channel as Channel>::Handle>,
+        Child::Channel: Send,
+        <Child as Actor<<A::Channel as Channel>::Handle>>::Channel: Send,
         Dir: Into<Option<String>>,
         <A::Channel as Channel>::Handle: SupHandle<Child>,
     {
         // try to create the actor's channel
-        let channel = child.build_channel().await?;
+        let channel = Abortable::new(child.build_channel(), self.abort_registration.clone())
+            .await
+            .map_err(|_| {
+                let msg = format!(
+                    "Aborted inside spawn method while building channel for child: {}",
+                    Child::type_name(),
+                );
+                ActorError::aborted_msg(msg)
+            })??;
         self.spawn_with_channel(directory, child, channel).await
     }
     /// Spawn the provided child and await till it's initialized
