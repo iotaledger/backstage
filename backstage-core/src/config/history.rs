@@ -1,9 +1,33 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{file::*, persist::*, versioned::{VersionedConfig, VersionedValue}, *};
-use crate::core::{Actor, Event, StreamExt, ActorError, NullSupervisor, Resource, SupHandle, AbortableUnboundedChannel, ActorResult, Rt};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+use super::{
+    file::*,
+    persist::*,
+    versioned::{
+        VersionedConfig,
+        VersionedValue,
+    },
+    *,
+};
+use crate::core::{
+    AbortableUnboundedChannel,
+    Actor,
+    ActorError,
+    ActorResult,
+    Event,
+    NullSupervisor,
+    Resource,
+    Rt,
+    StreamExt,
+    SupHandle,
+};
+use serde::{
+    de::DeserializeOwned,
+    Deserialize,
+    Deserializer,
+    Serialize,
+};
 
 /// A historical record
 #[derive(Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
@@ -77,7 +101,7 @@ impl<C: Config + FileSystemConfig> FileSystemConfig for HistoricalConfig<C> {
 
 impl<C: Config> Persist for HistoricalConfig<C>
 where
-    Self: FileSystemConfig,
+    C: FileSystemConfig,
 {
     fn persist(&self) -> anyhow::Result<()> {
         let dir = Self::dir();
@@ -95,7 +119,7 @@ where
                 <Self as FileSystemConfig>::ConfigType::extension()
             )))
             .map_err(|e| anyhow!(e))?
-            .write_config(self)
+            .write_config(&self.config)
     }
 }
 
@@ -270,7 +294,16 @@ impl<C: Resource> From<Event<C>> for HistoryEvent<C> {
 #[async_trait::async_trait]
 impl<C, S> Actor<S> for History<HistoricalConfig<VersionedConfig<C>>>
 where
-    C: Resource + Serialize + std::cmp::Eq + Actor<NullSupervisor> + Resource + std::fmt::Debug + CurrentVersion + FileSystemConfig + DeserializeOwned + Default,
+    C: Resource
+        + Serialize
+        + std::cmp::Eq
+        + Actor<NullSupervisor>
+        + Resource
+        + std::fmt::Debug
+        + CurrentVersion
+        + FileSystemConfig
+        + DeserializeOwned
+        + Default,
     S: SupHandle<Self>,
     VersionedValue<C>: DeserializeOwned,
     <C as FileSystemConfig>::ConfigType: ValueType,
@@ -286,32 +319,44 @@ where
         // subscribe to get updated config copies
         if let Some(config) = rt.subscribe(0, "config".to_string()).await? {
             if self.latest().config != config {
-                let version_config = VersionedConfig {version: C::CURRENT_VERSION, config};
+                let version_config = VersionedConfig {
+                    version: C::CURRENT_VERSION,
+                    config,
+                };
                 self.update(version_config.clone());
-                self.persist().map_err(|e| ActorError::exit(e))?;
-                log::info!("History configure updated config: {:#?}", version_config);
+                self.persist().map_err(|e| {
+                    log::error!("Config History persist error: {:?}", e);
+                    ActorError::exit(e)
+                })?;
+                log::info!("Config History Actor updated config: {:#?}", version_config);
             }
         };
-        log::info!("History configure got initialized");
+        log::info!("Config History Actor got initialized");
         Ok(())
     }
     async fn run(&mut self, rt: &mut Rt<Self, S>, _: Self::Data) -> ActorResult<()> {
-        log::info!("History configure is running");
+        log::info!("Config History Actor is running");
         while let Some(event) = rt.inbox_mut().next().await {
             match event {
                 HistoryEvent::ConfigTopic(event) => match event {
                     Event::Published(_, _, config) => {
-                        let version_config = VersionedConfig {version: C::CURRENT_VERSION, config};
+                        let version_config = VersionedConfig {
+                            version: C::CURRENT_VERSION,
+                            config,
+                        };
                         self.update(version_config.clone());
-                        self.persist().map_err(|e| ActorError::exit(e))?;
-                        log::info!("History configure updated config: {:#?}", version_config);
-                    },
+                        self.persist().map_err(|e| {
+                            log::error!("Config History persist error: {:?}", e);
+                            ActorError::exit(e)
+                        })?;
+                        log::info!("Config History Actor updated config: {:#?}", version_config);
+                    }
                     // shutdown when the root config is dropped
                     _ => break,
-                }
+                },
             }
         }
-        log::info!("History configure stopped");
+        log::info!("Config History Actor stopped");
         Ok(())
     }
 }
