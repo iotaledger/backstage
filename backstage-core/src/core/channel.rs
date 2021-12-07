@@ -1810,7 +1810,7 @@ mod paho_mqtt {
                 .map_err(|e| ActorError::aborted_msg("mqtt aborted while subscribing"))
         }
         /// Return the stream
-        pub fn stream(&mut self) -> &mut Receiver<Option<::paho_mqtt::Message>> {
+        pub fn stream(&mut self) -> &mut Abortable<futures::channel::mpsc::Receiver<Option<::paho_mqtt::Message>>> {
             &mut self.stream
         }
         // todo add rest helpful method (subscribe_many, with_opt, etc)
