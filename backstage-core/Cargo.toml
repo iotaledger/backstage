@@ -32,7 +32,7 @@ prometheus = "0.13.0"
 dyn-clone = "1.0.4"
 
 hyper = { version = "0.14", features = ["full"], optional = true }
-tokio-tungstenite = { version = "0.15", optional = true }
+tokio-tungstenite = { version = "0.16", optional = true }
 hyper-tungstenite = { version = "0.4", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
 console-subscriber = { git = "https://github.com/tokio-rs/console", rev = "e0c4789", optional = true }
