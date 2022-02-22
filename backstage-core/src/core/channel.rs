@@ -1199,8 +1199,9 @@ impl Channel for TcpListenerStream {
 }
 
 #[cfg(feature = "hyper")]
-mod hyper {
+mod hyper_channels {
     use super::*;
+    pub use ::hyper;
     /// Hyper channel wrapper
     pub struct HyperChannel<S> {
         server: ::hyper::Server<::hyper::server::conn::AddrIncoming, S>,
@@ -1309,13 +1310,10 @@ mod hyper {
 }
 
 #[cfg(feature = "hyper")]
-pub use self::hyper::*;
+pub use hyper_channels::*;
 
 #[cfg(feature = "tungstenite")]
-pub use tokio_tungstenite::tungstenite::{
-    Error as WsError,
-    Message,
-};
+pub use tokio_tungstenite;
 
 /// A tokio IntervalStream channel implementation, which emit Instants
 pub struct IntervalChannel<const I: u64>;
@@ -1600,10 +1598,10 @@ impl<T: Shutdown + Clone, B: Send + Sync + 'static> Shutdown for Marker<T, B> {
 }
 
 #[cfg(feature = "rocket")]
-mod rocket {
-    use ::rocket::Ignite;
-
+mod rocket_channels {
     use super::*;
+    pub use ::rocket;
+    use ::rocket::Ignite;
 
     impl Channel for ::rocket::Rocket<Ignite> {
         type Event = ();
@@ -1674,11 +1672,12 @@ mod rocket {
 }
 
 #[cfg(feature = "rocket")]
-pub use self::rocket::*;
+pub use self::rocket_channels::*;
 
 #[cfg(feature = "paho-mqtt")]
-mod paho_mqtt {
+mod paho_mqtt_channels {
     use super::*;
+    pub use ::paho_mqtt;
     use ::paho_mqtt::AsyncClient;
     use futures::channel::mpsc::Receiver;
 
@@ -1818,4 +1817,4 @@ mod paho_mqtt {
 }
 
 #[cfg(feature = "paho-mqtt")]
-pub use self::paho_mqtt::*;
+pub use self::paho_mqtt_channels::*;

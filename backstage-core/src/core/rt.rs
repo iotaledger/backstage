@@ -1251,7 +1251,6 @@ where
     }
 
     #[cfg(feature = "websocket_server")]
-    #[cfg(not(feature = "backserver"))]
     /// Enable the websocket server
     pub async fn websocket_server(mut self, addr: std::net::SocketAddr, mut ttl: Option<u32>) -> ActorResult<Self>
     where
@@ -1325,7 +1324,7 @@ where
         self.server.replace(Box::new(handle.clone()));
         Ok(self)
     }
-    #[cfg(not(feature = "websocket_server"))]
+
     #[cfg(feature = "backserver")]
     /// Enable backserver (websocket server + http + prometheus metrics)
     pub async fn backserver(mut self, addr: std::net::SocketAddr) -> ActorResult<Self>

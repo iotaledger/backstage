@@ -2,18 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    Error,
     Event,
-    Interface,
-    JsonResponder,
-    Response,
-    WebsocketSenderEvent,
+    *,
 };
 use crate::core::*;
 use futures::stream::{
     Stream,
     StreamExt,
 };
+use tokio_tungstenite::tungstenite::Error as WsError;
 /// The websocket receiver actor, manages the Stream from the client
 pub struct WebsocketReceiver<T>
 where

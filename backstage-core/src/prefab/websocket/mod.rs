@@ -8,6 +8,7 @@ mod websocket_receiver;
 /// WebSocket Sender (outcomings to client)
 mod websocket_sender;
 
+use tokio_tungstenite::tungstenite::Message;
 pub(crate) use websocket_listener::WebsocketListener;
 pub(crate) use websocket_receiver::WebsocketReceiver;
 pub(crate) use websocket_sender::{

@@ -57,7 +57,7 @@ where
         );
         // link to the atomic resource under the following scope_id
         if let Some(resource_scope_id) = rt.highest_scope_id::<Self::Data>().await {
-            let counter = rt.link::<Self::Data>(resource_scope_id).await.map_err(|e| {
+            let counter = rt.link::<Self::Data>(resource_scope_id, true).await.map_err(|e| {
                 log::error!("{:?}", e);
                 ActorError::exit_msg(format!("{:?}", e))
             })?;
@@ -119,7 +119,6 @@ where
             log::error!("{:?}", e);
             ActorError::exit_msg(format!("{:?}", e))
         })?;
-        // 
         // - build Decrementer
         let decrementer = Decrementer;
         // spawn decrementer
