@@ -17,7 +17,7 @@ serde_json = "1.0"
 erased-serde = "0.3"
 async-trait = "0.1"
 futures = "0.3"
-tokio = { version = "1.12", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "net"] }
+tokio = { version = "1.15", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "net"] }
 lazy_static = "1.4"
 anyhow = "1.0"
 anymap = "0.12"

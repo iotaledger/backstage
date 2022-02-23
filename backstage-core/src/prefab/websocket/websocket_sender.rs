@@ -23,7 +23,7 @@ where
         Self { split_sink }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum WebsocketSenderEvent {
     Shutdown,
     Result(ResponseResult),

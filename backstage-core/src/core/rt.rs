@@ -305,6 +305,15 @@ where
         let mut metric;
         // create the service
         let mut dir = directory.into();
+        // check if the dir already reserved by another child
+        if dir.is_some() && self.service.microservices.iter().any(|(_, ms)| ms.directory == dir) {
+            let msg = format!(
+                "Unable to spawn child: {}, error: directory '{}' already exist",
+                Child::type_name(),
+                dir.unwrap_or_default(),
+            );
+            return Err(ActorError::aborted_msg(msg));
+        }
         let task_name = dir.clone().unwrap_or_default();
         let mut service = Service::new::<Child, <A::Channel as Channel>::Handle>(dir.clone());
         loop {

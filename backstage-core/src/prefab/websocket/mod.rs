@@ -63,7 +63,7 @@ impl Event {
     }
 }
 // Serializable response
-#[derive(serde::Serialize, Debug)]
+#[derive(serde::Serialize, Debug, Clone)]
 /// The expected client's response for a given event request
 pub enum Response {
     /// Success shutdown signal
@@ -76,7 +76,7 @@ pub enum Response {
     ServiceTree(Service),
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 /// The expected client's error for a given event request
 pub enum Error {
     /// Failed to shutdown the actor under the ActorPath
@@ -299,10 +299,12 @@ where
 
 #[async_trait::async_trait]
 /// Erased responder which enable invoking inner generic fn on trait object
-pub trait ErasedResponder: Send + Sync {
+pub trait ErasedResponder: Send + Sync + dyn_clone::DynClone {
     /// Erased private fn
     async fn _reply(&self, response: &mut (dyn erased_serde::Serialize + Send)) -> anyhow::Result<()>;
 }
+
+dyn_clone::clone_trait_object!(ErasedResponder);
 
 /// Responder as trait object
 pub type Responder = Box<dyn ErasedResponder>;
@@ -316,7 +318,7 @@ impl GenericResponder for dyn ErasedResponder {
 }
 
 #[async_trait::async_trait]
-impl<T: Send + Sync> ErasedResponder for T
+impl<T: Send + Sync + Clone> ErasedResponder for T
 where
     Self: GenericResponder,
 {
@@ -340,7 +342,7 @@ impl GenericResponder for JsonResponder {
 }
 
 /// Websocket Json responder (used for call requests)
-// todo impl drop (and send error if the responder is not been use)
+#[derive(Clone, Debug)]
 pub struct JsonResponder {
     handle: UnboundedHandle<WebsocketSenderEvent>,
 }
