@@ -174,7 +174,7 @@ impl HandleEvent<Report<Spawner>> for Launcher {
         data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         if cx.pool::<MapPool<Spawner, i32>>().await.is_none() {
-            // info!("\n{}", rt.root_service_tree().await.unwrap());
+            // info!("\n{}", cx.root_service_tree().await.unwrap());
             cx.handle().shutdown();
         }
         Ok(())

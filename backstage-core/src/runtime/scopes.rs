@@ -9,7 +9,7 @@ use crate::actor::{
 };
 use futures::{
     future::{AbortRegistration, Aborted},
-    FutureExt, StreamExt,
+    FutureExt,
 };
 use std::{
     convert::{TryFrom, TryInto},
@@ -242,7 +242,7 @@ impl RuntimeScope {
 
     /// Query the registry for a dependency. This will return immediately whether or not it exists.
     pub async fn query_data<T: 'static + Clone + Send + Sync + Dependencies>(&mut self) -> anyhow::Result<T> {
-        T::instantiate(self).await
+        T::request_opt(self).await
     }
 
     /// Request a dependency and wait for it to be available.
@@ -266,7 +266,6 @@ impl RuntimeScope {
             .remove_data(&self.scope_id, std::any::TypeId::of::<T>())
             .await
             .ok()
-            .flatten()
             .map(|res| unsafe { *res.downcast_unchecked() })
     }
 
@@ -281,7 +280,6 @@ impl RuntimeScope {
                 .remove_data(parent_id, std::any::TypeId::of::<T>())
                 .await
                 .ok()
-                .flatten()
                 .map(|res| unsafe { *res.downcast_unchecked() })
         } else {
             None
@@ -498,7 +496,7 @@ impl RuntimeScope {
                     return Err((actor, e).into());
                 }
             };
-        self.common_init(cx.into(), actor, abort_reg, SpawnType::Actor).await
+        self.common_init(cx.into(), actor, abort_reg).await
     }
 
     /// Synchronously initialize an actor and prepare to spawn it
@@ -537,7 +535,7 @@ impl RuntimeScope {
                 return Err((actor, e).into());
             }
         };
-        self.common_init(cx, actor, abort_reg, SpawnType::Actor).await
+        self.common_init(cx, actor, abort_reg).await
     }
 
     /// Spawn a new actor with a supervisor handle
@@ -600,7 +598,7 @@ impl RuntimeScope {
                     return Err((actor, e).into());
                 }
             };
-        self.common_init(cx.into(), actor, abort_reg, SpawnType::System).await
+        self.common_init(cx.into(), actor, abort_reg).await
     }
 
     /// Synchronously initialize a system and prepare to spawn it
@@ -639,7 +637,7 @@ impl RuntimeScope {
                 return Err((actor, e).into());
             }
         };
-        self.common_init(cx, actor, abort_reg, SpawnType::System).await
+        self.common_init(cx, actor, abort_reg).await
     }
 
     /// Spawn a new system with a supervisor handle
@@ -680,8 +678,7 @@ impl RuntimeScope {
                 return Err((actor, e).into());
             }
         };
-        self.common_init_and_spawn(cx, actor, abort_reg, SpawnType::System)
-            .await
+        self.common_init_and_spawn(cx, actor, abort_reg).await
     }
 
     /// Spawn a new system with no supervisor
@@ -715,8 +712,7 @@ impl RuntimeScope {
                     return Err((actor, e).into());
                 }
             };
-        self.common_init_and_spawn(cx.into(), actor, abort_reg, SpawnType::System)
-            .await
+        self.common_init_and_spawn(cx.into(), actor, abort_reg).await
     }
 
     async fn common_init<A>(
@@ -724,17 +720,13 @@ impl RuntimeScope {
         mut cx: A::Context,
         mut actor: A,
         abort_reg: AbortRegistration,
-        spawn_type: SpawnType,
     ) -> Result<Initialized<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
     {
         log::debug!("Initializing {}", actor.name());
         let handle = cx.handle();
-        match spawn_type {
-            SpawnType::Actor | SpawnType::System => self.add_data(handle.clone()).await,
-            SpawnType::Pool => self.add_data(handle.clone()).await,
-        }
+        self.add_data(handle.clone()).await;
         let res = AssertUnwindSafe(actor.init(&mut cx)).catch_unwind().await;
         match Self::handle_init_res::<A>(res, &mut cx).await {
             Ok(data) => Ok(InitData {
@@ -742,7 +734,6 @@ impl RuntimeScope {
                 data,
                 cx,
                 abort_reg,
-                spawn_type,
             }
             .into()),
             Err(e) => Err((actor, e).into()),
@@ -756,7 +747,6 @@ impl RuntimeScope {
             mut cx,
             mut data,
             abort_reg: abort_registration,
-            spawn_type,
         }: InitData<A>,
     ) -> Act<A>
     where
@@ -788,12 +778,11 @@ impl RuntimeScope {
         cx: A::Context,
         actor: A,
         abort_reg: AbortRegistration,
-        spawn_type: SpawnType,
     ) -> Result<Act<A>, InitError<A>>
     where
         A: 'static + Actor + Send + Sync,
     {
-        let init = self.common_init(cx, actor, abort_reg, spawn_type).await?;
+        let init = self.common_init(cx, actor, abort_reg).await?;
         Ok(init.spawn(self).await)
     }
 
@@ -954,7 +943,7 @@ impl RuntimeScope {
             }
         };
         let pool = self.spawn_pool::<P, Sup, _>(supervisor_handle.clone()).await;
-        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = pool.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(handle).await;
         Ok(init)
@@ -1004,7 +993,7 @@ impl RuntimeScope {
             }
         };
         let pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
-        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = pool.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(key, handle).await;
         Ok(init)
@@ -1049,7 +1038,6 @@ where
     data: A::Data,
     cx: A::Context,
     abort_reg: AbortRegistration,
-    spawn_type: SpawnType,
 }
 
 /// A handle to an initialized actor. If unused, this will cleanup and abort the scope when dropped!
@@ -1238,7 +1226,7 @@ where
             }
         };
         let pool = self.spawn_pool::<P>().await;
-        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = pool.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(handle).await;
         Ok(init)
@@ -1284,7 +1272,7 @@ where
             }
         };
         let pool = self.spawn_pool::<P>().await;
-        let init = pool.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = pool.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle().clone();
         pool.pool.push(key, handle).await;
         Ok(init)
@@ -1800,10 +1788,7 @@ where
                 return Err((actor, e).into());
             }
         };
-        let handle = self
-            .scope
-            .common_init_and_spawn(cx, actor, abort_reg, SpawnType::Pool)
-            .await?;
+        let handle = self.scope.common_init_and_spawn(cx, actor, abort_reg).await?;
         self.pool.push(handle.clone()).await;
         Ok(handle)
     }
@@ -1822,7 +1807,7 @@ where
                 return Err((actor, e).into());
             }
         };
-        let init = self.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = self.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle();
         self.pool.push(handle.clone()).await;
         self.initialized.push(init);
@@ -1869,10 +1854,7 @@ where
                 return Err((actor, e).into());
             }
         };
-        let handle = self
-            .scope
-            .common_init_and_spawn(cx, actor, abort_reg, SpawnType::Pool)
-            .await?;
+        let handle = self.scope.common_init_and_spawn(cx, actor, abort_reg).await?;
         self.pool.push(key, handle.clone()).await;
         Ok(handle)
     }
@@ -1904,7 +1886,7 @@ where
                 return Err((actor, e).into());
             }
         };
-        let init = self.scope.common_init(cx, actor, abort_reg, SpawnType::Pool).await?;
+        let init = self.scope.common_init(cx, actor, abort_reg).await?;
         let handle = init.data.as_ref().unwrap().cx.handle();
         self.pool.push(key, handle.clone()).await;
         self.initialized.push(init);

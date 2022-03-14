@@ -2,11 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::actor::{
-    ActorError, Envelope, HandleEvent, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender,
-};
+use crate::actor::{Envelope, HandleEvent, Service, ShutdownStream, UnboundedTokioChannel, UnboundedTokioSender};
 use anymap::any::CloneAny;
-use futures::StreamExt;
 use std::any::TypeId;
 
 /// A registry shared via an Arc and RwLock
@@ -87,7 +84,7 @@ impl RegistryAccess for ArcedRegistry {
         &self,
         scope_id: &ScopeId,
         data_type: TypeId,
-    ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>> {
+    ) -> anyhow::Result<Box<dyn CloneAny + Send + Sync>> {
         self.registry.read().await.remove_data_raw(scope_id, data_type).await
     }
 
@@ -204,7 +201,7 @@ enum ResponseType {
     DropScope(anyhow::Result<()>),
     AddData(anyhow::Result<()>),
     DependOn(anyhow::Result<RawDepStatus>),
-    RemoveData(anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>>),
+    RemoveData(anyhow::Result<Box<dyn CloneAny + Send + Sync>>),
     GetData(anyhow::Result<RawDepStatus>),
     GetService(anyhow::Result<Service>),
     UpdateStatus(anyhow::Result<()>),
@@ -432,7 +429,7 @@ where
         &self,
         scope_id: &ScopeId,
         data_type: TypeId,
-    ) -> anyhow::Result<Option<Box<dyn CloneAny + Send + Sync>>> {
+    ) -> anyhow::Result<Box<dyn CloneAny + Send + Sync>> {
         let (request, recv) = RegistryActorRequest::new(RequestType::RemoveData {
             scope_id: *scope_id,
             data_type,

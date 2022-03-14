@@ -20,7 +20,7 @@ pub trait Dependencies {
     }
 
     /// Instantiate instances of some dependencies
-    async fn instantiate(scope: &mut RuntimeScope) -> anyhow::Result<Self>
+    async fn request_opt(scope: &mut RuntimeScope) -> anyhow::Result<Self>
     where
         Self: 'static + Clone + Send + Sync,
     {
@@ -63,7 +63,7 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
         })
     }
 
-    async fn instantiate(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
+    async fn request_opt(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
         scope
             .system()
             .await
@@ -99,7 +99,7 @@ where
         scope.get_data().await.get().await
     }
 
-    async fn instantiate(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
+    async fn request_opt(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
         scope
             .pool()
             .await
@@ -117,8 +117,8 @@ impl<D: 'static + Dependencies + Clone + Send + Sync> Dependencies for Option<D>
         Ok(scope.get_data::<D>().await.get_opt())
     }
 
-    async fn instantiate(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
-        Ok(D::instantiate(scope).await.ok())
+    async fn request_opt(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
+        Ok(D::request_opt(scope).await.ok())
     }
 
     async fn link(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
@@ -136,7 +136,7 @@ impl Dependencies for () {
         Ok(())
     }
 
-    async fn instantiate(_scope: &mut RuntimeScope) -> anyhow::Result<Self> {
+    async fn request_opt(_scope: &mut RuntimeScope) -> anyhow::Result<Self> {
         Ok(())
     }
 
@@ -158,9 +158,9 @@ macro_rules! impl_dependencies {
                 Ok(($($gen::request(scope).await?),+,))
             }
 
-            async fn instantiate(scope: &mut RuntimeScope) -> anyhow::Result<Self>
+            async fn request_opt(scope: &mut RuntimeScope) -> anyhow::Result<Self>
             {
-                Ok(($($gen::instantiate(scope).await?),+,))
+                Ok(($($gen::request_opt(scope).await?),+,))
             }
 
             async fn link(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
