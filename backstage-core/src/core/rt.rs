@@ -306,7 +306,13 @@ where
         // create the service
         let mut dir = directory.into();
         // check if the dir already reserved by another child
-        if dir.is_some() && self.service.microservices.iter().any(|(_, ms)| ms.directory == dir) {
+        if dir.is_some()
+            && self
+                .service
+                .microservices
+                .iter()
+                .any(|(_, ms)| (ms.directory == dir) && !ms.is_stopped())
+        {
             let msg = format!(
                 "Unable to spawn child: {}, error: directory '{}' already exist",
                 Child::type_name(),
