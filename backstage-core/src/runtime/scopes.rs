@@ -269,23 +269,6 @@ impl RuntimeScope {
             .map(|res| unsafe { *res.downcast_unchecked() })
     }
 
-    pub(crate) async fn remove_data_from_parent<T: 'static + Send + Sync + Clone>(&mut self) -> Option<T> {
-        if let Some(parent_id) = self.parent_id.as_ref() {
-            log::debug!(
-                "Removing {} from scope {:x}",
-                std::any::type_name::<T>(),
-                parent_id.as_fields().0
-            );
-            self.registry
-                .remove_data(parent_id, std::any::TypeId::of::<T>())
-                .await
-                .ok()
-                .map(|res| unsafe { *res.downcast_unchecked() })
-        } else {
-            None
-        }
-    }
-
     /// Get this scope's service
     pub async fn service(&mut self) -> Service {
         self.registry
@@ -317,7 +300,7 @@ impl RuntimeScope {
 
     /// Abort the tasks in this runtime's scope. This will shutdown tasks that have
     /// shutdown handles instead.
-    async fn abort(&mut self)
+    pub(crate) async fn abort(&mut self)
     where
         Self: Sized,
     {
@@ -1017,15 +1000,6 @@ impl RuntimeScope {
         let mut pool = self.spawn_pool::<P, Sup, _>(supervisor_handle).await;
         pool.spawn_keyed(key, actor).await
     }
-}
-
-/// The possible spawn types for actors
-#[allow(missing_docs)]
-#[derive(Clone, Copy, Debug)]
-pub enum SpawnType {
-    Actor,
-    System,
-    Pool,
 }
 
 /// Data used to spawn an actor after initializing it

@@ -3,7 +3,7 @@
 
 use super::{Actor, ActorPool, System};
 use crate::{
-    prelude::{Pool, SpawnType},
+    prelude::Pool,
     runtime::{Act, Res, RuntimeScope, Sys},
 };
 use async_trait::async_trait;
@@ -37,21 +37,6 @@ pub trait Dependencies {
     {
         scope.depend_on().await.get().await
     }
-
-    /// Cleanup dependencies based on the original spawn type
-    async fn cleanup(scope: &mut RuntimeScope, spawn_type: SpawnType)
-    where
-        Self: 'static + Clone + Send + Sync,
-    {
-        match spawn_type {
-            SpawnType::Actor | SpawnType::System => {
-                scope.remove_data_from_parent::<Self>().await;
-            }
-            SpawnType::Pool => {
-                scope.remove_data::<Self>().await;
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -75,11 +60,6 @@ impl<S: 'static + System + Send + Sync> Dependencies for Sys<S> {
             actor: Act::link(scope).await?,
             state: Res::link(scope).await?,
         })
-    }
-
-    async fn cleanup(scope: &mut RuntimeScope, spawn_type: SpawnType) {
-        Res::<S::State>::cleanup(scope, spawn_type).await;
-        Act::<S>::cleanup(scope, spawn_type).await;
     }
 }
 
@@ -124,10 +104,6 @@ impl<D: 'static + Dependencies + Clone + Send + Sync> Dependencies for Option<D>
     async fn link(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
         Ok(scope.get_data::<D>().await.get_opt())
     }
-
-    async fn cleanup(scope: &mut RuntimeScope, spawn_type: SpawnType) {
-        D::cleanup(scope, spawn_type).await;
-    }
 }
 
 #[async_trait]
@@ -143,8 +119,6 @@ impl Dependencies for () {
     async fn link(_scope: &mut RuntimeScope) -> anyhow::Result<Self> {
         Ok(())
     }
-
-    async fn cleanup(_scope: &mut RuntimeScope, _spawn_type: SpawnType) {}
 }
 
 macro_rules! impl_dependencies {
@@ -165,11 +139,6 @@ macro_rules! impl_dependencies {
 
             async fn link(scope: &mut RuntimeScope) -> anyhow::Result<Self> {
                 Ok(($($gen::link(scope).await?),+,))
-            }
-
-            async fn cleanup(scope: &mut RuntimeScope, spawn_type: SpawnType)
-            {
-                $($gen::cleanup(scope, spawn_type).await;)+
             }
         }
     };

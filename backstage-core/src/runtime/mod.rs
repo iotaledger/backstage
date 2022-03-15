@@ -285,26 +285,32 @@ impl Registry {
         scope_id
     }
 
+    /// Remove a scope and all of its children, returning the map of removed scopes
+    pub(crate) fn remove_scope(&mut self, scope_id: ScopeId) -> anyhow::Result<()> {
+        let scope = self
+            .scopes
+            .remove(&scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .into_inner();
+        for child in scope.children {
+            self.remove_scope(child)?;
+        }
+        Ok(())
+    }
+
     /// Drop a scope and all of its children recursively
-    #[async_recursion]
     pub(crate) async fn drop_scope(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        let lock = self
+        let scope = self
             .scopes
             .remove(scope_id)
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let scope = lock.read().await;
-        log::debug!("Dropping scope {:x} ({})", scope_id.as_fields().0, scope.service.name());
-        let children = scope.children.clone();
-        // Make sure we drop the lock before calling any children as they will obtain
-        // a lock on their parent. This will deadlock otherwise.
-        drop(scope);
-        for child in children {
-            self.drop_scope(&child).await?;
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .into_inner();
+        if let Some(parent_lock) = scope.parent.and_then(|parent_id| self.scopes.get(&parent_id)) {
+            let mut parent = parent_lock.write().await;
+            parent.children.remove(scope_id);
         }
-        let scope = lock.write().await;
-        if let Some(parent) = scope.parent.and_then(|parent_id| self.scopes.get(&parent_id)) {
-            let mut parent = parent.write().await;
-            parent.children.retain(|id| id != scope_id);
+        for child in scope.children {
+            self.remove_scope(child)?;
         }
         Ok(())
     }
@@ -320,7 +326,12 @@ impl Registry {
 
     pub(crate) async fn depend_on_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
         let status = self.get_data_raw(scope_id, data_type).await?;
-        let mut scope = self.scopes.get(scope_id).unwrap().write().await;
+        let mut scope = self
+            .scopes
+            .get(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .write()
+            .await;
         Ok(match scope.dependencies.entry(data_type) {
             Entry::Occupied(mut e) => {
                 let val = e.get_mut();

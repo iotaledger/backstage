@@ -43,6 +43,7 @@ impl<Sup> Clone for HelloWorldBuilder<Sup> {
 
 #[async_trait]
 impl<Sup: 'static + Actor + Supervisor<Self>> Actor for HelloWorld<Sup> {
+    const PATH: &'static str = "hello_world";
     type Data = ();
     type Context = SupervisedContext<Self, Sup, Act<Sup>>;
 
@@ -96,6 +97,7 @@ pub enum LauncherEvents {
 
 #[async_trait]
 impl Actor for Launcher {
+    const PATH: &'static str = "launcher";
     type Data = ();
     type Context = UnsupervisedContext<Self>;
 

@@ -28,6 +28,7 @@ struct Spawner {
 
 #[async_trait]
 impl Actor for Spawner {
+    const PATH: &'static str = "spawner";
     type Data = ();
     type Context = SupervisedContext<Self, Launcher, Act<Launcher>>;
 
@@ -54,7 +55,9 @@ impl HandleEvent<SpawnerEvent> for Spawner {
         match event {
             SpawnerEvent::Spawn => {
                 if self.depth < MAX_DEPTH {
+                    let start = SystemTime::now();
                     cx.spawn_actor(Launcher { depth: self.depth }).await?;
+                    // log::info!("Spawner spawned launcher: {} ms", start.elapsed().unwrap().as_millis());
                 } else {
                     cx.handle().shutdown();
                 }
@@ -101,6 +104,7 @@ enum LauncherEvent {
 
 #[async_trait]
 impl Actor for Launcher {
+    const PATH: &'static str = "launcher";
     type Data = ();
     type Context = AnyContext<Self, Spawner, Act<Spawner>>;
 
@@ -200,7 +204,7 @@ async fn startup() -> anyhow::Result<()> {
     }));
     let start = SystemTime::now();
     let counter = Arc::new(AtomicU32::default());
-    RuntimeScope::launch::<ActorRegistry, _, _>(|scope| {
+    ActorRegistry::launch(|scope| {
         let c = counter.clone();
         async move {
             scope.add_resource(c).await;

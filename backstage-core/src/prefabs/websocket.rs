@@ -59,6 +59,7 @@ impl<Sup: 'static + Supervisor<Self>> Actor for Websocket<Sup>
 where
     Sup: HandleEvent<(SocketAddr, Message)>,
 {
+    const PATH: &'static str = "websocket";
     type Data = ();
     type Context = SupervisedContext<Self, Sup, Act<Sup>>;
 
@@ -177,6 +178,7 @@ struct Responder {
 
 #[async_trait]
 impl Actor for Responder {
+    const PATH: &'static str = "websocket-responder";
     type Data = ();
     type Context = UnsupervisedContext<Self>;
 

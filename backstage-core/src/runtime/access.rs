@@ -12,6 +12,25 @@ pub struct ArcedRegistry {
     registry: Arc<RwLock<Registry>>,
 }
 
+impl ArcedRegistry {
+    /// Launch a new root runtime scope
+    pub async fn launch<F, O>(f: F) -> anyhow::Result<O>
+    where
+        O: Send + Sync,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope) -> BoxFuture<'b, anyhow::Result<O>>,
+    {
+        log::debug!("Launching with Arced Registry");
+        let mut scope = Self::instantiate("Root", None, None).await;
+        scope.update_status(ServiceStatus::Running).await.ok();
+        let res = f(&mut scope).await;
+        if res.is_err() {
+            scope.abort().await;
+        }
+        scope.join().await;
+        res
+    }
+}
+
 impl Deref for ArcedRegistry {
     type Target = Arc<RwLock<Registry>>;
 
@@ -232,6 +251,7 @@ impl Actor for RegistryActor
 where
     Self: Send,
 {
+    const PATH: &'static str = "registry";
     type Data = ();
     type Context = UnsupervisedContext<Self>;
 
@@ -298,6 +318,25 @@ impl HandleEvent<RegistryActorRequest> for RegistryActor {
 /// A registry owned by an actor in the runtime and accessible via a tokio channel
 pub struct ActorRegistry {
     handle: UnboundedTokioSender<Envelope<RegistryActor>>,
+}
+
+impl ActorRegistry {
+    /// Launch a new root runtime scope
+    pub async fn launch<F, O>(f: F) -> anyhow::Result<O>
+    where
+        O: Send + Sync,
+        for<'b> F: Send + FnOnce(&'b mut RuntimeScope) -> BoxFuture<'b, anyhow::Result<O>>,
+    {
+        log::debug!("Launching with Actor Registry");
+        let mut scope = Self::instantiate("Root", None, None).await;
+        scope.update_status(ServiceStatus::Running).await.ok();
+        let res = f(&mut scope).await;
+        if res.is_err() {
+            scope.abort().await;
+        }
+        scope.join().await;
+        res
+    }
 }
 
 impl Clone for ActorRegistry {

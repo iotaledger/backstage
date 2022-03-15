@@ -52,6 +52,7 @@ struct HelloWorld {
 
 #[async_trait]
 impl Actor for HelloWorld {
+    const PATH: &'static str = "hello_world";
     type Data = u8;
     type Context = SupervisedContext<Self, Launcher, Act<Launcher>>;
 
@@ -107,6 +108,7 @@ struct Howdy;
 
 #[async_trait]
 impl Actor for Howdy {
+    const PATH: &'static str = "howdy";
     type Data = Res<Arc<RwLock<NecessaryResource>>>;
     type Context = SupervisedContext<Self, Launcher, Act<Launcher>>;
 
@@ -184,6 +186,7 @@ enum LauncherEvents {
 
 #[async_trait]
 impl Actor for Launcher {
+    const PATH: &'static str = "launcher";
     type Data = ();
     type Context = UnsupervisedContext<Self>;
 

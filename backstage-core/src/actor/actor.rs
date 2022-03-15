@@ -16,6 +16,7 @@ use std::{any::Any, borrow::Cow, fmt::Debug, panic::AssertUnwindSafe, pin::Pin};
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor: Debug + Send + Sync + Sized {
+    const PATH: &'static str;
     type Data: Debug + Send + Sync;
     type Context: ActorContext<Self>;
     /// Used to initialize the actor. Any children spawned here will be initialized
