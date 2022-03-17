@@ -66,6 +66,12 @@ impl TryFrom<&str> for ServiceStatus {
     }
 }
 
+impl Into<Cow<'static, str>> for ServiceStatus {
+    fn into(self) -> Cow<'static, str> {
+        self.to_string().into()
+    }
+}
+
 impl<T: Status> Into<Cow<'static, str>> for CustomStatus<T> {
     fn into(self) -> Cow<'static, str> {
         self.0.to_string().into()

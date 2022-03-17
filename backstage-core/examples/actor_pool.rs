@@ -51,7 +51,7 @@ impl<Sup: 'static + Actor + Supervisor<Self>> Actor for HelloWorld<Sup> {
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(format!("Running {}", self.num)).await.ok();
+        cx.update_status(format!("Running {}", self.num)).await;
         Ok(())
     }
 }
@@ -105,7 +105,7 @@ impl Actor for Launcher {
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(ServiceStatus::Initializing).await.ok();
+        cx.update_status(ServiceStatus::Initializing).await;
         let builder = HelloWorldBuilder::new().name("Hello World".to_string());
         // Start by initializing all the actors in the pool
         let mut initialized = Vec::new();
@@ -129,7 +129,7 @@ impl Actor for Launcher {
         // Finalize the pool
         pool.spawn_all().await;
         tokio::task::spawn(ctrl_c(cx.handle().clone()));
-        cx.update_status(ServiceStatus::Running).await.ok();
+        cx.update_status(ServiceStatus::Running).await;
         Ok(())
     }
 }
@@ -152,9 +152,7 @@ impl HandleEvent<LauncherEvents> for Launcher {
                     self.count += 1;
                 }
             }
-            LauncherEvents::Shutdown { using_ctrl_c: _ } => {
-                cx.shutdown_scope(&ROOT_SCOPE).await.ok();
-            }
+            LauncherEvents::Shutdown { using_ctrl_c: _ } => cx.root_scope().shutdown().await,
         }
         Ok(())
     }
@@ -174,7 +172,7 @@ impl HandleEvent<StatusChange<HelloWorld<Self>>> for Launcher {
             event.prev_status,
             event.service.status()
         );
-        debug!("\n{}", cx.root_service_tree().await.unwrap());
+        debug!("\n{}", cx.root_scope().service_tree().await);
         Ok(())
     }
 }
@@ -233,7 +231,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::launch::<ActorRegistry, _, _>(|scope| {
+    RuntimeScope::launch(|scope| {
         async move {
             scope
                 .spawn_system_unsupervised(Launcher::default(), Arc::new(RwLock::new(LauncherAPI)))

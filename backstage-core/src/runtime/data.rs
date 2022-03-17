@@ -1,9 +1,8 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::ScopeId;
-use crate::actor::{Actor, ActorPool, Envelope, EnvelopeSender, Sender, ShutdownHandle, System};
-use futures::future::AbortHandle;
+use super::{ScopeId, ScopeView};
+use crate::actor::{Actor, ActorPool, Envelope, EnvelopeSender, Sender, System};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -60,41 +59,30 @@ where
 }
 
 /// An actor handle, used to send events
+#[derive(Debug)]
 pub struct Act<A: Actor> {
-    pub(crate) scope_id: ScopeId,
+    pub(crate) scope: ScopeView,
     pub(crate) sender: Box<dyn Sender<Envelope<A>>>,
-    pub(crate) shutdown_handle: ShutdownHandle,
-    pub(crate) abort_handle: AbortHandle,
 }
 
 impl<A: 'static + Actor> Act<A> {
-    pub(crate) fn new(
-        scope_id: ScopeId,
-        sender: Box<dyn Sender<Envelope<A>>>,
-        shutdown_handle: ShutdownHandle,
-        abort_handle: AbortHandle,
-    ) -> Self {
-        Self {
-            scope_id,
-            sender,
-            shutdown_handle,
-            abort_handle,
-        }
+    pub(crate) fn new(scope: ScopeView, sender: Box<dyn Sender<Envelope<A>>>) -> Self {
+        Self { scope, sender }
     }
 
     /// Shut down the actor with this handle. Use with care!
-    pub fn shutdown(&self) {
-        self.shutdown_handle.shutdown();
+    pub async fn shutdown(&self) {
+        self.scope.shutdown().await;
     }
 
     /// Abort the actor with this handle. Use with care!
-    pub fn abort(&self) {
-        self.abort_handle.abort();
+    pub async fn abort(&self) {
+        self.scope.abort().await;
     }
 
     /// Get the scope id of the actor this handle represents
-    pub fn scope_id(&self) -> &ScopeId {
-        &self.scope_id
+    pub fn scope_id(&self) -> ScopeId {
+        self.scope.id()
     }
 }
 
@@ -115,19 +103,9 @@ impl<A: Actor> DerefMut for Act<A> {
 impl<A: 'static + Actor> Clone for Act<A> {
     fn clone(&self) -> Self {
         Self {
-            scope_id: self.scope_id,
+            scope: self.scope.clone(),
             sender: self.sender.clone(),
-            shutdown_handle: self.shutdown_handle.clone(),
-            abort_handle: self.abort_handle.clone(),
         }
-    }
-}
-
-impl<A: 'static + Actor> std::fmt::Debug for Act<A> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct(&format!("Act<{}>", std::any::type_name::<A>()))
-            .field("scope_id", &self.scope_id)
-            .finish()
     }
 }
 

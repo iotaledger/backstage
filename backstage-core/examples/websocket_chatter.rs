@@ -56,7 +56,7 @@ impl Actor for HelloWorld {
     type Data = u8;
     type Context = SupervisedContext<Self, Launcher, Act<Launcher>>;
 
-    async fn init(&mut self, cx: &mut Self::Context) -> Result<Self::Data, ActorError>
+    async fn init(&mut self, _cx: &mut Self::Context) -> Result<Self::Data, ActorError>
     where
         Self: 'static + Sized + Send + Sync,
     {
@@ -77,7 +77,7 @@ impl HandleEvent<HelloWorldEvent> for HelloWorld {
                 info!("HelloWorld printing: {}", s);
                 *count += 1;
                 if *count == 3 {
-                    debug!("\n{}", cx.root_service_tree().await.unwrap());
+                    debug!("\n{}", cx.root_scope().service_tree().await);
                     panic!("I counted to 3!");
                 }
             }
@@ -119,16 +119,16 @@ impl Actor for Howdy {
         Ok(cx.request_data::<Res<Arc<RwLock<NecessaryResource>>>>().await?)
     }
 
-    async fn shutdown(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
+    async fn shutdown(&mut self, cx: &mut Self::Context, _data: &mut Self::Data) -> Result<(), ActorError>
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(ServiceStatus::Stopping).await.ok();
+        cx.update_status(ServiceStatus::Stopping).await;
         for s in 0..4 {
             debug!("Shutting down Howdy. {} secs remaining...", 4 - s);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        cx.update_status(ServiceStatus::Stopped).await.ok();
+        cx.update_status(ServiceStatus::Stopped).await;
         Ok(())
     }
 }
@@ -194,7 +194,7 @@ impl Actor for Launcher {
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(ServiceStatus::Initializing).await.ok();
+        cx.update_status(ServiceStatus::Initializing).await;
         let hello_world_builder = HelloWorldBuilder::new("Hello World".to_string(), 1);
         let howdy_builder = HowdyBuilder::new();
         cx.add_resource(Arc::new(RwLock::new(NecessaryResource { counter: 0 })))
@@ -206,7 +206,7 @@ impl Actor for Launcher {
         cx.spawn_actor(hello_world_builder.build()).await?;
         cx.spawn_actor(Websocket::new(([127, 0, 0, 1], 8000).into())).await?;
         tokio::task::spawn(ctrl_c(cx.handle().clone()));
-        cx.update_status("Launched").await.ok();
+        cx.update_status("Launched").await;
         Ok(())
     }
 }
@@ -217,7 +217,7 @@ impl HandleEvent<LauncherEvents> for Launcher {
         &mut self,
         cx: &mut Self::Context,
         event: LauncherEvents,
-        data: &mut Self::Data,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         match event {
             LauncherEvents::HelloWorld(event) => {
@@ -239,7 +239,7 @@ impl HandleEvent<(SocketAddr, Message)> for Launcher {
         &mut self,
         cx: &mut Self::Context,
         (peer, msg): (SocketAddr, Message),
-        data: &mut Self::Data,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         info!("Received websocket message: {:?}", msg);
         cx.send_actor_event::<Websocket<Self>, _>(WebsocketChildren::Response(peer, "bonjour".into()))
@@ -252,9 +252,9 @@ impl HandleEvent<(SocketAddr, Message)> for Launcher {
 impl<A: 'static + Debug> HandleEvent<StatusChange<A>> for Launcher {
     async fn handle_event(
         &mut self,
-        cx: &mut Self::Context,
-        event: StatusChange<A>,
-        data: &mut Self::Data,
+        _cx: &mut Self::Context,
+        _event: StatusChange<A>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -264,9 +264,9 @@ impl<A: 'static + Debug> HandleEvent<StatusChange<A>> for Launcher {
 impl<A: 'static + Debug + Send> HandleEvent<Report<A>> for Launcher {
     async fn handle_event(
         &mut self,
-        cx: &mut Self::Context,
-        event: Report<A>,
-        data: &mut Self::Data,
+        _cx: &mut Self::Context,
+        _event: Report<A>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -278,7 +278,7 @@ impl System for Launcher {
 
 async fn ctrl_c<A: 'static + Actor>(shutdown_handle: Act<A>) {
     tokio::signal::ctrl_c().await.unwrap();
-    shutdown_handle.shutdown();
+    shutdown_handle.shutdown().await;
 }
 
 #[tokio::main]
@@ -293,7 +293,7 @@ async fn startup() -> anyhow::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         log::error!("{}", info);
     }));
-    RuntimeScope::launch::<ActorRegistry, _, _>(|scope| {
+    RuntimeScope::launch(|scope| {
         async move {
             scope
                 .spawn_system_unsupervised(Launcher, Arc::new(RwLock::new(LauncherAPI)))

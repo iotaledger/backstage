@@ -3,8 +3,6 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use std::collections::HashMap;
-use syn::parse::Parse;
 
 #[proc_macro_attribute]
 pub fn build(_attr: TokenStream, item: TokenStream) -> TokenStream {

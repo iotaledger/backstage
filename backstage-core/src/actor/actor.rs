@@ -1,18 +1,11 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ActorError, Channel, Dependencies, Report, Sender, StatusChange};
-use crate::{
-    actor::{ActorRequest, ServiceStatus, ShutdownStream},
-    prelude::{Act, ActorContext},
-    runtime::{RegistryAccess, RuntimeScope},
-};
+use super::{ActorError, Sender};
+use crate::{actor::ServiceStatus, prelude::ActorContext};
 use async_trait::async_trait;
-use futures::{
-    future::{AbortHandle, Abortable},
-    FutureExt, StreamExt,
-};
-use std::{any::Any, borrow::Cow, fmt::Debug, panic::AssertUnwindSafe, pin::Pin};
+use futures::StreamExt;
+use std::{borrow::Cow, fmt::Debug, pin::Pin};
 /// The all-important Actor trait. This defines an Actor and what it do.
 #[async_trait]
 pub trait Actor: Debug + Send + Sync + Sized {
@@ -35,6 +28,7 @@ pub trait Actor: Debug + Send + Sync + Sized {
     where
         Self: 'static + Sized + Send + Sync,
     {
+        cx.update_status(ServiceStatus::Running).await;
         while let Some(evt) = cx.inbox().next().await {
             // Handle the event
             evt.handle(cx, self, data).await?;
@@ -42,12 +36,12 @@ pub trait Actor: Debug + Send + Sync + Sized {
         Ok(())
     }
 
-    async fn shutdown(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
+    async fn shutdown(&mut self, cx: &mut Self::Context, _data: &mut Self::Data) -> Result<(), ActorError>
     where
         Self: 'static + Sized + Send + Sync,
     {
         log::debug!("{} shutting down!", self.name());
-        cx.update_status(ServiceStatus::Stopped).await.ok();
+        cx.update_status(ServiceStatus::Stopped).await;
         Ok(())
     }
 
@@ -94,10 +88,6 @@ pub trait Actor: Debug + Send + Sync + Sized {
     //    .await;
     //    RuntimeScope::handle_run_res::<_, ()>(res, &mut actor_rt, None, self).await
     //}
-}
-
-pub trait DependsOn {
-    type Dependencies: Dependencies;
 }
 
 #[async_trait]

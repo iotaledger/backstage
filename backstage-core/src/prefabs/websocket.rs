@@ -67,7 +67,7 @@ where
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(ServiceStatus::Initializing).await.ok();
+        cx.update_status(ServiceStatus::Initializing).await;
         let tcp_listener = {
             TcpListener::bind(self.listen_address)
                 .await
@@ -75,7 +75,7 @@ where
         };
         cx.spawn_task(|scope| {
             async move {
-                scope.update_status(ServiceStatus::Running).await.ok();
+                scope.update_status(ServiceStatus::Running).await;
                 loop {
                     if let Ok((socket, peer)) = tcp_listener.accept().await {
                         let peer = socket.peer_addr().unwrap_or(peer);
@@ -91,7 +91,7 @@ where
                             scope
                                 .spawn_task(move |scope| {
                                     async move {
-                                        scope.update_status(ServiceStatus::Running).await.ok();
+                                        scope.update_status(ServiceStatus::Running).await;
                                         while let Some(Ok(msg)) = receiver.next().await {
                                             match msg {
                                                 Message::Close(_) => {
@@ -106,11 +106,11 @@ where
                                                 }
                                             }
                                         }
-                                        responder_handle.shutdown();
+                                        responder_handle.shutdown().await;
                                         scope
                                             .send_actor_event::<Websocket<Sup>, _>(WebsocketChildren::Close(peer))
                                             .await?;
-                                        scope.update_status(ServiceStatus::Stopped).await.ok();
+                                        scope.update_status(ServiceStatus::Stopped).await;
                                         Ok(())
                                     }
                                     .boxed()
@@ -158,7 +158,7 @@ where
                 log::trace!("Received message from peer {}: {}", addr, msg);
                 if let Err(_) = cx.supervisor_handle().send((addr, msg)) {
                     log::trace!("Failed to pass message to supervisor!");
-                    cx.shutdown();
+                    cx.shutdown().await;
                 }
             }
             WebsocketChildren::Close(peer) => {

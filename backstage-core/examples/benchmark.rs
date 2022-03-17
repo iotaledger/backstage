@@ -50,16 +50,14 @@ impl HandleEvent<SpawnerEvent> for Spawner {
         &mut self,
         cx: &mut Self::Context,
         event: SpawnerEvent,
-        data: &mut Self::Data,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         match event {
             SpawnerEvent::Spawn => {
                 if self.depth < MAX_DEPTH {
-                    let start = SystemTime::now();
                     cx.spawn_actor(Launcher { depth: self.depth }).await?;
-                    // log::info!("Spawner spawned launcher: {} ms", start.elapsed().unwrap().as_millis());
                 } else {
-                    cx.handle().shutdown();
+                    cx.shutdown().await;
                 }
             }
         }
@@ -71,9 +69,9 @@ impl HandleEvent<SpawnerEvent> for Spawner {
 impl HandleEvent<StatusChange<Launcher>> for Spawner {
     async fn handle_event(
         &mut self,
-        cx: &mut Self::Context,
-        event: StatusChange<Launcher>,
-        data: &mut Self::Data,
+        _cx: &mut Self::Context,
+        _event: StatusChange<Launcher>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -84,10 +82,10 @@ impl HandleEvent<Report<Launcher>> for Spawner {
     async fn handle_event(
         &mut self,
         cx: &mut Self::Context,
-        event: Report<Launcher>,
-        data: &mut Self::Data,
+        _event: Report<Launcher>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
-        cx.handle().shutdown();
+        cx.shutdown().await;
         Ok(())
     }
 }
@@ -112,7 +110,7 @@ impl Actor for Launcher {
     where
         Self: 'static + Sized + Send + Sync,
     {
-        cx.update_status(ServiceStatus::Initializing).await.ok();
+        cx.update_status(ServiceStatus::Initializing).await;
         if let Some(i) = cx.resource::<Arc<AtomicU32>>().await {
             i.fetch_add(1, Ordering::Relaxed);
         }
@@ -146,11 +144,11 @@ impl HandleEvent<LauncherEvent> for Launcher {
         &mut self,
         cx: &mut Self::Context,
         event: LauncherEvent,
-        data: &mut Self::Data,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         match event {
             LauncherEvent::Shutdown { using_ctrl_c: _ } => {
-                cx.shutdown_scope(&ROOT_SCOPE).await.ok();
+                cx.root_scope().shutdown().await;
             }
         }
         Ok(())
@@ -161,9 +159,9 @@ impl HandleEvent<LauncherEvent> for Launcher {
 impl HandleEvent<StatusChange<Spawner>> for Launcher {
     async fn handle_event(
         &mut self,
-        cx: &mut Self::Context,
-        event: StatusChange<Spawner>,
-        data: &mut Self::Data,
+        _cx: &mut Self::Context,
+        _event: StatusChange<Spawner>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         Ok(())
     }
@@ -174,12 +172,12 @@ impl HandleEvent<Report<Spawner>> for Launcher {
     async fn handle_event(
         &mut self,
         cx: &mut Self::Context,
-        event: Report<Spawner>,
-        data: &mut Self::Data,
+        _event: Report<Spawner>,
+        _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         if cx.pool::<MapPool<Spawner, i32>>().await.is_none() {
-            // info!("\n{}", cx.root_service_tree().await.unwrap());
-            cx.handle().shutdown();
+            // info!("\n{}", cx.root_scope().service_tree().await);
+            cx.shutdown().await;
         }
         Ok(())
     }
@@ -187,7 +185,7 @@ impl HandleEvent<Report<Spawner>> for Launcher {
 
 async fn ctrl_c(sender: Act<Launcher>) {
     tokio::signal::ctrl_c().await.unwrap();
-    sender.shutdown();
+    sender.shutdown().await;
 }
 
 #[tokio::main]
@@ -204,7 +202,7 @@ async fn startup() -> anyhow::Result<()> {
     }));
     let start = SystemTime::now();
     let counter = Arc::new(AtomicU32::default());
-    ActorRegistry::launch(|scope| {
+    RuntimeScope::launch(|scope| {
         let c = counter.clone();
         async move {
             scope.add_resource(c).await;
