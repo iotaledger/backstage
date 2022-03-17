@@ -14,7 +14,7 @@ use futures::{
 use std::{
     any::TypeId,
     borrow::Cow,
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{hash_map::Entry, HashMap},
     marker::PhantomData,
     ops::{Deref, DerefMut},
     pin::Pin,
@@ -119,33 +119,135 @@ impl RawDepStatus {
 #[derive(Debug)]
 pub struct Scope {
     id: ScopeId,
-    created_data: HashMap<TypeId, Arc<Box<dyn CloneAny + Send + Sync>>>,
-    visible_data: HashMap<TypeId, Arc<Box<dyn CloneAny + Send + Sync>>>,
+    created_data: HashMap<TypeId, Box<dyn CloneAny + Send + Sync>>,
+    visible_data: HashMap<TypeId, ScopeId>,
     service: Service,
     shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
     dependencies: HashMap<TypeId, Dependency>,
-    parent: Option<ScopeId>,
-    children: HashSet<ScopeId>,
+    parent: Option<Arc<RwLock<Scope>>>,
+    children: HashMap<ScopeId, Arc<RwLock<Scope>>>,
 }
 
 impl Scope {
-    fn new(
+    pub(crate) async fn add_data(&mut self, data_type: TypeId, data: Box<dyn CloneAny + Send + Sync>) {
+        self.created_data.insert(data_type, data);
+        self.visible_data.insert(data_type, self.id);
+        if let Some(dep) = self.dependencies.remove(&data_type) {
+            match dep {
+                Dependency::Once(ref f) | Dependency::Linked(ref f) => {
+                    f.signal(self.created_data.get(&data_type).unwrap().clone()).await;
+                }
+            }
+            if let Dependency::Linked(_) = dep {
+                self.dependencies.insert(data_type, dep);
+            }
+        }
+        let prop = Propagation::Add(self.id, self.created_data.get(&data_type).unwrap());
+        for (_, child) in self.children.iter() {
+            let mut child_scope = child.write().await;
+            child_scope.propagate_data(data_type, prop).await;
+        }
+    }
+
+    pub(crate) async fn remove_data(&mut self, data_type: TypeId) -> Option<Box<dyn CloneAny + Send + Sync>> {
+        if let Some(data) = self.created_data.remove(&data_type) {
+            self.propagate_data(data_type, Propagation::Remove).await;
+            Some(data)
+        } else {
+            None
+        }
+    }
+
+    #[async_recursion]
+    async fn propagate_data(&mut self, data_type: TypeId, prop: Propagation<'async_recursion>) {
+        match prop {
+            Propagation::Add(scope_id, data) => {
+                self.visible_data.insert(data_type, scope_id);
+                if let Some(dep) = self.dependencies.remove(&data_type) {
+                    match dep {
+                        Dependency::Once(ref f) | Dependency::Linked(ref f) => {
+                            f.signal(data.clone()).await;
+                        }
+                    }
+                    if let Dependency::Linked(_) = dep {
+                        self.dependencies.insert(data_type, dep);
+                    }
+                }
+                for (_, child) in self.children.iter() {
+                    let mut child_scope = child.write().await;
+                    child_scope.propagate_data(data_type, prop.clone()).await;
+                }
+            }
+            Propagation::Remove => {
+                self.visible_data.remove(&data_type);
+                if let Some(Dependency::Linked(_)) = self.dependencies.remove(&data_type) {
+                    log::debug!(
+                        "Aborting scope {} ({}) due to a removed critical dependency!",
+                        self.id,
+                        self.service.name()
+                    );
+                    self.abort();
+                } else {
+                    for (_, child) in self.children.iter() {
+                        let mut child_scope = child.write().await;
+                        child_scope.propagate_data(data_type, prop.clone()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn get_service(&self) -> Service {
+        self.service.clone()
+    }
+
+    pub(crate) fn update_status<S: Into<Cow<'static, str>>>(&mut self, status: S) {
+        self.service.update_status(status);
+    }
+
+    #[async_recursion]
+    pub(crate) async fn abort_recursive(&mut self) {
+        for (_, child) in self.children.iter() {
+            let mut child_lock = child.write().await;
+            child_lock.abort_recursive().await;
+        }
+        self.abort();
+    }
+
+    #[async_recursion]
+    pub(crate) async fn service_tree(&self) -> ServiceTree {
+        let mut children = Vec::new();
+        for (_, child) in self.children.iter() {
+            let child_lock = child.read().await;
+            children.push(child_lock.service_tree().await);
+        }
+        ServiceTree {
+            service: self.service.clone(),
+            children,
+        }
+    }
+
+    async fn new(
         id: ScopeId,
-        parent: Option<&Scope>,
+        parent: Option<Arc<RwLock<Scope>>>,
         name: String,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
     ) -> Self {
+        let visible_data = match parent.as_ref() {
+            Some(parent) => parent.read().await.visible_data.clone(),
+            None => Default::default(),
+        };
         Scope {
             id,
             created_data: Default::default(),
-            visible_data: parent.map(|p| p.visible_data.clone()).unwrap_or_default(),
+            visible_data,
             service: Service::new(id, name),
             shutdown_handle,
             abort_handle,
             dependencies: Default::default(),
-            parent: parent.map(|p| p.id),
+            parent,
             children: Default::default(),
         }
     }
@@ -234,9 +336,9 @@ dyn_clone::clone_trait_object!(RegistryAccess);
 
 /// The central registry that stores all data for the application.
 /// Data is accessable via scopes organized as a tree structure.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Registry {
-    scopes: HashMap<ScopeId, RwLock<Scope>>,
+    scopes: HashMap<ScopeId, Arc<RwLock<Scope>>>,
 }
 
 impl Default for Registry {
@@ -267,65 +369,63 @@ impl Registry {
             }
         };
         let scope = {
-            if let Some(parent_lock) = parent.and_then(|ref p| self.scopes.get(p)) {
-                let mut parent_scope = parent_lock.write().await;
-                parent_scope.children.insert(scope_id);
-                Scope::new(
-                    scope_id,
-                    Some(&*parent_scope),
-                    name_fn(scope_id),
-                    shutdown_handle,
-                    abort_handle,
-                )
+            if let Some(parent) = parent.and_then(|ref p| self.scopes.get(p)) {
+                let res = Arc::new(RwLock::new(
+                    Scope::new(
+                        scope_id,
+                        Some(parent.clone()),
+                        name_fn(scope_id),
+                        shutdown_handle,
+                        abort_handle,
+                    )
+                    .await,
+                ));
+                let mut parent_scope = parent.write().await;
+                parent_scope.children.insert(scope_id, res.clone());
+                res
             } else {
-                Scope::new(scope_id, None, name_fn(scope_id), shutdown_handle, abort_handle)
+                Arc::new(RwLock::new(
+                    Scope::new(scope_id, None, name_fn(scope_id), shutdown_handle, abort_handle).await,
+                ))
             }
         };
-        self.scopes.insert(scope_id, RwLock::new(scope));
+        self.scopes.insert(scope_id, scope);
         scope_id
     }
 
     /// Remove a scope and all of its children, returning the map of removed scopes
-    pub(crate) fn remove_scope(&mut self, scope_id: ScopeId) -> anyhow::Result<()> {
-        let scope = self
+    #[async_recursion]
+    pub(crate) async fn remove_scope(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
+        let lock = self
             .scopes
-            .remove(&scope_id)
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-            .into_inner();
-        for child in scope.children {
-            self.remove_scope(child)?;
+            .remove(scope_id)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        let scope = lock.read().await;
+        for (child_id, _) in scope.children.iter() {
+            self.remove_scope(child_id).await?;
         }
         Ok(())
     }
 
     /// Drop a scope and all of its children recursively
     pub(crate) async fn drop_scope(&mut self, scope_id: &ScopeId) -> anyhow::Result<()> {
-        let scope = self
+        let lock = self
             .scopes
             .remove(scope_id)
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
-            .into_inner();
-        if let Some(parent_lock) = scope.parent.and_then(|parent_id| self.scopes.get(&parent_id)) {
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
+        let scope = lock.read().await;
+        if let Some(parent_lock) = scope.parent.as_ref() {
             let mut parent = parent_lock.write().await;
             parent.children.remove(scope_id);
         }
-        for child in scope.children {
-            self.remove_scope(child)?;
+        for (child_id, _) in scope.children.iter() {
+            self.remove_scope(child_id).await?;
         }
         Ok(())
     }
 
-    pub(crate) async fn depend_on<T: 'static + Send + Sync + Clone>(
-        &self,
-        scope_id: &ScopeId,
-    ) -> anyhow::Result<DepStatus<T>> {
-        self.depend_on_raw(scope_id, TypeId::of::<T>())
-            .await
-            .map(|s| s.with_type())
-    }
-
-    pub(crate) async fn depend_on_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
-        let status = self.get_data_raw(scope_id, data_type).await?;
+    pub(crate) async fn depend_on(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
+        let status = self.get_data(scope_id, data_type).await?;
         let mut scope = self
             .scopes
             .get(scope_id)
@@ -338,30 +438,21 @@ impl Registry {
                 val.upgrade();
                 match val {
                     Dependency::Linked(f) => RawDepStatus::Waiting(f.clone()),
-                    _ => panic!(),
+                    _ => unreachable!(),
                 }
             }
             Entry::Vacant(v) => {
                 let flag = DepSignal::default();
                 v.insert(Dependency::Linked(flag.clone()));
                 if let RawDepStatus::Ready(t) = status {
-                    flag.signal_raw(t.into()).await;
+                    flag.signal(t.into()).await;
                 }
                 RawDepStatus::Waiting(flag)
             }
         })
     }
 
-    /// Add some arbitrary data to a scope and its children recursively
-    pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(
-        &self,
-        scope_id: &ScopeId,
-        data: T,
-    ) -> anyhow::Result<()> {
-        self.add_data_raw(scope_id, TypeId::of::<T>(), Box::new(data)).await
-    }
-
-    pub(crate) async fn add_data_raw(
+    pub(crate) async fn add_data(
         &self,
         scope_id: &ScopeId,
         data_type: TypeId,
@@ -373,22 +464,11 @@ impl Registry {
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
             .write()
             .await;
-
-        let arc_data = Arc::new(data);
-        scope.created_data.insert(data_type, arc_data.clone());
-        self.propagate_data_raw(scope.deref_mut(), data_type, Propagation::Add(arc_data))
-            .await;
-        Ok(())
+        Ok(scope.add_data(data_type, data).await)
     }
 
     /// Remove some data from this scope and its children.
-    pub(crate) async fn remove_data<T: 'static + Send + Sync + Clone>(&self, scope_id: &ScopeId) -> anyhow::Result<T> {
-        self.remove_data_raw(scope_id, TypeId::of::<T>())
-            .await
-            .map(|o| *unsafe { o.downcast_unchecked::<T>() })
-    }
-
-    pub(crate) async fn remove_data_raw(
+    pub(crate) async fn remove_data(
         &self,
         scope_id: &ScopeId,
         data_type: TypeId,
@@ -399,100 +479,65 @@ impl Registry {
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
             .write()
             .await;
-        if let Some(arc_data) = scope.created_data.remove(&data_type) {
-            self.propagate_data_raw(scope.deref_mut(), data_type, Propagation::Remove)
-                .await;
-            Ok(Arc::try_unwrap(arc_data).unwrap())
-        } else {
-            anyhow::bail!("Tried to remove data not created by scope {}!", scope_id);
-        }
-    }
-
-    #[async_recursion]
-    async fn propagate_data_raw(&self, scope: &mut Scope, data_type: TypeId, prop: Propagation) {
-        match prop {
-            Propagation::Add(ref arc_data) => {
-                scope.visible_data.insert(data_type, arc_data.clone());
-                if let Some(dep) = scope.dependencies.remove(&data_type) {
-                    match dep {
-                        Dependency::Once(ref f) | Dependency::Linked(ref f) => {
-                            f.signal_raw(arc_data.deref().clone()).await;
-                        }
-                    }
-                    if let Dependency::Linked(_) = dep {
-                        scope.dependencies.insert(data_type, dep);
-                    }
-                }
-                for child in scope.children.iter() {
-                    if let Some(child_lock) = self.scopes.get(child) {
-                        let mut child_scope = child_lock.write().await;
-                        self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone())
-                            .await;
-                    }
-                }
-            }
-            Propagation::Remove => {
-                scope.visible_data.remove(&data_type);
-                if let Some(Dependency::Linked(_)) = scope.dependencies.remove(&data_type) {
-                    log::debug!(
-                        "Aborting scope {} ({}) due to a removed critical dependency!",
-                        scope.id,
-                        scope.service.name()
-                    );
-                    scope.abort();
-                } else {
-                    for child in scope.children.iter() {
-                        if let Some(child_lock) = self.scopes.get(child) {
-                            let mut child_scope = child_lock.write().await;
-                            self.propagate_data_raw(child_scope.deref_mut(), data_type, prop.clone())
-                                .await;
-                        }
-                    }
-                }
-            }
-        }
+        Ok(scope
+            .remove_data(data_type)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No data of the requested type!"))?)
     }
 
     /// Get a reference to some arbitrary data from the given scope
-    pub(crate) async fn get_data<T: 'static + Send + Sync + Clone>(
-        &self,
-        scope_id: &ScopeId,
-    ) -> anyhow::Result<DepStatus<T>> {
-        self.get_data_raw(scope_id, TypeId::of::<T>())
-            .await
-            .map(|s| s.with_type::<T>())
-    }
-
-    pub(crate) async fn get_data_raw(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
-        let lock = self
+    pub(crate) async fn get_data(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
+        let scope = self
             .scopes
             .get(scope_id)
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let scope = lock.read().await;
-        Ok(
-            match scope
-                .visible_data
-                .get(&data_type)
-                .map(|arc_data| arc_data.deref().clone())
-            {
-                Some(d) => RawDepStatus::Ready(d),
-                None => {
-                    // Drop the current lock because we're going to aquire a write lock here
-                    drop(scope);
-                    let flag = match lock.write().await.dependencies.entry(data_type) {
-                        Entry::Occupied(o) => match o.get() {
-                            Dependency::Once(f) | Dependency::Linked(f) => f.clone(),
-                        },
-                        Entry::Vacant(v) => {
-                            let flag = DepSignal::default();
-                            v.insert(Dependency::Once(flag.clone()));
-                            flag
-                        }
-                    };
-                    RawDepStatus::Waiting(flag)
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .read()
+            .await;
+        Ok(match scope.visible_data.get(&data_type) {
+            Some(id) => {
+                let scope = self
+                    .scopes
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+                    .read()
+                    .await;
+                match scope.created_data.get(&data_type) {
+                    Some(data) => RawDepStatus::Ready(data.clone()),
+                    None => {
+                        // This data was supposed to be here but is not
+                        // so remove it from the scope's visible data
+                        let mut scope = self
+                            .scopes
+                            .get(scope_id)
+                            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+                            .write()
+                            .await;
+                        scope.visible_data.remove(&data_type);
+                        anyhow::bail!("No data of the requested type!")
+                    }
                 }
-            },
-        )
+            }
+            None => {
+                drop(scope);
+                let mut scope = self
+                    .scopes
+                    .get(scope_id)
+                    .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+                    .write()
+                    .await;
+                let flag = match scope.dependencies.entry(data_type) {
+                    Entry::Occupied(o) => match o.get() {
+                        Dependency::Once(f) | Dependency::Linked(f) => f.clone(),
+                    },
+                    Entry::Vacant(v) => {
+                        let flag = DepSignal::default();
+                        v.insert(Dependency::Once(flag.clone()));
+                        flag
+                    }
+                };
+                RawDepStatus::Waiting(flag)
+            }
+        })
     }
 
     pub(crate) async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service> {
@@ -500,8 +545,7 @@ impl Registry {
             .scopes
             .get(scope_id)
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let scope = scope.read().await;
-        Ok(scope.service.clone())
+        Ok(scope.read().await.get_service())
     }
 
     pub(crate) async fn update_status<S: Into<Cow<'static, str>>>(
@@ -509,16 +553,15 @@ impl Registry {
         scope_id: &ScopeId,
         status: S,
     ) -> anyhow::Result<()> {
-        let scope = self
+        let mut scope = self
             .scopes
             .get(scope_id)
-            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?;
-        let mut scope = scope.write().await;
-        scope.service.update_status(status);
-        Ok(())
+            .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
+            .write()
+            .await;
+        Ok(scope.update_status(status))
     }
 
-    #[async_recursion]
     pub(crate) async fn abort(&self, scope_id: &ScopeId) -> anyhow::Result<()> {
         let mut scope = self
             .scopes
@@ -526,14 +569,9 @@ impl Registry {
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
             .write()
             .await;
-        for child in scope.children.iter() {
-            self.abort(child).await.ok();
-        }
-        scope.abort();
-        Ok(())
+        Ok(scope.abort_recursive().await)
     }
 
-    #[async_recursion]
     pub(crate) async fn service_tree(&self, scope_id: &ScopeId) -> anyhow::Result<ServiceTree> {
         let scope = self
             .scopes
@@ -541,14 +579,7 @@ impl Registry {
             .ok_or_else(|| anyhow::anyhow!("No scope with id {}!", scope_id))?
             .read()
             .await;
-        let mut children = Vec::new();
-        for child in scope.children.iter() {
-            children.push(self.service_tree(child).await?);
-        }
-        Ok(ServiceTree {
-            service: scope.service.clone(),
-            children,
-        })
+        Ok(scope.service_tree().await)
     }
 }
 
@@ -560,7 +591,7 @@ pub(crate) struct DepFlag {
 }
 
 impl DepFlag {
-    pub(crate) async fn signal_raw(&self, val: Box<dyn CloneAny + Send + Sync>) {
+    pub(crate) async fn signal(&self, val: Box<dyn CloneAny + Send + Sync>) {
         *self.val.write().await = Some(val);
         self.set.store(true, Ordering::Relaxed);
         self.waker.wake();
@@ -578,8 +609,8 @@ pub struct DepSignal {
 }
 
 impl DepSignal {
-    pub(crate) async fn signal_raw(&self, val: Box<dyn CloneAny + Send + Sync>) {
-        self.flag.signal_raw(val).await
+    pub(crate) async fn signal(&self, val: Box<dyn CloneAny + Send + Sync>) {
+        self.flag.signal(val).await
     }
 
     pub(crate) fn cancel(self) {
@@ -636,8 +667,8 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
     }
 }
 
-#[derive(Clone)]
-enum Propagation {
-    Add(Arc<Box<dyn CloneAny + Send + Sync>>),
+#[derive(Copy, Clone)]
+enum Propagation<'a> {
+    Add(ScopeId, &'a Box<dyn CloneAny + Send + Sync>),
     Remove,
 }

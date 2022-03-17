@@ -92,11 +92,11 @@ impl RegistryAccess for ArcedRegistry {
         data_type: TypeId,
         data: Box<dyn CloneAny + Send + Sync>,
     ) -> anyhow::Result<()> {
-        self.registry.read().await.add_data_raw(scope_id, data_type, data).await
+        self.registry.read().await.add_data(scope_id, data_type, data).await
     }
 
     async fn depend_on(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
-        self.registry.read().await.depend_on_raw(scope_id, data_type).await
+        self.registry.read().await.depend_on(scope_id, data_type).await
     }
 
     async fn remove_data(
@@ -104,11 +104,11 @@ impl RegistryAccess for ArcedRegistry {
         scope_id: &ScopeId,
         data_type: TypeId,
     ) -> anyhow::Result<Box<dyn CloneAny + Send + Sync>> {
-        self.registry.read().await.remove_data_raw(scope_id, data_type).await
+        self.registry.read().await.remove_data(scope_id, data_type).await
     }
 
     async fn get_data(&self, scope_id: &ScopeId, data_type: TypeId) -> anyhow::Result<RawDepStatus> {
-        self.registry.read().await.get_data_raw(scope_id, data_type).await
+        self.registry.read().await.get_data(scope_id, data_type).await
     }
 
     async fn get_service(&self, scope_id: &ScopeId) -> anyhow::Result<Service> {
@@ -291,15 +291,15 @@ impl HandleEvent<RegistryActorRequest> for RegistryActor {
                 scope_id,
                 data_type,
                 data,
-            } => ResponseType::AddData(self.registry.add_data_raw(&scope_id, data_type, data).await),
+            } => ResponseType::AddData(self.registry.add_data(&scope_id, data_type, data).await),
             RequestType::DependOn { scope_id, data_type } => {
-                ResponseType::DependOn(self.registry.depend_on_raw(&scope_id, data_type).await)
+                ResponseType::DependOn(self.registry.depend_on(&scope_id, data_type).await)
             }
             RequestType::RemoveData { scope_id, data_type } => {
-                ResponseType::RemoveData(self.registry.remove_data_raw(&scope_id, data_type).await)
+                ResponseType::RemoveData(self.registry.remove_data(&scope_id, data_type).await)
             }
             RequestType::GetData { scope_id, data_type } => {
-                ResponseType::GetData(self.registry.get_data_raw(&scope_id, data_type).await)
+                ResponseType::GetData(self.registry.get_data(&scope_id, data_type).await)
             }
             RequestType::GetService(scope_id) => ResponseType::GetService(self.registry.get_service(&scope_id).await),
             RequestType::UpdateStatus { scope_id, status } => {
