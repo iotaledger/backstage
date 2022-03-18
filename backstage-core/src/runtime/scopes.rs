@@ -4,8 +4,8 @@
 use super::*;
 use crate::actor::{
     Actor, ActorError, ActorPool, BasicActorPool, CustomStatus, Dependencies, DynEvent, Envelope, EnvelopeSender,
-    ErrorReport, HandleEvent, InitError, KeyedActorPool, Receiver, Report, Service, ServiceTree, ShutdownHandle,
-    ShutdownStream, Status, StatusChange, SuccessReport, UnboundedTokioChannel,
+    ErrorReport, HandleEvent, InitError, KeyedActorPool, Receiver, Report, ServiceTree, ShutdownHandle, ShutdownStream,
+    Status, StatusChange, SuccessReport, UnboundedTokioChannel,
 };
 use futures::{
     future::{AbortRegistration, Aborted},
@@ -45,9 +45,22 @@ impl ScopeView {
         self.0.id
     }
 
-    /// Get the parent's scope id, if one exists
-    pub fn parent_id(&self) -> Option<ScopeId> {
-        self.0.parent.as_ref().map(|s| s.id)
+    /// Get the parent scope, if one exists
+    pub fn parent(&self) -> Option<ScopeView> {
+        self.0.parent().cloned().map(ScopeView)
+    }
+
+    /// Get the child scopes
+    pub async fn children(&self) -> Vec<ScopeView> {
+        self.0
+            .data
+            .read()
+            .await
+            .children
+            .values()
+            .cloned()
+            .map(ScopeView)
+            .collect()
     }
 
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&self, data: T) {
@@ -109,7 +122,7 @@ impl ScopeView {
     }
 
     /// Get this scope's service
-    pub async fn service(&self) -> Service {
+    pub async fn service(&self) -> ServiceView {
         self.0.get_service().await
     }
 
@@ -318,6 +331,7 @@ impl RuntimeScope {
         for handle in self.join_handles.drain(..) {
             handle.await.ok();
         }
+        self.0.drop().await;
     }
 
     /// Spawn a new, plain task
@@ -369,9 +383,9 @@ impl RuntimeScope {
             return Err((
                 actor,
                 anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                    "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                     name,
-                    self.0.id,
+                    self.0.id.as_fields().0,
                     service.name()
                 ),
             )
@@ -408,9 +422,9 @@ impl RuntimeScope {
                 return Err((
                     actor,
                     anyhow::anyhow!(
-                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                         name,
-                        self.id(),
+                        self.id().as_fields().0,
                         service.name()
                     ),
                 )
@@ -470,9 +484,9 @@ impl RuntimeScope {
                 return Err((
                     actor,
                     anyhow::anyhow!(
-                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                         name,
-                        self.id(),
+                        self.id().as_fields().0,
                         service.name()
                     ),
                 )
@@ -511,7 +525,7 @@ impl RuntimeScope {
             return Err((
                 actor,
                 anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                    "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                     name,
                     self.id(),
                     service.name()
@@ -554,9 +568,9 @@ impl RuntimeScope {
                 return Err((
                     actor,
                     anyhow::anyhow!(
-                        "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                        "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                         name,
-                        self.id(),
+                        self.id().as_fields().0,
                         service.name()
                     ),
                 )
@@ -589,9 +603,9 @@ impl RuntimeScope {
             return Err((
                 actor,
                 anyhow::anyhow!(
-                    "Attempted to add a duplicate actor ({}) to scope {} ({})",
+                    "Attempted to add a duplicate actor ({}) to scope {:x} ({})",
                     name,
-                    self.id(),
+                    self.id().as_fields().0,
                     service.name()
                 ),
             )
@@ -1201,7 +1215,7 @@ where
     }
 
     /// Get the runtime's service
-    async fn service(&mut self) -> Service;
+    async fn service(&mut self) -> ServiceView;
 
     /// Update this scope's service status
     async fn update_status<S: Status + Send>(&mut self, status: S)
@@ -1295,7 +1309,7 @@ where
     }
 
     /// Get the runtime's service
-    async fn service(&mut self) -> Service {
+    async fn service(&mut self) -> ServiceView {
         self.scope.service().await
     }
 
@@ -1415,7 +1429,7 @@ where
     }
 
     /// Get the runtime's service
-    async fn service(&mut self) -> Service {
+    async fn service(&mut self) -> ServiceView {
         self.scope.service().await
     }
 
@@ -1512,7 +1526,7 @@ where
     }
 
     /// Get the runtime's service
-    async fn service(&mut self) -> Service {
+    async fn service(&mut self) -> ServiceView {
         match self {
             AnyContext::Supervised(s) => s.service(),
             AnyContext::Unsupervised(u) => u.service(),
@@ -1675,9 +1689,9 @@ where
             return Err((
                 actor,
                 anyhow::anyhow!(
-                    "Attempted to add a duplicate metric to pool {} in scope {} ({})",
+                    "Attempted to add a duplicate metric to pool {} in scope {:x} ({})",
                     std::any::type_name::<Pool<P>>(),
-                    self.scope.id(),
+                    self.scope.id().as_fields().0,
                     service.name()
                 ),
             )
@@ -1707,9 +1721,9 @@ where
             return Err((
                 actor,
                 anyhow::anyhow!(
-                    "Attempted to add a duplicate metric to pool {} in scope {} ({})",
+                    "Attempted to add a duplicate metric to pool {} in scope {:x} ({})",
                     std::any::type_name::<Pool<P>>(),
-                    self.scope.id(),
+                    self.scope.id().as_fields().0,
                     service.name()
                 ),
             )

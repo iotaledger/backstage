@@ -82,7 +82,7 @@ impl HandleEvent<Report<Launcher>> for Spawner {
     async fn handle_event(
         &mut self,
         cx: &mut Self::Context,
-        _event: Report<Launcher>,
+        event: Report<Launcher>,
         _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         cx.shutdown().await;
@@ -175,8 +175,7 @@ impl HandleEvent<Report<Spawner>> for Launcher {
         _event: Report<Spawner>,
         _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
-        if cx.pool::<MapPool<Spawner, i32>>().await.is_none() {
-            // info!("\n{}", cx.root_scope().service_tree().await);
+        if cx.children().await.is_empty() {
             cx.shutdown().await;
         }
         Ok(())

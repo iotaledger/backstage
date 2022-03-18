@@ -1,7 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::actor::{Channel, Service, ServiceStatus, ServiceTree, ShutdownHandle, System};
+use crate::actor::{Channel, Service, ServiceStatus, ServiceTree, ServiceView, ShutdownHandle, System};
 use anymap::any::{CloneAny, UncheckedAnyExt};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
@@ -43,27 +43,27 @@ pub const ROOT_SCOPE: Uuid = Uuid::nil();
 pub struct Scope {
     inner: Arc<ScopeInner>,
     valid: Arc<AtomicBool>,
+    service: Service,
 }
 
 /// Shared scope information
 #[derive(Debug)]
 pub struct ScopeInner {
     id: ScopeId,
-    data: RwLock<ScopeData>,
-    service: RwLock<Service>,
+    data: RwLock<ScopeMutData>,
     shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
     parent: Option<Scope>,
-    children: RwLock<HashMap<ScopeId, Scope>>,
     path: Option<&'static str>,
 }
 
 /// Scope data
 #[derive(Debug, Default)]
-pub struct ScopeData {
+pub struct ScopeMutData {
     created: HashMap<TypeId, Box<dyn CloneAny + Send + Sync>>,
     visible: HashMap<TypeId, Scope>,
     dependencies: HashMap<TypeId, Dependency>,
+    children: HashMap<ScopeId, Scope>,
 }
 
 impl Scope {
@@ -72,13 +72,12 @@ impl Scope {
             inner: Arc::new(ScopeInner {
                 id: ROOT_SCOPE,
                 data: Default::default(),
-                service: RwLock::new(Service::new(ROOT_SCOPE, "root")),
                 shutdown_handle: Default::default(),
                 abort_handle: Some(abort_handle),
                 parent: None,
-                children: Default::default(),
                 path: None,
             }),
+            service: Service::new(ROOT_SCOPE, "root"),
             valid: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -96,21 +95,21 @@ impl Scope {
         let child = Scope {
             inner: Arc::new(ScopeInner {
                 id,
-                data: RwLock::new(ScopeData {
+                data: RwLock::new(ScopeMutData {
                     created: Default::default(),
                     visible: visible_data,
                     dependencies: Default::default(),
+                    children: Default::default(),
                 }),
-                service: RwLock::new(Service::new(id, name(id))),
                 shutdown_handle,
                 abort_handle,
                 parent: Some(parent),
-                children: Default::default(),
                 path,
             }),
+            service: Service::new(id, name(id)),
             valid: Arc::new(AtomicBool::new(true)),
         };
-        self.children.write().await.insert(id, child.clone());
+        self.data.write().await.children.insert(id, child.clone());
         child
     }
 
@@ -128,11 +127,12 @@ impl Scope {
         if path.is_absolute() {
             let mut curr = self.find(ROOT_SCOPE).unwrap();
             for segment in path.iter() {
-                let children = curr.children.read().await.values().cloned().collect::<Vec<_>>();
+                let children = curr.data.read().await.children.values().cloned().collect::<Vec<_>>();
                 if children.is_empty() {
                     return None;
                 }
                 for child in children.iter() {
+                    // TODO: somehow handle skipping levels if there are no matching paths
                     if segment.to_str() == self.path {
                         let found = child.clone();
                         curr = found;
@@ -146,22 +146,46 @@ impl Scope {
         }
     }
 
+    pub(crate) fn parent(&self) -> Option<&Scope> {
+        self.parent.as_ref()
+    }
+
+    pub(crate) async fn children(&self) -> Vec<Scope> {
+        self.data.read().await.children.values().cloned().collect()
+    }
+
+    pub(crate) async fn drop(&self) {
+        if let Some(parent) = self.parent.as_ref() {
+            parent.data.write().await.children.remove(&self.id);
+        }
+    }
+
     pub(crate) async fn add_data(&self, data_type: TypeId, data: Box<dyn CloneAny + Send + Sync>) {
         if !self.valid.load(Ordering::Relaxed) {
-            log::warn!("Tried to add data to invalid scope {}", self.id);
+            log::warn!("Tried to add data to invalid scope {:x}", self.id.as_fields().0);
             return;
         }
         self.data.write().await.created.insert(data_type, data);
-        self.propagate_data(data_type, &Propagation::Add(self.clone())).await;
+        self.propagate_data(data_type, self).await;
     }
 
     pub(crate) async fn remove_data(&self, data_type: TypeId) -> Option<DepReady> {
         if !self.valid.load(Ordering::Relaxed) {
-            log::warn!("Tried to remove data from invalid scope {}", self.id);
+            log::warn!("Tried to remove data from invalid scope {:x}", self.id.as_fields().0);
             return None;
         }
-        if let Some(data) = self.data.write().await.created.remove(&data_type) {
-            self.propagate_data(data_type, &Propagation::Remove).await;
+        let mut scope_data = self.data.write().await;
+        if let Some(data) = scope_data.created.remove(&data_type) {
+            scope_data.visible.remove(&data_type);
+            if let Some(Dependency::Linked(_)) = scope_data.dependencies.remove(&data_type) {
+                drop(scope_data);
+                log::debug!(
+                    "Aborting scope {:x} ({}) due to a removed critical dependency!",
+                    self.id.as_fields().0,
+                    self.service.name()
+                );
+                self.abort().await;
+            }
             Some(DepReady(data))
         } else {
             None
@@ -169,51 +193,30 @@ impl Scope {
     }
 
     #[async_recursion]
-    async fn propagate_data(&self, data_type: TypeId, prop: &Propagation) {
+    async fn propagate_data(&self, data_type: TypeId, creator_scope: &Scope) {
+        log::debug!("Propagating data to {:x}", self.id.as_fields().0);
         let mut scope_data = self.data.write().await;
-        match prop {
-            Propagation::Add(creator_scope) => {
-                scope_data.visible.insert(data_type, creator_scope.clone());
-                let dep = scope_data.dependencies.remove(&data_type);
-                drop(scope_data);
-                if let Some(dep) = dep {
-                    let data = creator_scope.data.read().await.created.get(&data_type).unwrap().clone();
-                    dep.get_signal().signal(data).await;
+        scope_data.visible.insert(data_type, creator_scope.clone());
+        let dep = scope_data.dependencies.remove(&data_type);
+        let children = scope_data.children.values().cloned().collect::<Vec<_>>();
+        drop(scope_data);
+        if let Some(dep) = dep {
+            let data = creator_scope.data.read().await.created.get(&data_type).unwrap().clone();
+            dep.get_signal().signal(data).await;
 
-                    if let Dependency::Linked(_) = dep {
-                        self.data.write().await.dependencies.insert(data_type, dep);
-                    }
-                }
-                let children = self.children.read().await.values().cloned().collect::<Vec<_>>();
-                for child_scope in children.iter() {
-                    child_scope.propagate_data(data_type, prop).await;
-                }
+            if let Dependency::Linked(_) = dep {
+                self.data.write().await.dependencies.insert(data_type, dep);
             }
-            Propagation::Remove => {
-                scope_data.visible.remove(&data_type);
-                if let Some(Dependency::Linked(_)) = scope_data.dependencies.remove(&data_type) {
-                    drop(scope_data);
-                    log::debug!(
-                        "Aborting scope {} ({}) due to a removed critical dependency!",
-                        self.id,
-                        self.service.read().await.name()
-                    );
-                    self.abort().await;
-                } else {
-                    drop(scope_data);
-                    let children = self.children.read().await.values().cloned().collect::<Vec<_>>();
-                    for child_scope in children.iter() {
-                        child_scope.propagate_data(data_type, prop).await;
-                    }
-                }
-            }
+        }
+        for child_scope in children.iter() {
+            child_scope.propagate_data(data_type, creator_scope).await;
         }
     }
 
     /// Get some arbitrary data from the given scope
     pub(crate) async fn get_data(&self, data_type: TypeId) -> Option<DepReady> {
         if !self.valid.load(Ordering::Relaxed) {
-            log::warn!("Tried to get data from invalid scope {}", self.id);
+            log::warn!("Tried to get data from invalid scope {:x}", self.id.as_fields().0);
             return None;
         }
         let scope_data = self.data.read().await;
@@ -233,18 +236,9 @@ impl Scope {
         if !self.valid.load(Ordering::Relaxed) {
             anyhow::bail!("Scope is invalid");
         }
-        let scope_data = self.data.read().await;
-        let visible = scope_data.visible.get(&data_type).cloned();
-        drop(scope_data);
-        let data = match visible {
-            Some(creator_scope) => {
-                let scope_data = creator_scope.data.read().await;
-                scope_data.created.get(&data_type).cloned()
-            }
-            None => None,
-        };
+        let data = self.get_data(data_type).await;
         Ok(match data {
-            Some(data) => RawDepStatus::Ready(DepReady(data)),
+            Some(data) => RawDepStatus::Ready(data),
             None => {
                 let mut scope_data = self.data.write().await;
                 let flag = match scope_data.dependencies.entry(data_type) {
@@ -276,6 +270,7 @@ impl Scope {
             Entry::Vacant(v) => {
                 let flag = DepSignal::default();
                 v.insert(Dependency::Linked(flag.clone()));
+                drop(scope_data);
                 if let Some(DepReady(t)) = status {
                     flag.signal(t.into()).await;
                 }
@@ -284,20 +279,17 @@ impl Scope {
         })
     }
 
-    pub(crate) async fn get_service(&self) -> Service {
-        self.service.read().await.clone()
+    pub(crate) async fn get_service(&self) -> ServiceView {
+        self.service.view().await
     }
 
     pub(crate) async fn update_status<S: Into<Cow<'static, str>>>(&self, status: S) {
-        if !self.valid.load(Ordering::Relaxed) {
-            return;
-        }
-        self.service.write().await.update_status(status);
+        self.service.update_status(status).await;
     }
 
     #[async_recursion]
     pub(crate) async fn service_tree(&self) -> ServiceTree {
-        let children = self.children.read().await.values().cloned().collect::<Vec<_>>();
+        let children = self.data.read().await.children.values().cloned().collect::<Vec<_>>();
         let mut child_svs = Vec::new();
         for child_scope in children.iter() {
             child_svs.push(child_scope.service_tree().await);
@@ -330,9 +322,12 @@ impl Scope {
         for (_, dep) in data {
             dep.into_signal().cancel()
         }
-        let children = self.children.read().await.values().cloned().collect::<Vec<_>>();
+        let children = self.data.read().await.children.values().cloned().collect::<Vec<_>>();
         for child_scope in children.iter() {
             child_scope.abort().await;
+        }
+        if let Some(handle) = self.shutdown_handle.as_ref() {
+            handle.shutdown();
         }
         if let Some(abort) = self.abort_handle.as_ref() {
             abort.abort();
@@ -534,10 +529,4 @@ impl<T: 'static + Clone> Future for DepHandle<T> {
             Poll::Pending
         }
     }
-}
-
-#[derive(Clone)]
-enum Propagation {
-    Add(Scope),
-    Remove,
 }

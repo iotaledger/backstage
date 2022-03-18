@@ -12,6 +12,12 @@ pub trait Actor: Debug + Send + Sync + Sized {
     const PATH: &'static str;
     type Data: Debug + Send + Sync;
     type Context: ActorContext<Self>;
+
+    /// Set this actor's name, primarily for debugging purposes
+    fn name(&self) -> Cow<'static, str> {
+        std::any::type_name::<Self>().into()
+    }
+
     /// Used to initialize the actor. Any children spawned here will be initialized
     /// before this actor's run method is called so they are guaranteed to be
     /// ready to use depending on their requirements. Dependencies are not
@@ -24,6 +30,7 @@ pub trait Actor: Debug + Send + Sync + Sized {
     where
         Self: 'static + Sized + Send + Sync;
 
+    /// Run the actor event loop
     async fn run(&mut self, cx: &mut Self::Context, data: &mut Self::Data) -> Result<(), ActorError>
     where
         Self: 'static + Sized + Send + Sync,
@@ -36,6 +43,7 @@ pub trait Actor: Debug + Send + Sync + Sized {
         Ok(())
     }
 
+    /// Shutdown the actor
     async fn shutdown(&mut self, cx: &mut Self::Context, _data: &mut Self::Data) -> Result<(), ActorError>
     where
         Self: 'static + Sized + Send + Sync,
@@ -43,11 +51,6 @@ pub trait Actor: Debug + Send + Sync + Sized {
         log::debug!("{} shutting down!", self.name());
         cx.update_status(ServiceStatus::Stopped).await;
         Ok(())
-    }
-
-    /// Get this actor's name
-    fn name(&self) -> Cow<'static, str> {
-        std::any::type_name::<Self>().into()
     }
 
     // /// Start with this actor as the root scope

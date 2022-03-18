@@ -129,7 +129,6 @@ impl Actor for Launcher {
         // Finalize the pool
         pool.spawn_all().await;
         tokio::task::spawn(ctrl_c(cx.handle().clone()));
-        cx.update_status(ServiceStatus::Running).await;
         Ok(())
     }
 }

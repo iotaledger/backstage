@@ -1,7 +1,7 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ActorError, Service};
+use super::{ActorError, ServiceView};
 use std::{borrow::Cow, marker::PhantomData};
 
 pub type Report<T> = Result<SuccessReport<T>, ErrorReport<T>>;
@@ -12,11 +12,11 @@ pub struct SuccessReport<T> {
     /// The actor's state when it finished running
     pub state: T,
     /// The actor's service when it finished running
-    pub service: Service,
+    pub service: ServiceView,
 }
 
 impl<T> SuccessReport<T> {
-    pub(crate) fn new(state: T, service: Service) -> Result<Self, ErrorReport<T>> {
+    pub(crate) fn new(state: T, service: ServiceView) -> Result<Self, ErrorReport<T>> {
         Ok(Self { state, service })
     }
 }
@@ -27,13 +27,13 @@ pub struct ErrorReport<T> {
     /// The actor's state when it finished running
     pub state: T,
     /// The actor's service when it finished running
-    pub service: Service,
+    pub service: ServiceView,
     /// The error that occurred
     pub error: ActorError,
 }
 
 impl<T> ErrorReport<T> {
-    pub(crate) fn new(state: T, service: Service, error: ActorError) -> Result<SuccessReport<T>, Self> {
+    pub(crate) fn new(state: T, service: ServiceView, error: ActorError) -> Result<SuccessReport<T>, Self> {
         Err(Self { state, service, error })
     }
 }
@@ -44,13 +44,13 @@ pub struct StatusChange<T> {
     /// The actor's previous state
     pub prev_status: Cow<'static, str>,
     /// The actor's service
-    pub service: Service,
+    pub service: ServiceView,
     /// The actor type enum
     pub actor_type: PhantomData<fn(T) -> T>,
 }
 
 impl<T> StatusChange<T> {
-    pub(crate) fn new(prev_status: Cow<'static, str>, service: Service) -> Self {
+    pub(crate) fn new(prev_status: Cow<'static, str>, service: ServiceView) -> Self {
         Self {
             prev_status,
             service,

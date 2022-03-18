@@ -9,8 +9,10 @@ use std::{
     convert::{TryFrom, TryInto},
     fmt::Display,
     ops::{Deref, DerefMut},
+    sync::Arc,
     time::SystemTime,
 };
+use tokio::sync::RwLock;
 
 /// Defines anything which can be used as an actor's status
 pub trait Status: TryFrom<&'static str> + Display + Clone {}
@@ -85,8 +87,28 @@ impl Default for ServiceStatus {
 }
 
 /// An actor's service metrics
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Service {
+    /// Inner data
+    inner: Arc<ServiceInner>,
+}
+
+/// Shared service data
+#[derive(Debug)]
+pub struct ServiceInner {
+    /// The scope ID of this service
+    scope_id: ScopeId,
+    /// The status of the actor
+    status: RwLock<Cow<'static, str>>,
+    /// The name of the actor
+    name: Cow<'static, str>,
+    /// The start timestamp, used to calculated uptime
+    up_since: SystemTime,
+}
+
+/// A snapshot of a service at a given time
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceView {
     /// The scope ID of this service
     scope_id: ScopeId,
     /// The status of the actor
@@ -101,29 +123,62 @@ impl Service {
     /// Create a new Service
     pub fn new<S: Into<Cow<'static, str>>>(scope_id: ScopeId, name: S) -> Self {
         Self {
-            scope_id,
-            status: ServiceStatus::Starting.to_string().into(),
-            name: name.into(),
-            up_since: SystemTime::now(),
+            inner: Arc::new(ServiceInner {
+                scope_id,
+                status: RwLock::new(ServiceStatus::Starting.to_string().into()),
+                name: name.into(),
+                up_since: SystemTime::now(),
+            }),
         }
     }
-    /// Set the service status
-    pub fn with_status<S: Into<Cow<'static, str>>>(mut self, status: S) -> Self {
-        self.status = status.into();
-        self
+}
+
+impl Deref for Service {
+    type Target = ServiceInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
+}
+
+impl ServiceInner {
     /// Update the service status
-    pub fn update_status<S: Into<Cow<'static, str>>>(&mut self, status: S) {
-        self.status = status.into();
-    }
-    /// Set the service (application) name
-    pub fn with_name<S: Into<Cow<'static, str>>>(mut self, name: S) -> Self {
-        self.name = name.into();
-        self
+    pub async fn update_status<S: Into<Cow<'static, str>>>(&self, status: S) {
+        *self.status.write().await = status.into();
     }
     /// Update the service (application) name
     pub fn update_name<S: Into<Cow<'static, str>>>(&mut self, name: S) {
         self.name = name.into();
+    }
+
+    /// Get the service scope id
+    pub fn scope_id(&self) -> &ScopeId {
+        &self.scope_id
+    }
+    /// Get the name of this service
+    pub fn name(&self) -> &Cow<'static, str> {
+        &self.name
+    }
+    /// Get the service uptime in milliseconds
+    pub fn up_since(&self) -> &SystemTime {
+        &self.up_since
+    }
+
+    /// Get a snapshot of the service
+    pub async fn view(&self) -> ServiceView {
+        ServiceView {
+            scope_id: self.scope_id,
+            status: self.status.read().await.clone(),
+            name: self.name.clone(),
+            up_since: self.up_since,
+        }
+    }
+}
+
+impl ServiceView {
+    /// Update the service status
+    pub(crate) fn update_status<S: Into<Cow<'static, str>>>(&mut self, status: S) {
+        self.status = status.into();
     }
     /// Check if the service is stopping
     pub fn is_stopping(&self) -> bool {
@@ -165,8 +220,8 @@ impl Service {
         &self.scope_id
     }
     /// Get the status of this service
-    pub fn status(&self) -> &Cow<'static, str> {
-        &self.status
+    pub fn status(&self) -> Cow<'static, str> {
+        self.status.clone()
     }
     /// Get the name of this service
     pub fn name(&self) -> &Cow<'static, str> {
@@ -182,17 +237,30 @@ impl Service {
     }
 }
 
+impl Display for ServiceView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({:x}) - {}, Uptime {} ms",
+            self.name(),
+            self.scope_id.as_fields().0,
+            self.status(),
+            self.up_since().elapsed().unwrap().as_millis(),
+        )
+    }
+}
+
 /// A tree of services
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ServiceTree {
     /// The service at this level
-    pub service: Service,
+    pub service: ServiceView,
     /// The children of this level
     pub children: Vec<ServiceTree>,
 }
 
 impl Deref for ServiceTree {
-    type Target = Service;
+    type Target = ServiceView;
 
     fn deref(&self) -> &Self::Target {
         &self.service
