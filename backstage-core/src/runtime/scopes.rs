@@ -15,7 +15,6 @@ use std::{
     convert::{TryFrom, TryInto},
     fmt::Debug,
     panic::AssertUnwindSafe,
-    path::Path,
 };
 
 /// A runtime which defines a particular scope and functionality to
@@ -50,6 +49,7 @@ impl ScopeView {
         self.0.parent().cloned().map(ScopeView)
     }
 
+    /// Get this scope's siblings
     pub async fn siblings(&self) -> Vec<ScopeView> {
         if let Some(parent) = self.0.parent() {
             parent.children.read().await.values().cloned().map(ScopeView).collect()
@@ -58,7 +58,7 @@ impl ScopeView {
         }
     }
 
-    /// Get the child scopes
+    /// Get this scope's children
     pub async fn children(&self) -> Vec<ScopeView> {
         self.0.children.read().await.values().cloned().map(ScopeView).collect()
     }
@@ -138,18 +138,18 @@ impl ScopeView {
     }
 
     /// Get the root scope
-    pub fn root_scope(&self) -> ScopeView {
-        self.find_scope(ROOT_SCOPE).unwrap()
+    pub fn root(&self) -> ScopeView {
+        self.find_by_id(ROOT_SCOPE).unwrap()
     }
 
     /// Find a scope by id
-    pub fn find_scope(&self, scope_id: ScopeId) -> Option<ScopeView> {
-        self.0.find(scope_id).map(ScopeView)
+    pub fn find_by_id(&self, scope_id: ScopeId) -> Option<ScopeView> {
+        self.0.find(scope_id).cloned().map(ScopeView)
     }
 
     /// Find a scope by its path. Relative paths will search from this scope while absolute paths will begin with the
     /// root.
-    pub async fn find_scope_by_path(&self, path: &Path) -> Option<ScopeView> {
+    pub async fn find_by_path(&self, path: &str) -> Option<ScopeView> {
         self.0.find_by_path(path).await.map(ScopeView)
     }
 
@@ -226,7 +226,7 @@ impl ScopeView {
     /// Add a global, shared resource and get a reference to it
     pub async fn add_global_resource<R: 'static + Send + Sync + Clone>(&self, resource: R) -> Res<R> {
         log::debug!("Adding {} to root scope", std::any::type_name::<Res<R>>());
-        self.root_scope().add_data(Res(resource.clone())).await;
+        self.root().add_data(Res(resource.clone())).await;
         Res(resource)
     }
 
@@ -281,7 +281,8 @@ impl RuntimeScope {
         &self,
         actor: &A,
         supervisor_handle: Option<H>,
-        abort_handle: Option<AbortHandle>,
+        abort_handle: AbortHandle,
+        path: String,
     ) -> anyhow::Result<A::Context>
     where
         H: 'static,
@@ -291,7 +292,7 @@ impl RuntimeScope {
         <A::Context as TryFrom<AnyContext<A, Sup, H>>>::Error: Into<anyhow::Error>,
     {
         let name = actor.name().into_owned();
-        AnyContext::new(actor, |_| name, self, supervisor_handle, abort_handle)
+        AnyContext::new(actor, |_| name, self, supervisor_handle, abort_handle, path)
             .await
             .and_then(|cx| {
                 cx.try_into()
@@ -304,7 +305,7 @@ impl RuntimeScope {
         name: N,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-        path: Option<&'static str>,
+        path: Option<String>,
     ) -> Self {
         Self {
             scope: ScopeView(self.scope.0.child(name, shutdown_handle, abort_handle, path).await),
@@ -404,7 +405,7 @@ impl RuntimeScope {
         }
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let name = actor.name().into_owned();
-        let cx = match UnsupervisedContext::new(&actor, |_| name, self, Some(abort_handle)).await {
+        let cx = match UnsupervisedContext::new(&actor, |_| name, self, abort_handle, A::PATH.into()).await {
             Ok(cx) => cx,
             Err(e) => {
                 return Err((actor, e).into());
@@ -444,7 +445,7 @@ impl RuntimeScope {
         }
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(&actor, Some(supervisor_handle), abort_handle, A::PATH.into())
             .await
         {
             Ok(cx) => cx,
@@ -507,7 +508,7 @@ impl RuntimeScope {
         self.add_data(Res(state)).await;
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let name = actor.name().into_owned();
-        let cx = match UnsupervisedContext::new(&actor, |_| name, self, Some(abort_handle)).await {
+        let cx = match UnsupervisedContext::new(&actor, |_| name, self, abort_handle, A::PATH.into()).await {
             Ok(cx) => cx,
             Err(e) => {
                 return Err((actor, e).into());
@@ -547,7 +548,7 @@ impl RuntimeScope {
         self.add_data(Res(state)).await;
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(&actor, Some(supervisor_handle), abort_handle, A::PATH.into())
             .await
         {
             Ok(cx) => cx,
@@ -591,7 +592,7 @@ impl RuntimeScope {
         self.add_data(Res(state)).await;
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(&actor, Some(supervisor_handle), abort_handle, A::PATH.into())
             .await
         {
             Ok(cx) => cx,
@@ -625,7 +626,7 @@ impl RuntimeScope {
         self.add_data(Res(state)).await;
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let name = actor.name().into_owned();
-        let cx = match UnsupervisedContext::new(&actor, |_| name, self, Some(abort_handle)).await {
+        let cx = match UnsupervisedContext::new(&actor, |_| name, self, abort_handle, A::PATH.into()).await {
             Ok(cx) => cx,
             Err(e) => {
                 return Err((actor, e).into());
@@ -853,7 +854,12 @@ impl RuntimeScope {
     {
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle.clone()), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle.clone()),
+                abort_handle,
+                P::Actor::PATH.into(),
+            )
             .await
         {
             Ok(cx) => cx,
@@ -903,7 +909,12 @@ impl RuntimeScope {
     {
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle.clone()), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle.clone()),
+                abort_handle,
+                P::Actor::PATH.to_string() + "/" + &key.to_string(),
+            )
             .await
         {
             Ok(cx) => cx,
@@ -1127,7 +1138,12 @@ where
         let supervisor_handle = self.handle().clone();
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle.clone()), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle.clone()),
+                abort_handle,
+                P::Actor::PATH.into(),
+            )
             .await
         {
             Ok(cx) => cx,
@@ -1173,7 +1189,12 @@ where
         let supervisor_handle = self.handle().clone();
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
-            .create_context(&actor, Some(supervisor_handle.clone()), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle.clone()),
+                abort_handle,
+                P::Actor::PATH.to_string() + "/" + &key.to_string(),
+            )
             .await
         {
             Ok(cx) => cx,
@@ -1263,12 +1284,13 @@ where
         name: N,
         parent: &RuntimeScope,
         supervisor_handle: H,
-        abort_handle: Option<AbortHandle>,
+        abort_handle: AbortHandle,
+        path: String,
     ) -> anyhow::Result<Self> {
         let (sender, receiver) = UnboundedTokioChannel::<Envelope<A>>::new(actor).await?;
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let scope = parent
-            .child(name, Some(shutdown_handle), abort_handle, Some(A::PATH))
+            .child(name, Some(shutdown_handle), Some(abort_handle), Some(path))
             .await;
         Ok(Self {
             handle: Act::new(scope.clone(), Box::new(sender)),
@@ -1386,12 +1408,13 @@ where
         actor: &A,
         name: N,
         parent: &RuntimeScope,
-        abort_handle: Option<AbortHandle>,
+        abort_handle: AbortHandle,
+        path: String,
     ) -> anyhow::Result<Self> {
         let (sender, receiver) = UnboundedTokioChannel::<Envelope<A>>::new(actor).await?;
         let (receiver, shutdown_handle) = ShutdownStream::new(receiver);
         let scope = parent
-            .child(name, Some(shutdown_handle), abort_handle, Some(A::PATH))
+            .child(name, Some(shutdown_handle), Some(abort_handle), Some(path))
             .await;
         Ok(Self {
             handle: Act::new(scope.clone(), Box::new(sender)),
@@ -1499,13 +1522,14 @@ where
         name: N,
         parent: &RuntimeScope,
         supervisor_handle: Option<H>,
-        abort_handle: Option<AbortHandle>,
+        abort_handle: AbortHandle,
+        path: String,
     ) -> anyhow::Result<Self> {
         Ok(match supervisor_handle {
             Some(supervisor_handle) => AnyContext::Supervised(
-                SupervisedContext::new(actor, name, parent, supervisor_handle, abort_handle).await?,
+                SupervisedContext::new(actor, name, parent, supervisor_handle, abort_handle, path).await?,
             ),
-            None => AnyContext::Unsupervised(UnsupervisedContext::new(actor, name, parent, abort_handle).await?),
+            None => AnyContext::Unsupervised(UnsupervisedContext::new(actor, name, parent, abort_handle, path).await?),
         })
     }
 
@@ -1646,7 +1670,7 @@ where
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
             .scope
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(&actor, Some(supervisor_handle), abort_handle, P::Actor::PATH.into())
             .await
         {
             Ok(cx) => cx,
@@ -1665,7 +1689,7 @@ where
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
             .scope
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(&actor, Some(supervisor_handle), abort_handle, P::Actor::PATH.into())
             .await
         {
             Ok(cx) => cx,
@@ -1712,7 +1736,12 @@ where
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
             .scope
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle),
+                abort_handle,
+                P::Actor::PATH.to_string() + "/" + &key.to_string(),
+            )
             .await
         {
             Ok(cx) => cx,
@@ -1744,7 +1773,12 @@ where
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         let cx = match self
             .scope
-            .create_context(&actor, Some(supervisor_handle), Some(abort_handle))
+            .create_context(
+                &actor,
+                Some(supervisor_handle),
+                abort_handle,
+                P::Actor::PATH.to_string() + "/" + &key.to_string(),
+            )
             .await
         {
             Ok(cx) => cx,

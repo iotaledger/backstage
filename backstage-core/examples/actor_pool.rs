@@ -151,7 +151,7 @@ impl HandleEvent<LauncherEvents> for Launcher {
                     self.count += 1;
                 }
             }
-            LauncherEvents::Shutdown { using_ctrl_c: _ } => cx.root_scope().shutdown().await,
+            LauncherEvents::Shutdown { using_ctrl_c: _ } => cx.root().shutdown().await,
         }
         Ok(())
     }
@@ -171,7 +171,7 @@ impl HandleEvent<StatusChange<HelloWorld<Self>>> for Launcher {
             event.prev_status,
             event.service.status()
         );
-        debug!("\n{}", cx.root_scope().service_tree().await);
+        debug!("\n{}", cx.root().service_tree().await);
         Ok(())
     }
 }

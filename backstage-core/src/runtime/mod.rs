@@ -16,7 +16,6 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     marker::PhantomData,
     ops::{Deref, DerefMut},
-    path::Path,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -55,14 +54,13 @@ pub struct ScopeInner {
     abort_handle: Option<AbortHandle>,
     parent: Option<Scope>,
     children: RwLock<HashMap<ScopeId, Scope>>,
-    path: Option<&'static str>,
+    path: Option<String>,
 }
 
 /// Scope data
 #[derive(Debug, Default)]
 pub struct ScopeMutData {
     created: HashMap<TypeId, Box<dyn CloneAny + Send + Sync>>,
-    visible: HashMap<TypeId, Scope>,
     dependencies: HashMap<TypeId, Dependency>,
 }
 
@@ -88,17 +86,15 @@ impl Scope {
         name: N,
         shutdown_handle: Option<ShutdownHandle>,
         abort_handle: Option<AbortHandle>,
-        path: Option<&'static str>,
+        path: Option<String>,
     ) -> Self {
         let id = Uuid::new_v4();
         let parent = self.clone();
-        let visible_data = parent.data.read().await.visible.clone();
         let child = Scope {
             inner: Arc::new(ScopeInner {
                 id,
                 data: RwLock::new(ScopeMutData {
                     created: Default::default(),
-                    visible: visible_data,
                     dependencies: Default::default(),
                 }),
                 shutdown_handle,
@@ -115,37 +111,55 @@ impl Scope {
     }
 
     /// Find a scope by id
-    pub fn find(&self, id: ScopeId) -> Option<Scope> {
+    pub fn find(&self, id: ScopeId) -> Option<&Scope> {
         if id == self.id {
-            Some(self.clone())
+            Some(self)
         } else {
             self.parent.as_ref().and_then(|p| p.find(id))
         }
     }
 
     /// Find a scope by path
-    pub async fn find_by_path(&self, path: &Path) -> Option<Scope> {
-        if path.is_absolute() {
-            let mut curr = self.find(ROOT_SCOPE).unwrap();
-            for segment in path.iter() {
-                let children = curr.children.read().await;
-                if children.is_empty() {
-                    return None;
-                }
-                for child in children.values() {
-                    // TODO: somehow handle skipping levels if there are no matching paths
-                    if segment.to_str() == self.path {
-                        let found = child.clone();
-                        drop(children);
-                        curr = found;
-                        break;
+    pub async fn find_by_path(&self, path: &str) -> Option<Scope> {
+        if path.is_empty() {
+            return None;
+        }
+        let path = path.replace(r"\", "/");
+        let mut path = path.split('/').collect::<Vec<_>>();
+        let absolute = match path.first() {
+            Some(&"") | Some(&"root") => {
+                path.remove(0);
+                true
+            }
+            _ => false,
+        };
+        let mut segments = &path[..];
+        let mut children = if absolute { self.find(ROOT_SCOPE).unwrap() } else { self }
+            .children
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(child) = children.pop() {
+            match child.path.as_ref() {
+                Some(child_path) => {
+                    let child_path_segments = child_path.split('/').collect::<Vec<_>>();
+                    if segments.starts_with(&child_path_segments) {
+                        segments = &segments[child_path_segments.len()..];
+                        if segments.is_empty() {
+                            return Some(child);
+                        }
+                        children = child.children.read().await.values().cloned().collect::<Vec<_>>();
                     }
                 }
+                // Skip empty paths by checking their children
+                None => {
+                    children.extend(child.children.read().await.values().cloned());
+                }
             }
-            Some(curr)
-        } else {
-            todo!()
         }
+        None
     }
 
     pub(crate) fn parent(&self) -> Option<&Scope> {
@@ -186,7 +200,6 @@ impl Scope {
         }
         let mut scope_data = self.data.write().await;
         if let Some(data) = scope_data.created.remove(&data_type) {
-            scope_data.visible.remove(&data_type);
             if let Some(Dependency::Linked(_)) = scope_data.dependencies.remove(&data_type) {
                 drop(scope_data);
                 log::debug!(
@@ -205,11 +218,7 @@ impl Scope {
     #[async_recursion]
     async fn propagate_data(&self, data_type: TypeId, creator_scope: &Scope) {
         log::debug!("Propagating data to {:x}", self.id.as_fields().0);
-        let mut scope_data = self.data.write().await;
-        scope_data.visible.insert(data_type, creator_scope.clone());
-        let dep = scope_data.dependencies.remove(&data_type);
-        drop(scope_data);
-        if let Some(dep) = dep {
+        if let Some(dep) = self.data.write().await.dependencies.remove(&data_type) {
             let data = creator_scope.data.read().await.created.get(&data_type).unwrap().clone();
             dep.get_signal().signal(data).await;
 
@@ -228,16 +237,14 @@ impl Scope {
             log::warn!("Tried to get data from invalid scope {:x}", self.id.as_fields().0);
             return None;
         }
-        let scope_data = self.data.read().await;
-        let visible = scope_data.visible.get(&data_type).cloned();
-        drop(scope_data);
-        match visible {
-            Some(creator_scope) => {
-                let scope_data = creator_scope.data.read().await;
-                scope_data.created.get(&data_type).cloned().map(|data| DepReady(data))
+        let mut curr = Some(self);
+        while let Some(scope) = curr {
+            match scope.data.read().await.created.get(&data_type) {
+                Some(data) => return Some(DepReady(data.clone())),
+                None => curr = scope.parent.as_ref(),
             }
-            None => None,
         }
+        None
     }
 
     /// Get some arbitrary data from the given scope or a signal to await its creation

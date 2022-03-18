@@ -148,7 +148,7 @@ impl HandleEvent<LauncherEvent> for Launcher {
     ) -> Result<(), ActorError> {
         match event {
             LauncherEvent::Shutdown { using_ctrl_c: _ } => {
-                cx.root_scope().shutdown().await;
+                cx.root().shutdown().await;
             }
         }
         Ok(())

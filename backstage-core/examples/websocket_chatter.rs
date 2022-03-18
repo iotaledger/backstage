@@ -77,7 +77,7 @@ impl HandleEvent<HelloWorldEvent> for HelloWorld {
                 info!("HelloWorld printing: {}", s);
                 *count += 1;
                 if *count == 3 {
-                    debug!("\n{}", cx.root_scope().service_tree().await);
+                    debug!("\n{}", cx.root().service_tree().await);
                     panic!("I counted to 3!");
                 }
             }

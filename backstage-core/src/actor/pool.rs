@@ -55,7 +55,7 @@ where
     Act<Self::Actor>: Clone,
 {
     /// The key that identifies each handle in the pool
-    type Key: Send + Sync;
+    type Key: Send + Sync + ToString;
 
     /// Push a handle into the pool
     async fn push(&self, key: Self::Key, handle: Act<Self::Actor>);
@@ -379,7 +379,7 @@ where
 }
 
 #[async_trait]
-impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq + std::fmt::Debug> KeyedActorPool
+impl<A: 'static + Actor + Send + Sync, M: Hash + Clone + Send + Sync + Eq + std::fmt::Debug + ToString> KeyedActorPool
     for MapPool<A, M>
 where
     Act<A>: Clone,
