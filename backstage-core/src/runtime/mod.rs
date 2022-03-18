@@ -54,6 +54,7 @@ pub struct ScopeInner {
     shutdown_handle: Option<ShutdownHandle>,
     abort_handle: Option<AbortHandle>,
     parent: Option<Scope>,
+    children: RwLock<HashMap<ScopeId, Scope>>,
     path: Option<&'static str>,
 }
 
@@ -63,7 +64,6 @@ pub struct ScopeMutData {
     created: HashMap<TypeId, Box<dyn CloneAny + Send + Sync>>,
     visible: HashMap<TypeId, Scope>,
     dependencies: HashMap<TypeId, Dependency>,
-    children: HashMap<ScopeId, Scope>,
 }
 
 impl Scope {
@@ -75,6 +75,7 @@ impl Scope {
                 shutdown_handle: Default::default(),
                 abort_handle: Some(abort_handle),
                 parent: None,
+                children: Default::default(),
                 path: None,
             }),
             service: Service::new(ROOT_SCOPE, "root"),
@@ -99,17 +100,17 @@ impl Scope {
                     created: Default::default(),
                     visible: visible_data,
                     dependencies: Default::default(),
-                    children: Default::default(),
                 }),
                 shutdown_handle,
                 abort_handle,
                 parent: Some(parent),
+                children: Default::default(),
                 path,
             }),
             service: Service::new(id, name(id)),
             valid: Arc::new(AtomicBool::new(true)),
         };
-        self.data.write().await.children.insert(id, child.clone());
+        self.children.write().await.insert(id, child.clone());
         child
     }
 
@@ -127,14 +128,15 @@ impl Scope {
         if path.is_absolute() {
             let mut curr = self.find(ROOT_SCOPE).unwrap();
             for segment in path.iter() {
-                let children = curr.data.read().await.children.values().cloned().collect::<Vec<_>>();
+                let children = curr.children.read().await;
                 if children.is_empty() {
                     return None;
                 }
-                for child in children.iter() {
+                for child in children.values() {
                     // TODO: somehow handle skipping levels if there are no matching paths
                     if segment.to_str() == self.path {
                         let found = child.clone();
+                        drop(children);
                         curr = found;
                         break;
                     }
@@ -150,13 +152,21 @@ impl Scope {
         self.parent.as_ref()
     }
 
+    pub(crate) async fn siblings(&self) -> Vec<Scope> {
+        if let Some(parent) = self.parent.as_ref() {
+            parent.children.read().await.values().cloned().collect()
+        } else {
+            vec![]
+        }
+    }
+
     pub(crate) async fn children(&self) -> Vec<Scope> {
-        self.data.read().await.children.values().cloned().collect()
+        self.children.read().await.values().cloned().collect()
     }
 
     pub(crate) async fn drop(&self) {
         if let Some(parent) = self.parent.as_ref() {
-            parent.data.write().await.children.remove(&self.id);
+            parent.children.write().await.remove(&self.id);
         }
     }
 
@@ -198,7 +208,6 @@ impl Scope {
         let mut scope_data = self.data.write().await;
         scope_data.visible.insert(data_type, creator_scope.clone());
         let dep = scope_data.dependencies.remove(&data_type);
-        let children = scope_data.children.values().cloned().collect::<Vec<_>>();
         drop(scope_data);
         if let Some(dep) = dep {
             let data = creator_scope.data.read().await.created.get(&data_type).unwrap().clone();
@@ -208,7 +217,7 @@ impl Scope {
                 self.data.write().await.dependencies.insert(data_type, dep);
             }
         }
-        for child_scope in children.iter() {
+        for child_scope in self.children.read().await.values() {
             child_scope.propagate_data(data_type, creator_scope).await;
         }
     }
@@ -289,9 +298,8 @@ impl Scope {
 
     #[async_recursion]
     pub(crate) async fn service_tree(&self) -> ServiceTree {
-        let children = self.data.read().await.children.values().cloned().collect::<Vec<_>>();
         let mut child_svs = Vec::new();
-        for child_scope in children.iter() {
+        for child_scope in self.children.read().await.values() {
             child_svs.push(child_scope.service_tree().await);
         }
         ServiceTree {
@@ -318,12 +326,10 @@ impl Scope {
     #[async_recursion]
     async fn abort(&self) {
         log::debug!("Aborting scope {:x}", self.id.as_fields().0);
-        let data = self.data.write().await.dependencies.drain().collect::<Vec<_>>();
-        for (_, dep) in data {
+        for (_, dep) in self.data.write().await.dependencies.drain() {
             dep.into_signal().cancel()
         }
-        let children = self.data.read().await.children.values().cloned().collect::<Vec<_>>();
-        for child_scope in children.iter() {
+        for child_scope in self.children.read().await.values() {
             child_scope.abort().await;
         }
         if let Some(handle) = self.shutdown_handle.as_ref() {

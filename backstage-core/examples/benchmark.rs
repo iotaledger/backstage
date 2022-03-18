@@ -82,7 +82,7 @@ impl HandleEvent<Report<Launcher>> for Spawner {
     async fn handle_event(
         &mut self,
         cx: &mut Self::Context,
-        event: Report<Launcher>,
+        _event: Report<Launcher>,
         _data: &mut Self::Data,
     ) -> Result<(), ActorError> {
         cx.shutdown().await;
@@ -213,6 +213,11 @@ async fn startup() -> anyhow::Result<()> {
     })
     .await?;
     info!("Total actors spawned: {}", counter.load(Ordering::Relaxed));
-    info!("Total time: {} ms", start.elapsed().unwrap().as_millis());
+    let elapsed = start.elapsed().unwrap().as_millis();
+    if elapsed > 10000 {
+        info!("Total time: {} s", elapsed / 1000);
+    } else {
+        info!("Total time: {} ms", elapsed);
+    }
     Ok(())
 }

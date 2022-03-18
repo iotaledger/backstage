@@ -50,17 +50,28 @@ impl ScopeView {
         self.0.parent().cloned().map(ScopeView)
     }
 
+    pub async fn siblings(&self) -> Vec<ScopeView> {
+        if let Some(parent) = self.0.parent() {
+            parent.children.read().await.values().cloned().map(ScopeView).collect()
+        } else {
+            vec![]
+        }
+    }
+
     /// Get the child scopes
     pub async fn children(&self) -> Vec<ScopeView> {
-        self.0
-            .data
-            .read()
-            .await
-            .children
-            .values()
-            .cloned()
-            .map(ScopeView)
-            .collect()
+        self.0.children.read().await.values().cloned().map(ScopeView).collect()
+    }
+
+    /// Call child services
+    ///
+    /// ...uh oh
+    pub async fn child_services(&self) -> Vec<ServiceView> {
+        let mut res = Vec::new();
+        for child in self.0.children.read().await.values() {
+            res.push(child.service.view().await);
+        }
+        res
     }
 
     pub(crate) async fn add_data<T: 'static + Send + Sync + Clone>(&self, data: T) {
