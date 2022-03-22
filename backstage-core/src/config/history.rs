@@ -100,11 +100,12 @@ impl<C: Config + FileSystemConfig> FileSystemConfig for HistoricalConfig<C> {
     }
 }
 
-impl<C: Config> Persist for HistoricalConfig<C>
+impl<C: Config + SerializableConfig> Persist for HistoricalConfig<C>
 where
     C: FileSystemConfig,
 {
     fn persist(&self) -> anyhow::Result<()> {
+        debug!("inside historical config", );
         let dir = Self::dir();
         debug!("Persisting historical config to {}", dir.to_string_lossy());
         if !dir.exists() {
@@ -209,7 +210,7 @@ where
         self.records.iter()
     }
 }
-impl<C: Config + Persist + FileSystemConfig + DeserializeOwned> History<HistoricalConfig<C>> {
+impl<C:  LoadableConfig + Config + SerializableConfig + Persist + FileSystemConfig + DeserializeOwned> History<HistoricalConfig<C>> {
     /// Load the historical config from the file system
     pub fn load<M: Into<Option<usize>>>(max_records: M) -> anyhow::Result<Self> {
         let mut history = max_records
@@ -272,8 +273,7 @@ where
             latest.deref().persist()?;
             for v in iter {
                 debug!("Persisting historical config! {:?}", v);
-                //<HistoricalConfig<C> as Persist>::persist(&v)?;
-                v.persist()?;
+                <HistoricalConfig<C> as Persist>::persist(&v)?;
             }
         }
         Ok(())

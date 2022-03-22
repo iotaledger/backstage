@@ -29,7 +29,7 @@ pub trait DefaultFileLoad {}
 
 impl<T> SerializableConfig for T
 where
-    T: FileSystemConfig + DefaultFileSave + Serialize,
+    T: FileSystemConfig + Serialize,
 {
     fn save(&self) -> anyhow::Result<()> {
         let dir = T::dir();

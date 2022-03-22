@@ -61,8 +61,8 @@ mod test;
 pub const DEFAULT_FILENAME: &str = "config";
 
 /// Defines a configuration file which can be loaded and saved
-pub trait Config: LoadableConfig + SerializableConfig + Default + Clone + PartialEq + Debug {}
-impl<T: LoadableConfig + SerializableConfig + Default + Clone + PartialEq + Debug> Config for T {}
+pub trait Config: Default + Clone + PartialEq + Debug + serde::Serialize {}
+impl<T: Default + Clone + PartialEq + Debug + serde::Serialize> Config for T {}
 
 /// Defines a wrapper type which wraps a dereference-able inner value
 pub trait Wrapper: Deref {
