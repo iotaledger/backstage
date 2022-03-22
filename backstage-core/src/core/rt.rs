@@ -1132,7 +1132,13 @@ where
     where
         A: 'static + ChannelBuilder<<A as Actor<NullSupervisor>>::Channel> + Actor<NullSupervisor> + Send + Sync,
         <A as Actor<NullSupervisor>>::Channel: Channel<Handle = H>,
-        A: FileSystemConfig + DeserializeOwned + std::fmt::Debug + Serialize + Resource + std::default::Default + Config,
+        A: FileSystemConfig
+            + DeserializeOwned
+            + std::fmt::Debug
+            + Serialize
+            + Resource
+            + std::default::Default
+            + Config,
         H: Shutdown + Clone,
         VersionedValue<A>: DeserializeOwned,
         <A as FileSystemConfig>::ConfigType: ValueType,

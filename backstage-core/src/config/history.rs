@@ -319,17 +319,18 @@ where
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         // subscribe to get updated config copies
         if let Some(config) = rt.subscribe(0, "config".to_string()).await? {
-            let version_config = VersionedConfig {
-                version: C::CURRENT_VERSION,
-                config,
-            };
-            self.update(version_config.clone());
-            self.persist().map_err(|e| {
-                log::error!("Config History persist error: {:?}", e);
-                ActorError::exit(e)
-            })?;
-            log::info!("Config History Actor updated config: {:#?}", version_config);
-
+            if self.latest().config != config {
+                let version_config = VersionedConfig {
+                    version: C::CURRENT_VERSION,
+                    config,
+                };
+                self.update(version_config.clone());
+                self.persist().map_err(|e| {
+                    log::error!("Config History persist error: {:?}", e);
+                    ActorError::exit(e)
+                })?;
+                log::info!("Config History Actor updated config: {:#?}", version_config);
+            }
         };
         log::info!("Config History Actor got initialized");
         Ok(())

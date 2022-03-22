@@ -1,11 +1,28 @@
 // Copyright 2021 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{bail, file::*, persist::Persist, LoadableConfig, SerializableConfig};
-use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+use super::{
+    bail,
+    file::*,
+    persist::Persist,
+    LoadableConfig,
+    SerializableConfig,
+};
+use serde::{
+    de::DeserializeOwned,
+    Deserialize,
+    Deserializer,
+    Serialize,
+};
 use std::{
-    convert::{TryFrom, TryInto},
-    ops::{Deref, DerefMut},
+    convert::{
+        TryFrom,
+        TryInto,
+    },
+    ops::{
+        Deref,
+        DerefMut,
+    },
 };
 
 /// Version marker
