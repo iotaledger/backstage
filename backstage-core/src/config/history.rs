@@ -30,13 +30,14 @@ use serde::{
 };
 
 /// A historical record
-#[derive(Serialize, Deserialize, PartialEq, Eq, Default, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Default, Debug)]
 pub struct HistoricalConfig<C: Config> {
     #[serde(bound(deserialize = "C: DeserializeOwned"))]
     config: C,
     /// The timestamp representing when this record was created
     pub created: u128,
 }
+impl<C: Config> std::cmp::Eq for HistoricalConfig<C> {}
 
 impl<C: Config> HistoricalConfig<C> {
     /// Create a new historical record with the current timestamp
@@ -296,14 +297,14 @@ impl<C, S> Actor<S> for History<HistoricalConfig<VersionedConfig<C>>>
 where
     C: Resource
         + Serialize
-        + std::cmp::Eq
         + Actor<NullSupervisor>
         + Resource
         + std::fmt::Debug
         + CurrentVersion
         + FileSystemConfig
         + DeserializeOwned
-        + Default,
+        + Default
+        + Config,
     S: SupHandle<Self>,
     VersionedValue<C>: DeserializeOwned,
     <C as FileSystemConfig>::ConfigType: ValueType,
@@ -318,18 +319,17 @@ where
     async fn init(&mut self, rt: &mut Rt<Self, S>) -> ActorResult<Self::Data> {
         // subscribe to get updated config copies
         if let Some(config) = rt.subscribe(0, "config".to_string()).await? {
-            if self.latest().config != config {
-                let version_config = VersionedConfig {
-                    version: C::CURRENT_VERSION,
-                    config,
-                };
-                self.update(version_config.clone());
-                self.persist().map_err(|e| {
-                    log::error!("Config History persist error: {:?}", e);
-                    ActorError::exit(e)
-                })?;
-                log::info!("Config History Actor updated config: {:#?}", version_config);
-            }
+            let version_config = VersionedConfig {
+                version: C::CURRENT_VERSION,
+                config,
+            };
+            self.update(version_config.clone());
+            self.persist().map_err(|e| {
+                log::error!("Config History persist error: {:?}", e);
+                ActorError::exit(e)
+            })?;
+            log::info!("Config History Actor updated config: {:#?}", version_config);
+
         };
         log::info!("Config History Actor got initialized");
         Ok(())

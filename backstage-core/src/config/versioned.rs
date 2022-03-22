@@ -22,7 +22,7 @@ where
 }
 
 /// A versioned configuration
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct VersionedConfig<C>
 where
     C: CurrentVersion,
